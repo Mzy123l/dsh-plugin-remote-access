@@ -4,11 +4,15 @@
  * 注册位置：settings.section（设置左侧导航的一页）。插件页那两处（plugins.row.config /
  * plugins.bundle.config）按使用要求已移除。
  *
- * 读写通道（全部带返回值检查与页面内诊断，避免"显示成功实则没写"）：
- *  读：remote.pluginManager.listPlugins()  —— 官方清单，带行与它们的实时 config
- *  写：依次尝试 ctx.configForms.get(行id).set(field, value)
- *              → remote.settings.mutate(行id, [{ op:'set', path, value }], revision)
- *      两者都失败时，把当前值按 YAML 打出来让用户粘贴（保证不会卡死）
+ * 写盘通道 = 官方唯一通道：ctx.configForms.get(命名空间)
+ *   命名空间就是 Loader 条目的 options.id，也就是 cordis.patch.yml 里那一行的 id（remote-access）。
+ *   读：form.getSnapshot() → { status, value, base, user, revision, writable, mode }
+ *   写：form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>
+ *   Host 侧落到 profile 的 patch 层（cordis.patch.yml），并按 Loader 正常路径重新挂载插件。
+ *
+ * 注意：configForms 在「命名空间没被 Host 服务」时只会静默返回 false，
+ * 所以这里把 status / writable / mode / revision 与已服务命名空间一并摆在页面上，
+ * 失败必须看得见（同 AGENTS.md 的硬约定）。
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-remote-access',
@@ -16,8 +20,7 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    const PACKAGE = '@local/dsh-remote-access';
-    const ROW_ID = 'remote-access';
+    const NS = 'remote-access';
     const STATUS_HINT = 'DSH 家目录\\remote-access-url.txt';
 
     const FIELDS = [
@@ -88,116 +91,53 @@ window.__ModuleLoader__.load({
       return value;
     }
 
-    /** 从 pluginManager.listPlugins() 的结果里抠出自己这一行的 config */
-    function configFromInventory(inventory) {
-      const buckets = [];
-      if (Array.isArray(inventory)) buckets.push(...inventory);
-      else if (inventory && typeof inventory === 'object') {
-        for (const value of Object.values(inventory)) if (Array.isArray(value)) buckets.push(...value);
+    /** 把 Host 快照里的 value 摊成草稿（缺字段回落到本地默认值，保证表单永远可编辑） */
+    function draftFrom(value) {
+      const source = value && typeof value === 'object' ? value : {};
+      const next = {};
+      for (const field of FIELDS) next[field.key] = decode(field, source[field.key]);
+      return next;
+    }
+
+    /** status 不是 ready 时说清「为什么写不进去」 */
+    function whyNotReady(snap) {
+      if (snap?.status === 'loading') return '设置文档还在读取，稍等一下再保存。';
+      if (snap?.status === 'unavailable') {
+        return '这一行没有被 Host 服务：要么插件的 Config 里没有 volatile 字段，要么当前页面不是回环地址（DSH 规定非回环页面不写 Host 设置，只留在浏览器内存里）。';
       }
-      for (const entry of buckets) {
-        if (!entry || typeof entry !== 'object') continue;
-        const name = entry.name ?? entry.package ?? entry.id;
-        const rowId = entry.rowId ?? entry.entryId ?? entry.id;
-        if (name === PACKAGE || rowId === ROW_ID || entry.id === ROW_ID) {
-          const config = entry.config ?? entry.resolvedConfig ?? entry.value;
-          if (config && typeof config === 'object') return config;
-        }
-      }
-      return undefined;
+      return `当前 status=${snap?.status ?? '(未知)'}。`;
     }
 
     return {
-      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
-      inject: ['slots', 'configForms', 'remote', 'remote.pluginManager', 'remote.settings'],
+      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"。
+      // remote / remote.settings 已不再需要：读写都走 configForms（它内部持有 remote.settings）。
+      inject: ['slots', 'configForms'],
       apply(ctx) {
-        const diagnostics = [];
-        const diag = (line) => {
-          diagnostics.push(line);
-          return line;
+        // ui-settings 提供的共享表单控制器：同一个条目在浏览器里只有一个实例，
+        // 生命周期归提供方，我们只订阅，不 dispose。
+        const form = ctx.configForms.get(NS);
+        const describe = ctx.configForms.describe();
+        const reload = () => {
+          try {
+            return Promise.resolve(describe?.load?.());
+          } catch {
+            return Promise.resolve();
+          }
         };
 
+        /** 已服务的命名空间（Host 侧设置文档的快照）——写不进时的第一手线索 */
         function servedNamespaces() {
           try {
-            const described = ctx.configForms.describe?.();
-            const snap =
-              typeof described?.getSnapshot === 'function' ? described.getSnapshot() : described;
-            const list =
-              snap?.namespaces ?? snap?.entries ?? (snap && typeof snap === 'object' ? Object.keys(snap) : []);
-            return Array.isArray(list) ? list : [];
-          } catch (err) {
-            diag(`describe() 失败: ${err?.message ?? err}`);
+            const snap = describe?.getSnapshot?.();
+            const list = snap?.view?.namespaces;
+            return Array.isArray(list) ? list.map((row) => row.ns) : [];
+          } catch {
             return [];
           }
         }
 
-        async function readFromInventory() {
-          try {
-            const inventory = await ctx.remote.pluginManager.listPlugins();
-            const config = configFromInventory(inventory);
-            if (config) diag('读：来自 remote.pluginManager.listPlugins()');
-            else diag('读：清单里没找到本行的 config，退回快照/默认值');
-            return config;
-          } catch (err) {
-            diag(`读：listPlugins() 失败 ${err?.message ?? err}`);
-            return undefined;
-          }
-        }
-
-        /** 返回值检查：false / 带 error 的对象都算失败 */
-        function checkResult(result) {
-          if (result === false) return { ok: false, why: '返回 false' };
-          if (result && typeof result === 'object') {
-            if (result.error) return { ok: false, why: `返回 error: ${JSON.stringify(result.error).slice(0, 200)}` };
-            if (result.accepted === false || result.ok === false)
-              return { ok: false, why: `返回 ${JSON.stringify(result).slice(0, 200)}` };
-          }
-          return { ok: true, why: result === undefined ? '无返回值（视为通过）' : `返回 ${JSON.stringify(result).slice(0, 120)}` };
-        }
-
-        async function writeAll(scope, draft) {
-          const revision = (() => {
-            try {
-              const snap = typeof scope?.snapshot === 'function' ? scope.snapshot() : scope;
-              return snap?.revision;
-            } catch {
-              return undefined;
-            }
-          })();
-          const tries = [];
-          for (const field of FIELDS) {
-            const value = encode(field, draft[field.key]);
-            let done = false;
-            if (typeof scope?.set === 'function') {
-              try {
-                const result = await scope.set(field.key, value);
-                const verdict = checkResult(result);
-                tries.push(`configForms.set(${field.key}) → ${verdict.why}`);
-                if (verdict.ok) done = true;
-              } catch (err) {
-                tries.push(`configForms.set(${field.key}) 抛错: ${err?.message ?? err}`);
-              }
-            }
-            if (!done && typeof ctx.remote?.settings?.update === 'function') {
-              for (const ns of [ROW_ID, PACKAGE]) {
-                if (done) break;
-                try {
-                  const result = await ctx.remote.settings.update(ns, { [field.key]: value }, revision);
-                  const verdict = checkResult(result);
-                  tries.push(`settings.update(${ns}, ${field.key}) → ${verdict.why}`);
-                  if (verdict.ok) done = true;
-                } catch (err) {
-                  tries.push(`settings.update(${ns}, ${field.key}) 抛错: ${err?.message ?? err}`);
-                }
-              }
-            }
-            if (!done) throw new Error(`字段 ${field.key} 没有写成功：\n${tries.join('\n')}`);
-          }
-          return tries;
-        }
-
         function yamlSnippet(draft) {
-          const lines = [`- id: ${ROW_ID}`, `  name: '${PACKAGE}'`, '  config:'];
+          const lines = [`- id: ${NS}`, "  name: '@local/dsh-remote-access'", '  config:'];
           for (const field of FIELDS) {
             const value = encode(field, draft[field.key]);
             if (field.type === 'list') {
@@ -211,66 +151,65 @@ window.__ModuleLoader__.load({
         }
 
         function Panel() {
-          const [scope] = React.useState(() => {
-            try {
-              return { value: ctx.configForms.get(ROW_ID) };
-            } catch (err) {
-              return { error: String(err?.message ?? err) };
-            }
-          });
+          const [snap, setSnap] = React.useState(() => form.getSnapshot());
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
-          const [tries, setTries] = React.useState([]);
           const [busy, setBusy] = React.useState(false);
+          const revisionRef = React.useRef(snap.revision);
 
-          const load = React.useCallback(async () => {
-            const fromInventory = await readFromInventory();
-            const snapshotValue = (() => {
-              try {
-                const s = typeof scope.value?.snapshot === 'function' ? scope.value.snapshot() : scope.value;
-                const v = s?.value ?? s?.user;
-                return v && typeof v === 'object' ? v : {};
-              } catch {
-                return {};
-              }
-            })();
-            const source = { ...snapshotValue, ...(fromInventory ?? {}) };
-            const next = {};
-            for (const field of FIELDS) next[field.key] = decode(field, source[field.key]);
-            return next;
-          }, [scope.value]);
+          // 订阅共享表单：Host 每次刷新设置文档都会推一个新快照过来
+          React.useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), []);
 
+          // 快照换版（首次就绪、外部改动、保存回执）→ 丢掉草稿，用新值重画
           React.useEffect(() => {
-            let alive = true;
-            load().then((next) => {
-              if (alive) setDraft(next);
-            });
-            return () => {
-              alive = false;
-            };
-          }, [load]);
+            if (revisionRef.current === snap.revision) return;
+            revisionRef.current = snap.revision;
+            setDraft(null);
+          }, [snap.revision]);
 
-          if (draft === null) return h('div', null, '读取中…');
-
-          const setField = (key, value) => setDraft({ ...draft, [key]: value });
+          const current = draft ?? draftFrom(snap.value);
+          const setField = (key, value) => setDraft({ ...current, [key]: value });
 
           const onSave = async () => {
             setBusy(true);
             setStatus('保存中…');
-            setTries([]);
             try {
-              if (scope.error) throw new Error(`拿不到写入通道：${scope.error}`);
-              const attempted = await writeAll(scope.value, draft);
-              setTries(attempted.slice(-4));
-              const verify = await load();
-              setDraft(verify);
-              const changed = FIELDS.some((f) => JSON.stringify(verify[f.key]) !== JSON.stringify(draft[f.key]));
-              setStatus(changed ? '写入返回成功，但回读发现值没变 —— 说明这条路没真正落盘。' : '已保存。插件会重新挂载：端口可能变化，新网址见状态文件。');
+              const now = form.getSnapshot();
+              if (now.status !== 'ready') throw new Error(`这一行现在不可写。${whyNotReady(now)}`);
+              if (now.writable !== true) {
+                throw new Error(`Host 现在不接受设置写入（writable=${String(now.writable)}，mode=${now.mode ?? '?'}）。`);
+              }
+              const ops = [];
+              for (const field of FIELDS) {
+                const next = encode(field, current[field.key]);
+                if (JSON.stringify(next) !== JSON.stringify(now.value?.[field.key])) {
+                  ops.push({ op: 'set', path: [field.key], value: next });
+                }
+              }
+              if (ops.length === 0) {
+                setStatus('没有改动，未写入。');
+                return;
+              }
+              const accepted = await form.mutate(ops, now.revision);
+              if (accepted !== true) {
+                throw new Error(
+                  `Host 拒绝了这次写入（返回 ${String(accepted)}）——通常是 revision 冲突或命名空间已停止服务；页面已重读，请对照后重试。`,
+                );
+              }
+              setStatus(
+                `已写入 ${ops.length} 个字段，落在 profile 的 patch 层。插件随即重新挂载：端口可能变化，新的带票网址见 ${STATUS_HINT}`,
+              );
             } catch (err) {
               setStatus(`保存失败：${err?.message ?? err}`);
             } finally {
               setBusy(false);
             }
+          };
+
+          const onReload = () => {
+            setStatus('');
+            setDraft(null);
+            reload().then(() => setSnap(form.getSnapshot()));
           };
 
           const rowStyle = {
@@ -293,7 +232,7 @@ window.__ModuleLoader__.load({
           const hintStyle = { gridColumn: '2', opacity: 0.65, fontSize: '0.92em' };
 
           const rows = FIELDS.flatMap((field) => {
-            const value = draft[field.key];
+            const value = current[field.key];
             let input;
             if (field.type === 'boolean') {
               input = h('input', {
@@ -343,7 +282,8 @@ window.__ModuleLoader__.load({
             ];
           });
 
-          const namespaceServed = servedNamespaces().includes(ROW_ID);
+          const served = servedNamespaces();
+          const ready = snap.status === 'ready';
 
           return h(
             'div',
@@ -359,49 +299,41 @@ window.__ModuleLoader__.load({
               'div',
               { style: { marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' } },
               h('button', { type: 'button', onClick: onSave, disabled: busy }, busy ? '保存中…' : '保存'),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  disabled: busy,
-                  onClick: () => {
-                    setStatus('');
-                    setTries([]);
-                    load().then(setDraft);
-                  },
-                },
-                '重新读取',
-              ),
+              h('button', { type: 'button', disabled: busy, onClick: onReload }, '重新读取'),
               status ? h('span', { style: { opacity: 0.9 } }, status) : null,
             ),
-            tries.length
-              ? h(
-                  'div',
-                  { style: { ...mono, display: 'block', marginTop: 8, whiteSpace: 'pre-wrap' } },
-                  tries.join('\n'),
-                )
-              : null,
             note(
               { opacity: 0.8 },
               '诊断：命名空间 ',
-              code(ROW_ID),
-              namespaceServed ? ' 已在已服务列表中' : ' **不在**已服务列表中（这通常意味着这条路写不进去）',
-              diagnostics.length ? `；${diagnostics.join('；')}` : '',
+              code(NS),
+              ` → status=${snap.status ?? '?'}，revision=${snap.revision ?? '?'}，writable=${String(snap.writable)}，mode=${snap.mode ?? '?'}；Host 已服务的命名空间：`,
+              served.length ? served.join(', ') : '（还没有）',
+            ),
+            ready
+              ? null
+              : note({ opacity: 0.8 }, whyNotReady(snap)),
+            note(
+              { opacity: 0.8 },
+              '保存会写进 profile 的 ',
+              code('cordis.patch.yml'),
+              '（那一行的 ',
+              code('config'),
+              '），所以重启也不会丢；写完插件立即重新挂载。',
             ),
             note(
               { opacity: 0.8 },
-              '如果保存失败，可以把下面这段贴进 profile 的 ',
+              '如果保存一直失败（例如在手机的非回环页面上打开本页——DSH 不允许那种页面写 Host 设置），可以把下面这段贴进 profile 的 ',
               code('cordis.patch.yml'),
-              '（把 ',
+              '（替换 ',
               code('- insert:'),
-              ' 里那一行的 config 换成它），然后重启 DSH：',
+              ' 里那一行的 config），然后重启 DSH：',
             ),
-            h('pre', { style: { ...mono, display: 'block', marginTop: 6, whiteSpace: 'pre-wrap' } }, yamlSnippet(draft)),
+            h('pre', { style: { ...mono, display: 'block', marginTop: 6, whiteSpace: 'pre-wrap' } }, yamlSnippet(current)),
           );
         }
 
         ctx.slots.inject('settings.section', () =>
-          ctx.slots.register({ name: 'settings.section', id: ROW_ID, order: 100, label: '远程访问' }, Panel),
+          ctx.slots.register({ name: 'settings.section', id: NS, order: 100, label: '远程访问' }, Panel),
         );
       },
     };

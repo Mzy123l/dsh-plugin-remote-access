@@ -9,7 +9,7 @@
  *  4. 默认把 Host/Origin 改写成上游回环 authority，因此不必去改 client-connection 的配置；
  *  5. 无论成功失败都会写一份「自诊断文件」，把生效配置、上游探测、监听结果写清楚。
  *
- * 参数全部走 Config（插件页里可直接改），零第三方依赖。
+ * 参数全部走 Config（在「设置 → 远程访问」里改），零第三方依赖。
  */
 
 import http from 'node:http';
@@ -18,41 +18,56 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
-// 可选加载 cordis 的 Schema：在 DSH 里能解析到（随安装提供）；
-// 在纯 node 环境（例如 tools/test-remote-access.mjs）拿不到就降级成「无 schema」，插件照常工作。
-const cordis = await import('@deepseek-ai/cordis').catch(() => null);
-const Schema = cordis?.Schema;
-const withDesc = (s, text) => (s && typeof s.description === 'function' ? s.description(text) : s);
+// DSH 的 Config 协议就是 Schemastery（用 Symbol.for('schemastery') 认领原生 schema）。
+// 该包由 DSH 安装目录随运行时提供：DSH 会拦截 Node 的模块解析，把安装作用域的包
+// 供给 profile 里的插件（@deepseek-ai/dsh-app-boot 的 installRuntimeInterception），
+// 所以这里可以按裸名 import——注意包名是 schemastery，不是 cordis。
+// 在纯 node 环境（tools/ 下的独立测试）解析不到，就降级成「无 schema」，插件照常工作，
+// 只是「设置 → 远程访问」写不进去。
+const schemastery = await import('@deepseek-ai/schemastery').catch(() => null);
+const Schema = schemastery?.default ?? schemastery?.Schema ?? null;
 
-/** 插件页里这一行的配置表单（Schema 缺失时导出 undefined） */
+/**
+ * 字段必须标 volatile，Host 才会把它放进「设置」的表单里：
+ * Host 的设置文档由 volatileForm / isVolatilePath 过滤，只服务「含 volatile 字段」的条目，
+ * 没有 volatile 字段的条目根本不出现在设置文档里（configForms.set 会静默返回 false）。
+ * 这不是「免重启」：Cordis 收到配置变化一律走 fiber.restart()，本插件会重新挂载。
+ * 本插件 14 个字段都是运行期参数，所以全部标 volatile。
+ */
+const hot = (s) => (s && typeof s.volatile === 'function' ? s.volatile() : s);
+const withDesc = (s, text) => (s && typeof s.description === 'function' ? s.description(text) : s);
+/** volatile + 说明文案，一步到位 */
+const field = (s, text) => withDesc(hot(s), text);
+
+/** 这一行的配置表单（Schema 缺失时导出 undefined） */
 export const Config = Schema
   ? Schema.object({
-      enabled: withDesc(Schema.boolean().default(true), '总开关：关掉即停止监听，不需要卸载插件'),
-      allowCidrs: withDesc(
+      enabled: field(Schema.boolean().default(true), '总开关：关掉即停止监听，不需要卸载插件'),
+      allowCidrs: field(
         Schema.array(Schema.string()).default(['100.64.0.0/10']),
         '允许来访的网段（唯一的安全边界）；listen 为 auto 时也用它挑选本机要监听的地址',
       ),
-      denyCidrs: withDesc(Schema.array(Schema.string()).default([]), '白名单内的例外黑名单，例如排除某台机器'),
-      listen: withDesc(
+      denyCidrs: field(Schema.array(Schema.string()).default([]), '白名单内的例外黑名单，例如排除某台机器'),
+      listen: field(
         Schema.array(Schema.string()).default(['auto']),
         "要监听的本机地址；['auto'] = 只监听 allowCidrs 里属于本机的地址",
       ),
-      port: withDesc(Schema.natural().max(65535).default(0), '监听端口；0 = 系统随机（想存书签就固定，如 19388）'),
-      maxConnections: withDesc(Schema.natural().default(64), '并发连接上限；0 = 不限制'),
-      allowWebSocket: withDesc(Schema.boolean().default(true), '是否透传 WebSocket —— 界面靠它实时推送，一般别关'),
-      upstream: withDesc(
+      port: field(Schema.natural().max(65535).default(0), '监听端口；0 = 系统随机（想存书签就固定，如 19388）'),
+      maxConnections: field(Schema.natural().default(64), '并发连接上限；0 = 不限制'),
+      allowWebSocket: field(Schema.boolean().default(true), '是否透传 WebSocket —— 界面靠它实时推送，一般别关'),
+      upstream: field(
         Schema.string().default('auto'),
         "DSH 界面地址；'auto' = 自动探测，也可显式写 http://127.0.0.1:19387",
       ),
-      rewriteHost: withDesc(Schema.boolean().default(true), '把 Host/Origin 改写成上游回环地址（省去改 client-connection）'),
-      forwardClientHeaders: withDesc(Schema.boolean().default(true), '转发 x-forwarded-for / x-forwarded-proto'),
-      timeoutMs: withDesc(Schema.natural().default(0), '上游请求超时（毫秒）；0 = 不超时'),
-      urlFile: withDesc(
+      rewriteHost: field(Schema.boolean().default(true), '把 Host/Origin 改写成上游回环地址（省去改 client-connection）'),
+      forwardClientHeaders: field(Schema.boolean().default(true), '转发 x-forwarded-for / x-forwarded-proto'),
+      timeoutMs: field(Schema.natural().default(0), '上游请求超时（毫秒）；0 = 不超时'),
+      urlFile: field(
         Schema.string().default(''),
         '带票网址写到哪；留空 = <DSH_HOME>/remote-access-url.txt，填 off = 不写',
       ),
-      printUrl: withDesc(Schema.boolean().default(true), '把监听结果与网址同时打到 DSH 日志'),
-      logLevel: withDesc(Schema.string().default('info'), '日志详细程度：silent / info / debug（默认 info）'),
+      printUrl: field(Schema.boolean().default(true), '把监听结果与网址同时打到 DSH 日志'),
+      logLevel: field(Schema.string().default('info'), '日志详细程度：silent / info / debug（默认 info）'),
     })
   : undefined;
 
