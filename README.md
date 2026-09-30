@@ -144,7 +144,7 @@ DSH 默认用 `directory-picker-auto`：它判定「回环绑定 + 非 SSH + 有
 
 **设置页点了保存没反应 / 报失败** — 跑 `node tools/check-config-schema.mjs`，它会检查写盘的两个硬前提
 （`Config` 是原生 Schemastery schema 且字段都标了 `.volatile()`；`package.json` 把
-`@deepseek-ai/schemastery` 声明成了 peerDependency）。细节见 `HANDOFF.md`。
+`@deepseek-ai/schemastery` 声明成了 peerDependency）。改完 `package.json` 要重启一次 DSH 才生效。
 
 **手机在选目录里只能看到主目录** — 见上面「为什么只看到主目录」。
 
@@ -176,8 +176,7 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 | `locale/{zh,en}.json` | 插件页显示用的标题与说明 |
 | `icon.svg` | 插件页图标 |
 | `tools/` | 测试与从 `app.asar` 取文件的工具 |
-| `HANDOFF.md` | 维护者视角：DSH 内部事实、根因与踩坑记录 |
-| `AGENTS.md` | 本仓库的约定与现状（给 AI / 协作者看） |
+| `LICENSE` | MIT |
 
 ## 许可
 
