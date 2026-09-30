@@ -23,7 +23,8 @@
 
 ```bash
 node --check index.js                 # 语法检查
-node tools/test-remote-access.mjs     # 独立功能测试（起假上游，无需 DSH）
+node tools/test-remote-access.mjs     # Host 功能测试（起假上游，无需 DSH）
+node tools/test-client.mjs            # 客户端冒烟测试（极简 React/宿主桩子，不需要浏览器）
 node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验 Config（找不到安装包则 SKIP）
 ```
 
@@ -46,7 +47,7 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **别再自建 HTTP 端点去调 `configEditor.edit()`** —— 它会撞 HMR 事务（`HMR transactions cannot be nested`），
 而且「先回执再落盘」会把旧值当成功回报（用户看到的就是「显示已保存、实则回退」）。放行 cookie 的密钥独立存在
 `remote-access-secret`（与 `accessCode` 解耦，**改密码/重启都不踢人**，删文件才强制重新输）。
-独立测试 **28/28** 通过（含解锁/拉黑/热重载/改密码不踢人），Config 校验 **12/12**。
+独立测试 **28/28** 通过（含解锁/拉黑/热重载/改密码不踢人），客户端冒烟 **22/22**，Config 校验 **12/12**。
 手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
 
 **Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，7 项（启用 / 允许的网段 / 排除的网段 /
@@ -81,6 +82,9 @@ peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么�
 - **别在插件里自己建 HTTP 端点去调 `configEditor.edit()`**：请求回调跑在我们监听创建出来的异步链里，
   而 `hmr.runExclusive` 用 AsyncLocalStorage 判嵌套，会报 `HMR transactions cannot be nested`；
   真要在 Host 侧写盘，就走 Remote 通道让网关去跑（见 HANDOFF.md 第 4 节）；
+- **`ctx.remote.*` 返回的是 RemoteResult 信封**（`{ ok:true, value }` / `{ ok:false, error }`），不是裸数据，
+  必须拆开：官方镜像写的就是 `response.ok ? response.value : response.error.message`。当裸数据用会
+  「找不到命名空间 → 页面全空/全 0」；忘了查 `ok` 则「写入被拒也当成功」。这条有客户端冒烟测试兜着；
 - 改 JS 后**必须重启 DSH**；改 `Config` 默认值也算改 JS；
 - 提参数前先看 `Config.listConfigs` 里这一行的 `status`：不是 `schema` 就说明 Host 还不服务它；
 - 手动改 `cordis.patch.yml` **不触发**热重载（实测：改 `maxConnections` 3→7 盯 16 秒无反应），
@@ -95,5 +99,5 @@ peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么�
 | `HANDOFF.md` | 交接文档：现状、原卡点的根因判断链、已查明的 DSH 内部事实 |
 | `cordis.patch.yml` | bundle 的 patch：插入 `remote-access` 一行 + 默认配置 |
 | `package.json` | 清单（`dsh.bundle.patch` / `exports` / `icon` / `meta`） |
-| `tools/` | `test-remote-access.mjs` 功能测试；`check-config-schema.mjs` Config 校验；`asar-extract.mjs` 从 `app.asar` 取文件 |
+| `tools/` | `test-remote-access.mjs` Host 功能测试；`test-client.mjs` 客户端冒烟（React/宿主桩子）；`check-config-schema.mjs` Config 校验；`asar-extract.mjs` 从 `app.asar` 取文件 |
 | `docs/` | DSH 官方插件开发文档（本地参考，**已 gitignore，勿提交**） |

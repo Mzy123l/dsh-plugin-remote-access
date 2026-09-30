@@ -106,12 +106,17 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 
 ```bash
 node --check index.js                       # 语法
-node tools/test-remote-access.mjs           # 独立功能测试（无需 DSH，起一个假上游）
+node tools/test-remote-access.mjs           # Host 功能测试（无需 DSH，起一个假上游）
+node tools/test-client.mjs                  # 客户端冒烟测试（无需浏览器：极简 React/宿主桩子真跑一遍设置页）
 node tools/check-config-schema.mjs          # 用安装包里的真 Schemastery 校验 Config（找不到安装包则 SKIP）
 ```
 
 `tools/test-remote-access.mjs` 覆盖：转发、`Host`/`Origin` 改写、`x-forwarded-for`、WebSocket `101` 透传、
 网段外 `403`、拿不到令牌时的降级、状态文件与带票网址。
+
+`tools/test-client.mjs` 用一个极简的 React / 宿主桩子把 `client.js` 真跑一遍（注册、渲染、改字段、点保存，
+回环与手机两条通道各一遍），所以「手机上读不到值 / 报了成功却没写进去」这类只有真页面才暴露的问题，
+能在重启 DSH 之前就被测出来（Remote 通道返回的是 `{ ok, value }` 信封，这是最容易踩的一处）。
 
 `tools/check-config-schema.mjs` 覆盖「设置页写不写得进去」的硬前提：`peerDependencies` 是否声明了
 `@deepseek-ai/schemastery`（含版本范围容不容得下装着的版本）、`Config` 是否是原生 Schemastery schema、

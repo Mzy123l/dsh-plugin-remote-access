@@ -104,17 +104,25 @@ window.__ModuleLoader__.load({
         const describe = ctx.configForms.describe();
         const settings = ctx.remote.settings;
 
-        /** 远程页面（手机）读：Remote 通道，拿的是 Host 解析后的生效值 */
+        /**
+         * 远程页面（手机）读：Remote 通道。
+         * ctx.remote.* 返回的是 RemoteResult 信封（`{ ok, value }` / `{ ok:false, error }`），
+         * 不是裸数据 —— 官方镜像同样是 `response.ok ? response.value : response.error.message`。
+         * 信封当数据用，就会「找不到命名空间 → 页面全空/全 0」。
+         */
         async function readRemote() {
-          const view = await settings.describe();
-          const ns = namespaceOf(view);
+          const response = await settings.describe();
+          if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
+          const ns = namespaceOf(response.value);
           return { config: ns?.value ?? {}, revision: ns?.revision };
         }
 
-        /** 远程页面写：交给 Host 网关去跑（写盘完成才返回，返回值就是新值） */
+        /** 远程页面写：交给 Host 网关去跑（写盘完成才返回）；value 是单个命名空间视图 */
         async function writeRemote(changed, revision) {
           const ops = Object.entries(changed).map(([key, value]) => ({ op: 'set', path: [key], value }));
-          const view = await settings.mutate(NS, ops, revision);
+          const response = await settings.mutate(NS, ops, revision);
+          if (!response?.ok) throw new Error(response?.error?.message ?? '写入被拒绝');
+          const view = response.value;
           return { config: view?.value ?? { ...changed }, revision: view?.revision };
         }
 
@@ -144,13 +152,44 @@ window.__ModuleLoader__.load({
               return undefined;
             }
             let alive = true;
-            readRemote()
-              .then((next) => { if (alive) setRemote(next); })
-              .catch((err) => {
+            let timer;
+            let attempt = 0;
+            // 刚进页面时 Remote 连接可能还没就绪：失败就重试几次；
+            // 并且跟着官方镜像，在 connection/reset 与 settings/document-updated 时重读。
+            const load = async () => {
+              try {
+                const next = await readRemote();
+                if (!alive) return;
+                setRemote(next);
+                setStatus('');
+              } catch (err) {
+                if (!alive) return;
                 try { console.error('[remote-access] 读远端配置失败', err); } catch { /* 忽略 */ }
-                if (alive) setRemote({ config: {}, revision: undefined });
+                attempt += 1;
+                if (attempt < 4) {
+                  timer = setTimeout(load, 250 * attempt);
+                  return;
+                }
+                setRemote({ config: {}, revision: undefined });
+                setStatus(`读不到配置：${err?.message ?? err}`);
+              }
+            };
+            load();
+            let offReset;
+            let offUpdated;
+            try { offReset = ctx.on('connection/reset', () => { attempt = 0; load(); }); } catch { /* 忽略 */ }
+            try {
+              offUpdated = ctx.remote.$on?.('settings/document-updated', () => {
+                attempt = 0;
+                load();
               });
-            return () => { alive = false; };
+            } catch { /* 忽略 */ }
+            return () => {
+              alive = false;
+              clearTimeout(timer);
+              try { offReset?.(); } catch { /* 忽略 */ }
+              try { offUpdated?.(); } catch { /* 忽略 */ }
+            };
           }, [viaForms]);
 
           const current = draft ?? draftFrom(source);
