@@ -91,24 +91,35 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      // 必须声明 configForms，否则 ctx.configForms 的属性访问会抛
+      // "cannot get property ... without inject"（Host 侧访问 connection 同理）
+      inject: ['slots', 'configForms'],
       apply(ctx) {
-        /** 读当前生效值：优先 scope.get(field)，退化为快照里的 value */
+        /** 读当前生效值：优先快照的 value/user，再逐字段试 scope.get(field) */
         function readCurrent(scope) {
-          let snapshotValue = {};
+          let snapshot;
           try {
-            const snap = typeof scope?.snapshot === 'function' ? scope.snapshot() : scope;
-            const v = snap?.value ?? snap?.user ?? {};
-            if (v && typeof v === 'object') snapshotValue = v;
+            if (typeof scope?.snapshot === 'function') snapshot = scope.snapshot();
+            else if (typeof scope?.get === 'function') snapshot = scope.get();
+            else snapshot = scope;
           } catch { /* 忽略 */ }
+          const value =
+            snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
+              ? snapshot.value ?? snapshot.user ?? snapshot
+              : {};
           const out = {};
           for (const field of FIELDS) {
             let v;
             try {
               if (typeof scope?.get === 'function') v = scope.get(field.key);
             } catch { /* 忽略 */ }
-            if (v === undefined) v = snapshotValue[field.key];
-            out[field.key] = decode(field, v);
+            // 若 get() 其实是无参快照，这里会拿到对象 —— 丢掉它，改用 value[field]
+            if (v !== undefined && (typeof v !== 'object' || Array.isArray(v))) {
+              out[field.key] = decode(field, v);
+            } else {
+              const fromValue = value && typeof value === 'object' ? value[field.key] : undefined;
+              out[field.key] = decode(field, fromValue);
+            }
           }
           return out;
         }
@@ -133,13 +144,14 @@ window.__ModuleLoader__.load({
         }
 
         function Panel() {
-          const scope = React.useMemo(() => {
+          const [resolved] = React.useState(() => {
             try {
-              return ctx.configForms.get(ROW_ID);
-            } catch {
-              return undefined;
+              return { scope: ctx.configForms.get(ROW_ID) };
+            } catch (err) {
+              return { error: String(err?.message ?? err) };
             }
-          }, []);
+          });
+          const scope = resolved.scope;
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
@@ -149,7 +161,15 @@ window.__ModuleLoader__.load({
           }, [scope, draft]);
 
           if (!scope) {
-            return h('div', { style: { lineHeight: 1.7 } }, '这台 DSH 没有提供设置写入通道（ctx.configForms 不可用）。');
+            return h(
+              'div',
+              { style: { lineHeight: 1.7 } },
+              '拿不到设置写入通道：ctx.configForms.get("remote-access") 失败。',
+              resolved.error
+                ? h('div', { style: { ...mono, marginTop: 8, whiteSpace: 'pre-wrap' } }, resolved.error)
+                : null,
+              h('div', { style: { marginTop: 8, opacity: 0.75 } }, '把这段错误原文发给我即可定位。'),
+            );
           }
           if (draft === null) return h('div', null, '读取中…');
 
