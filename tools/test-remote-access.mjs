@@ -230,84 +230,53 @@ check('热重载：旧监听已关闭', oldPort.status === 0, `status=${oldPort.
 const newPort = await call(portAfter, {});
 check('热重载：新监听可用', newPort.status === 200 && newPort.body.includes('upstream host='), `status=${newPort.status}`);
 
-// ---- 场景 7：远程页面改配置（Host 端点 → configEditor.edit 落盘）----
-const rwFile = path.join(os.tmpdir(), `ra-rw-${Date.now()}.txt`);
-const rwBan = path.join(os.tmpdir(), `ra-rwban-${Date.now()}.txt`);
-let written = null;
-const rwCtx = {
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-  effect: () => {},
-  get: (name) =>
-    name === 'configEditor'
-      ? {
-          entries: () => [{ options: { id: 'remote-access', name: '@local/dsh-remote-access' } }],
-          edit: async (_entry, change) => {
-            written = change({}, {});
-          },
-        }
-      : undefined,
-};
-const dispose7 = apply(rwCtx, {
+// ---- 场景 7：改密码不影响已登录状态（放行密钥与 accessCode 解耦）----
+const rotFile = path.join(os.tmpdir(), `ra-rot-${Date.now()}.txt`);
+const rotBan = path.join(os.tmpdir(), `ra-rotban-${Date.now()}.txt`);
+const rotListeners = [];
+let rotRow = {
+  enabled: true,
   allowCidrs: ['127.0.0.0/8'],
   listen: ['127.0.0.1'],
   port: 0,
   upstream: `http://127.0.0.1:${upPort}`,
-  urlFile: rwFile,
-  banFile: rwBan,
+  urlFile: rotFile,
+  banFile: rotBan,
   accessCode: '126710',
-});
+};
+const rotCtx = {
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
+  effect: () => {},
+  on: (name, fn) => {
+    rotListeners.push({ name, fn });
+    return () => {};
+  },
+  get: (name) =>
+    name === 'settings'
+      ? { describe: () => [{ ns: 'remote-access', base: {}, user: { ...rotRow } }] }
+      : undefined,
+};
+const dispose7 = apply(rotCtx, rotRow);
 await sleep(400);
-const port7 = Number(new URL(readUrl(rwFile).url).port);
+const port7 = Number(new URL(readUrl(rotFile).url).port);
 
-const anon = await call(port7, { path: '/__remote_access__/config' });
-check('远程配置端点：未授权 → 401', anon.status === 401, `HTTP ${anon.status}`);
+const firstUnlock = await unlockO(port7, 'code=126710');
+const cookie7 = String(firstUnlock.headers['set-cookie'] ?? '').split(';')[0];
+const beforeRotate = await call(port7, { headers: { cookie: cookie7, accept: 'text/html' } });
+check('改密码前：放行 cookie 可用', beforeRotate.status === 200 && beforeRotate.body.includes('upstream host='), `HTTP ${beforeRotate.status}`);
 
-const unlocked7 = await unlockO(port7, 'code=126710');
-const cookie7 = String(unlocked7.headers['set-cookie']).split(';')[0];
-const got = await call(port7, { path: '/__remote_access__/config', headers: { cookie: cookie7 } });
-const gotBody = JSON.parse(got.body || '{}');
-check('远程配置端点：GET 返回生效配置', got.status === 200 && gotBody.ok === true && gotBody.config.port === 0,
-  `HTTP ${got.status} ${JSON.stringify(gotBody.config ?? {})}`.slice(0, 90));
+// 模拟「在设置页把密码改成新的」→ 热重载
+rotRow = { ...rotRow, accessCode: '246813' };
+for (const l of rotListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
+await sleep(500);
+const port7b = Number(new URL(readUrl(rotFile).url).port);
+const afterRotate = await call(port7b, { headers: { cookie: cookie7, accept: 'text/html' } });
+check('改密码后：同一个 cookie 仍然可用（不踢人）',
+  afterRotate.status === 200 && afterRotate.body.includes('upstream host='), `HTTP ${afterRotate.status}`);
 
-const badCode = await call(port7, {
-  method: 'POST',
-  path: '/__remote_access__/config',
-  headers: { cookie: cookie7, 'content-type': 'application/json' },
-  body: JSON.stringify({ patch: { accessCode: 'abc' } }),
-});
-check('远程配置端点：非法密码 → 400', badCode.status === 400, `HTTP ${badCode.status}`);
-
-const badField = await call(port7, {
-  method: 'POST',
-  path: '/__remote_access__/config',
-  headers: { cookie: cookie7, 'content-type': 'application/json' },
-  body: JSON.stringify({ patch: { upstream: 'http://evil' } }),
-});
-check('远程配置端点：只收白名单字段', badField.status === 400, `HTTP ${badField.status}`);
-
-const posted = await call(port7, {
-  method: 'POST',
-  path: '/__remote_access__/config',
-  headers: { cookie: cookie7, 'content-type': 'application/json' },
-  body: JSON.stringify({ patch: { port: 19388, maxConnections: 64 } }),
-});
-check('远程配置端点：合法 patch → 200', posted.status === 200, `HTTP ${posted.status}`);
-await sleep(150);
-check('远程配置端点：经 configEditor 落盘（listen 还原成数组）',
-  written !== null && written.port === 19388 && written.maxConnections === 64 && Array.isArray(written.listen),
-  JSON.stringify(written && { port: written.port, maxConnections: written.maxConnections, listen: written.listen }));
-
-// 改密码不该影响已有 cookie（密钥与密码解耦）
-const again = await call(port7, {
-  method: 'POST',
-  path: '/__remote_access__/config',
-  headers: { cookie: cookie7, 'content-type': 'application/json' },
-  body: JSON.stringify({ patch: { accessCode: '246813' } }),
-});
-check('改密码：写入成功', again.status === 200, `HTTP ${again.status}`);
-const stillIn = await call(port7, { path: '/__remote_access__/config', headers: { cookie: cookie7 } });
-check('改密码不影响已登录状态（同一 cookie 仍可用）', stillIn.status === 200, `HTTP ${stillIn.status}`);
+const staleCode = await unlockO(port7b, 'code=126710');
+check('改密码后：旧密码不再放行', staleCode.status === 403, `HTTP ${staleCode.status}`);
 
 for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6, dispose7]) {
   try {
@@ -317,7 +286,7 @@ for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6, dis
   }
 }
 upstream.close();
-for (const f of [statusFile, statusFile2, banFile, hotFile, rwFile, rwBan, path.join(os.tmpdir(), 'remote-access-secret')]) {
+for (const f of [statusFile, statusFile2, banFile, hotFile, rotFile, rotBan, path.join(os.tmpdir(), 'remote-access-secret')]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
 }
 

@@ -54,9 +54,11 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 | `accessCode` | `''` | 网段内的访问密码（4–12 位数字）。设了就**不用复制 token**：手机直接开裸地址，输一次即可；**输错一次就把该地址拉黑** | ✅ |
 | `banFile` | `''` → 与状态文件同目录的 `remote-access-bans.txt` | 拉黑名单；删掉里面那一行即可解封（最多 1 秒生效） | — |
 
-> 手机（远程页面）也能改配置：DSH 规定非回环页面不写 Host 设置，所以那一页改走 Host 半区自己的
-> `POST /__remote_access__/config`，由 Host 用官方的 `configEditor.edit()` 落盘 —— 与设置页写的是**同一个地方**。
-> 这条端点只收表单里那 7 个字段，别的字段仍然只认 `cordis.patch.yml`。
+> 手机（远程页面）也能改配置：DSH 的**客户端**策略让 `configForms` 在非回环页面恒为不可写
+> （ui-settings 里 `persistence = isLoopback ? 'host' : 'memory'`），但 Remote 通道本身是通的，
+> 所以那一页直接调 `ctx.remote.settings.describe()` / `mutate()` —— 写盘跑在 Host 网关自己的上下文里，
+> 落盘位置与设置页**完全相同**（profile 的 `cordis.patch.yml`），而且等写盘完成才回执。
+> 别自己开 HTTP 端点去调 `configEditor.edit()`：那条路会撞 HMR 事务（教训见 `HANDOFF.md`）。
 
 **改密码不会把已经进来的设备踢下线**：放行 cookie 的密钥与 `accessCode` 无关，单独存在
 `<DSH_HOME>\remote-access-secret`（`0600`），DSH 重启后也照样有效。想让所有设备重新输一次密码，

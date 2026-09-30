@@ -162,11 +162,6 @@ function normalizeConfig(rawIn) {
   return c;
 }
 
-/** 规范化后的配置要写回 schema 时得还原形态：listen 在运行期是 'auto' 字面量，schema 要的是数组 */
-function toRawConfig(c) {
-  return { ...c, listen: c.listen === 'auto' ? ['auto'] : c.listen };
-}
-
 /** 状态文件路径（urlFile 为空 → <DSH_HOME>/remote-access-url.txt；'off' → 不写） */
 function statusPathOf(cfg) {
   if (cfg.urlFile === 'off') return '';
@@ -335,10 +330,6 @@ function resolveUpstream(ctx, cfg, note) {
 /** 解锁页路径与我们的放行 cookie 名（cookie 密钥落盘持久化，改密码不会把人踢下线） */
 const UNLOCK_PATH = '/__remote_access__/unlock';
 const UNLOCK_COOKIE = 'dsh-ra-ok';
-/** 远程页面读写配置的端点：只在通过本插件监听的页面上存在（loopback 页面走 configForms） */
-const RW_PATH = '/__remote_access__/config';
-/** 允许从远程页面改的字段：与 client.js 的表单字段一致（check-config-schema.mjs 会断言两边同步） */
-const FORM_KEYS = ['enabled', 'allowCidrs', 'denyCidrs', 'port', 'maxConnections', 'logLevel', 'accessCode'];
 
 /** 极简解锁页：只在手机上调一次，够用就好，不依赖任何外部资源 */
 function unlockPageHtml(hint) {
@@ -404,9 +395,8 @@ function upstreamHeaders(headers, up, cfg, peer) {
  * 起一个监听。
  * @param gate 访问门：`{ accessCode, cookieValue, banPath, authorize(req), banned(ip), ban(ip), withTicket(url, cookie), note }`
  *   —— 门只在 accessCode 非空时启用；为空时行为与以前完全一致（裸地址交给 DSH 自己 401）。
- * @param rw 远程配置端点：`{ read(), validate(patch), persist(patch) }`
  */
-function startProxy(addr, cfg, up, note, onListening, gate, rw) {
+function startProxy(addr, cfg, up, note, onListening, gate) {
   let active = 0;
 
   const deny = (res, code, text) => {
@@ -447,46 +437,9 @@ function startProxy(addr, cfg, up, note, onListening, gate, rw) {
       return;
     }
 
-    // 远程页面读写配置：只有「通过本插件监听进来的」页面够得着这个路径，
-    // 所以手机端也能改配置（loopback 页面走 DSH 自己的 configForms）。
-    if (String(req.url).split('?')[0] === RW_PATH) {
-      if (!gate.authorize(req)) {
-        deny(res, 401, '401 authentication required\n');
-        return;
-      }
-      const json = (status, payload) => {
-        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        res.end(JSON.stringify(payload));
-      };
-      if (req.method === 'GET') {
-        json(200, { ok: true, config: rw.read() });
-        return;
-      }
-      if (req.method !== 'POST') {
-        deny(res, 405, '405 method not allowed\n');
-        return;
-      }
-      readSmallBody(req, 8192)
-        .then((body) => {
-          let parsed;
-          try {
-            parsed = JSON.parse(body || '{}');
-          } catch {
-            json(400, { ok: false, error: '请求体不是 JSON' });
-            return;
-          }
-          const verdict = rw.validate(parsed?.patch);
-          if (!verdict.ok) {
-            json(400, { ok: false, error: verdict.error });
-            return;
-          }
-          // 先把回执发出去，再落盘：落盘会触发监听重挂，可能掐断这条连接
-          json(200, { ok: true, config: rw.read() });
-          setImmediate(() => rw.persist(verdict.patch));
-        })
-        .catch(() => deny(res, 400, '400 bad request\n'));
-      return;
-    }
+    // 远程页面改配置不走这里：DSH 的 Remote 通道（ctx.remote.settings.mutate）本来就是通的，
+    // 客户端只是按「非回环页面」策略不去调它。曾经在这里自建过一个 /config 端点，
+    // 结果是写盘撞上 HMR 事务（"HMR transactions cannot be nested"）——别再走那条路。
 
     const authorized = gate.authorize(req);
     // 没授权 + 是个页面导航 → 给解锁页；其余一律交给 DSH 自己答（保持原来的 401 行为）
@@ -799,63 +752,10 @@ export function apply(ctx, config) {
     },
   };
 
-  // ---------------------------------------------------------------- 远程改配置
-  // 手机端页面拿不到 configForms（DSH 规定非回环页面不写 Host 设置），
-  // 所以给它一条自己的路：通过本插件的监听 POST 到 RW_PATH，由 Host 半区走官方的
-  // configEditor.edit() 落盘到 profile 的 patch 层 —— 与设置页写的是同一个地方。
-
-  const rw = {
-    /** 当前生效配置（写回 schema 要的形态） */
-    read() {
-      return toRawConfig(cfg);
-    },
-    /** 只收表单里那几个字段；空 accessCode = 不改；最后用同一套 schema 校验一遍 */
-    validate(input) {
-      if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, error: 'patch 必须是对象' };
-      const patch = {};
-      for (const key of FORM_KEYS) if (Object.hasOwn(input, key)) patch[key] = input[key];
-      if (Object.keys(patch).length === 0) return { ok: false, error: `没有可改的字段（只接受 ${FORM_KEYS.join(', ')}）` };
-      if (Object.hasOwn(patch, 'accessCode')) {
-        const code = String(patch.accessCode ?? '');
-        if (code !== '' && !/^\d{4,12}$/.test(code)) return { ok: false, error: '访问密码要 4–12 位数字' };
-        if (code === '') delete patch.accessCode; // 留空 = 不改（避免误清）
-      }
-      if (Object.hasOwn(patch, 'logLevel') && !['silent', 'info', 'debug'].includes(String(patch.logLevel))) {
-        return { ok: false, error: '日志级别只能是 silent / info / debug' };
-      }
-      if (Config) {
-        try {
-          Config(toRawConfig({ ...cfg, ...patch }));
-        } catch (err) {
-          return { ok: false, error: `配置不合法：${err?.message ?? err}` };
-        }
-      }
-      return { ok: true, patch };
-    },
-    /** 落盘：与设置页同一条官方路径（configEditor.edit → 写 profile patch → 发 config-reload） */
-    persist(patch) {
-      const editor = typeof ctx.get === 'function' ? ctx.get('configEditor') : undefined;
-      if (!editor || typeof editor.edit !== 'function') {
-        note('error', '远程改配置失败：拿不到 configEditor 服务');
-        return;
-      }
-      let entry;
-      try {
-        entry = editor.entries().find((row) => row?.options?.id === ROW_ID);
-      } catch (err) {
-        note('error', `远程改配置失败：${err?.message ?? err}`);
-        return;
-      }
-      if (!entry) {
-        note('error', `远程改配置失败：找不到 Loader 条目 ${ROW_ID}`);
-        return;
-      }
-      const next = toRawConfig({ ...cfg, ...patch });
-      Promise.resolve(editor.edit(entry, () => next))
-        .then(() => note('info', `远程页面改了配置（${Object.keys(patch).join(', ')}），已写进 profile 的 patch 层，监听随即重挂`))
-        .catch((err) => note('error', `远程改配置失败：${err?.message ?? err}`));
-    },
-  };
+  // 远程页面改配置**不需要** Host 半区做什么：手机上那一页直接调 ctx.remote.settings.mutate，
+  // 由 Host 网关去跑 settings 控制器 → configEditor.edit，跑在网关自己的上下文里。
+  // （曾在这里自建过一个 POST /config 端点：它撞 HMR 事务必失败，而且回执早于写盘、会把旧值
+  //   当成功回报 —— 用户看到的就是「显示已保存、实则回退」。已删除，别再走那条路。）
 
   // ---------------------------------------------------------------- 起停
 
@@ -905,7 +805,7 @@ export function apply(ctx, config) {
             urls.push(mintUrl(ticket, boundAddr, port));
             if (cfg.printUrl) note('info', `远程访问网址: ${urls[urls.length - 1]}`);
             flush();
-          }, gate, rw),
+          }, gate),
         );
       } catch (err) {
         note('error', `启动 ${addr} 失败: ${err?.message}`);

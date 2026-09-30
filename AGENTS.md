@@ -41,10 +41,12 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **热重载**：设置页保存后 DSH 发 `app-boot/config-reload`，插件原地关旧监听、按新参数重开（不重启 DSH）；
 **解锁模式**：设 `accessCode` 时网段内开裸地址 → 解锁页 → 输一次密码 → 服务端补票进 DSH，
 **错一次即拉黑该 IP**（名单在 `banFile`，删行即解封）；
-**远程改配置**：`POST /__remote_access__/config`（只收 `FORM_KEYS`），用官方的 `configEditor.edit()`
-落盘到 profile 的 patch 层，与设置页同一个地方；放行 cookie 的密钥独立存在
+**远程改配置**：手机那一页直接调 `ctx.remote.settings.describe() / mutate()`（configForms 在非回环页面被
+客户端策略禁掉，但 Remote 通道是通的），写盘由 Host 网关跑，落盘位置与设置页相同。
+**别再自建 HTTP 端点去调 `configEditor.edit()`** —— 它会撞 HMR 事务（`HMR transactions cannot be nested`），
+而且「先回执再落盘」会把旧值当成功回报（用户看到的就是「显示已保存、实则回退」）。放行 cookie 的密钥独立存在
 `remote-access-secret`（与 `accessCode` 解耦，**改密码/重启都不踢人**，删文件才强制重新输）。
-独立测试 **33/33** 通过（含解锁/拉黑/热重载/远程改配置），Config 校验 **13/13**。
+独立测试 **28/28** 通过（含解锁/拉黑/热重载/改密码不踢人），Config 校验 **12/12**。
 手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
 
 **Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，7 项（启用 / 允许的网段 / 排除的网段 /
@@ -52,7 +54,7 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 （`换行分割` / `0=随机` / `0=不限制` / `6位数字`），数字 0 显示成空好让占位符露出来。
 读写有**两条通道**：回环页面走官方 `ctx.configForms.get('remote-access')`
 （`getSnapshot` 读、`mutate([{op:'set',path:[key],value}], revision)` 原子写）；
-非回环页面（手机）改走 Host 端点 `POST /__remote_access__/config`。页面上只说人话，
+非回环页面（手机）改走 Remote 通道 `ctx.remote.settings.describe() / mutate()`。页面上只说人话，
 内部状态只写开发者控制台。
 
 **设置页保存已修好** ✅（两道门的根因见下）。**换 JS 仍需重启一次 DSH**；那之后改参数就是热重载了。
@@ -70,11 +72,15 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 所以 `package.json` **必须**声明 `"peerDependencies": { "@deepseek-ai/schemastery": "^3.18.1" }`：
 peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么声明 cordis/schemastery 的），
 但它是 DSH 肯把安装目录里的包借给你的**唯一凭据**。
-`node tools/check-config-schema.mjs` 现在把这两道门都验了（13 项），**改完先验再重启**。
+`node tools/check-config-schema.mjs` 现在把这两道门都验了（12 项），**改完先验再重启**。
 
 **关键教训**：
 - 客户端 `inject` 必须写点号全名（`'remote.pluginManager'`、`'remote.settings'`），只写 `'remote'` 会报 `without inject`；
-- 这两个 `remote` 面孔现在已不需要：读写都走 `configForms`（它内部持有 `remote.settings`）；
+- 这两个 `remote` 面孔现在用不着了：读写都走 `configForms`（它内部持有 `remote.settings`）；
+  **但手机端例外** —— 非回环页面 `configForms` 恒为 unavailable，必须直接用 `ctx.remote.settings`；
+- **别在插件里自己建 HTTP 端点去调 `configEditor.edit()`**：请求回调跑在我们监听创建出来的异步链里，
+  而 `hmr.runExclusive` 用 AsyncLocalStorage 判嵌套，会报 `HMR transactions cannot be nested`；
+  真要在 Host 侧写盘，就走 Remote 通道让网关去跑（见 HANDOFF.md 第 4 节）；
 - 改 JS 后**必须重启 DSH**；改 `Config` 默认值也算改 JS；
 - 提参数前先看 `Config.listConfigs` 里这一行的 `status`：不是 `schema` 就说明 Host 还不服务它；
 - 手动改 `cordis.patch.yml` **不触发**热重载（实测：改 `maxConnections` 3→7 盯 16 秒无反应），

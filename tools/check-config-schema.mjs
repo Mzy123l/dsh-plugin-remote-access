@@ -165,18 +165,6 @@ try {
     [unaccounted.length ? `既不在表单也不在 patch 白名单: ${unaccounted.join(', ')}` : '', stale.length ? `白名单里有已不存在的字段: ${stale.join(', ')}` : '']
       .filter(Boolean).join('；'));
 
-  // 远程改配置的端点只放行 FORM_KEYS，必须与表单字段一模一样，否则手机端改不动或改到别的字段
-  const indexSource = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-  const formKeys = (/const FORM_KEYS = \[([^\]]*)\]/.exec(indexSource)?.[1] ?? '')
-    .split(',')
-    .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
-    .filter(Boolean);
-  const formKeySet = new Set(formKeys);
-  const fieldKeySet = new Set(fields.map((f) => f.key));
-  check('index.js 的 FORM_KEYS 与表单字段一致',
-    formKeys.length > 0 && formKeys.length === fieldKeySet.size && [...fieldKeySet].every((k) => formKeySet.has(k)),
-    `FORM_KEYS=${formKeys.join(',')} ↔ 表单=${[...fieldKeySet].join(',')}`);
-
   const mismatched = fields
     .filter((f) => dict[f.key] !== undefined)
     .filter((f) => dict[f.key].type !== EXPECTED_TYPE[f.type])

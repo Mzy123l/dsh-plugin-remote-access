@@ -7,9 +7,12 @@
  *   1. 本机（回环）页面 —— 官方通道 ctx.configForms.get('remote-access')：
  *      读 form.getSnapshot() → { status, value, revision, writable, mode }，
  *      写 form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>。
- *   2. 手机等远程页面 —— DSH 规定非回环页面不写 Host 设置（configForms 恒为 unavailable），
- *      所以走 Host 半区自己的端点 POST /__remote_access__/config（此时页面正经过本插件的监听），
- *      由 Host 用官方的 configEditor.edit() 落盘到 profile 的 patch 层。两条路写的是同一个地方。
+ *   2. 手机等远程页面 —— DSH 的客户端策略让 configForms 在非回环页面恒为 unavailable
+ *      （ui-settings 里 `persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'`），
+ *      但 Remote 通道本身是通的（那一页显示的数值就是 remote.settings.describe 来的），
+ *      所以直接调 ctx.remote.settings.describe() / mutate()：
+ *      写盘跑在 Host 网关自己的上下文里（不会撞上 HMR 事务），而且**等写盘完成才返回**，
+ *      拿到的就是新值。两条路写的是同一个地方（profile 的 cordis.patch.yml）。
  *
  * 页面上只说人话：失败给一句「下一步做什么」，内部状态只写开发者控制台。
  */
@@ -20,10 +23,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const NS = 'remote-access';
-    const RW_PATH = '/__remote_access__/config';
-    const SAVED_HINT = '已保存';
 
-    // 表单字段（与 index.js 的 FORM_KEYS 保持一致，check-config-schema.mjs 会断言）
+    // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [
       { key: 'enabled', type: 'boolean', label: '启用' },
       { key: 'allowCidrs', type: 'list', label: '允许的网段', placeholder: '换行分割' },
@@ -78,7 +79,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 输入框里显示什么：0 显示成空（好让占位符露出来） */
-    const display = (field, value) => {
+    const displayValue = (field, value) => {
       if (field.type === 'number') return Number(value) === 0 ? '' : String(value);
       if (field.type === 'boolean') return value === true;
       return value === undefined || value === null ? '' : value;
@@ -91,42 +92,31 @@ window.__ModuleLoader__.load({
       return next;
     }
 
-    /** 远程页面（手机）读配置：走 Host 半区的端点 */
-    async function readRemote() {
-      const res = await fetch(RW_PATH, { headers: { accept: 'application/json' }, cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = await res.json();
-      if (body?.ok !== true) throw new Error(body?.error ?? '读取失败');
-      return body.config ?? {};
-    }
-
-    /** 远程页面写配置：Host 半区用 configEditor.edit() 落盘，与设置页同一个地方 */
-    async function writeRemote(patch) {
-      const res = await fetch(RW_PATH, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ patch }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok || body?.ok !== true) throw new Error(body?.error ?? `HTTP ${res.status}`);
-      return body.config ?? {};
-    }
+    const namespaceOf = (view) => (view?.namespaces ?? []).find((row) => row?.ns === NS);
 
     return {
       // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
-      inject: ['slots', 'configForms'],
+      inject: ['slots', 'configForms', 'remote', 'remote.settings'],
       apply(ctx) {
         // ui-settings 提供的共享表单控制器：同一个条目在浏览器里只有一个实例，
         // 生命周期归提供方，我们只订阅，不 dispose。
         const form = ctx.configForms.get(NS);
         const describe = ctx.configForms.describe();
-        const reload = () => {
-          try {
-            return Promise.resolve(describe?.load?.());
-          } catch {
-            return Promise.resolve();
-          }
-        };
+        const settings = ctx.remote.settings;
+
+        /** 远程页面（手机）读：Remote 通道，拿的是 Host 解析后的生效值 */
+        async function readRemote() {
+          const view = await settings.describe();
+          const ns = namespaceOf(view);
+          return { config: ns?.value ?? {}, revision: ns?.revision };
+        }
+
+        /** 远程页面写：交给 Host 网关去跑（写盘完成才返回，返回值就是新值） */
+        async function writeRemote(changed, revision) {
+          const ops = Object.entries(changed).map(([key, value]) => ({ op: 'set', path: [key], value }));
+          const view = await settings.mutate(NS, ops, revision);
+          return { config: view?.value ?? { ...changed }, revision: view?.revision };
+        }
 
         function Panel() {
           const [snap, setSnap] = React.useState(() => form.getSnapshot());
@@ -136,9 +126,9 @@ window.__ModuleLoader__.load({
           const [busy, setBusy] = React.useState(false);
           const revisionRef = React.useRef(snap.revision);
 
-          // 回环页面用 configForms（官方通道）；拿不到就退到 Host 端点（远程页面）
+          // 回环页面用 configForms（官方通道）；拿不到就退到 Remote 通道（手机）
           const viaForms = snap.status === 'ready' && snap.writable === true;
-          const source = viaForms ? snap.value : remote;
+          const source = viaForms ? snap.value : remote?.config;
 
           React.useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), []);
 
@@ -155,10 +145,10 @@ window.__ModuleLoader__.load({
             }
             let alive = true;
             readRemote()
-              .then((config) => { if (alive) setRemote(config); })
+              .then((next) => { if (alive) setRemote(next); })
               .catch((err) => {
                 try { console.error('[remote-access] 读远端配置失败', err); } catch { /* 忽略 */ }
-                if (alive) setRemote({});
+                if (alive) setRemote({ config: {}, revision: undefined });
               });
             return () => { alive = false; };
           }, [viaForms]);
@@ -186,10 +176,10 @@ window.__ModuleLoader__.load({
                 const accepted = await form.mutate(ops, snap.revision);
                 if (accepted !== true) throw new Error('写入被拒绝，请点「重新读取」后再试一次。');
               } else {
-                setRemote(await writeRemote(changed));
+                setRemote(await writeRemote(changed, remote?.revision));
               }
               setDraft(null);
-              setStatus(`${SAVED_HINT} ${count} 项。`);
+              setStatus(`已保存 ${count} 项。`);
             } catch (err) {
               try { console.error('[remote-access] 保存失败', err); } catch { /* 忽略 */ }
               setStatus(`保存失败：${err?.message ?? err}`);
@@ -202,12 +192,16 @@ window.__ModuleLoader__.load({
             setStatus('');
             setDraft(null);
             if (viaForms) {
-              reload().then(() => setSnap(form.getSnapshot()));
+              try {
+                Promise.resolve(describe?.load?.()).then(() => setSnap(form.getSnapshot()));
+              } catch {
+                setSnap(form.getSnapshot());
+              }
               return;
             }
             readRemote()
-              .then((config) => setRemote(config))
-              .catch(() => setRemote({}));
+              .then(setRemote)
+              .catch(() => setRemote({ config: {}, revision: undefined }));
           };
 
           const rowStyle = {
@@ -228,7 +222,7 @@ window.__ModuleLoader__.load({
           };
 
           const rows = FIELDS.flatMap((field) => {
-            const value = display(field, current[field.key]);
+            const value = displayValue(field, current[field.key]);
             const common = {
               key: `${field.key}-i`,
               disabled: busy,
@@ -274,10 +268,7 @@ window.__ModuleLoader__.load({
                 placeholder: field.placeholder,
               });
             }
-            return [
-              h('div', { key: `${field.key}-l` }, field.label),
-              input,
-            ];
+            return [h('div', { key: `${field.key}-l` }, field.label), input];
           });
 
           return h(
