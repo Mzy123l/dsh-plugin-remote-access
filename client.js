@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-remote-access 的浏览器半区：只在「设置」里提供一页可编辑的参数表单。
  *
  * 注册位置：settings.section（设置左侧导航的一页）。插件页那两处（plugins.row.config /
@@ -178,18 +178,17 @@ window.__ModuleLoader__.load({
                 tries.push(`configForms.set(${field.key}) 抛错: ${err?.message ?? err}`);
               }
             }
-            if (!done && typeof ctx.remote?.settings?.mutate === 'function') {
-              try {
-                const result = await ctx.remote.settings.mutate(
-                  ROW_ID,
-                  [{ op: 'set', path: field.key, value }],
-                  revision,
-                );
-                const verdict = checkResult(result);
-                tries.push(`settings.mutate(${field.key}) → ${verdict.why}`);
-                if (verdict.ok) done = true;
-              } catch (err) {
-                tries.push(`settings.mutate(${field.key}) 抛错: ${err?.message ?? err}`);
+            if (!done && typeof ctx.remote?.settings?.update === 'function') {
+              for (const ns of [ROW_ID, PACKAGE]) {
+                if (done) break;
+                try {
+                  const result = await ctx.remote.settings.update(ns, { [field.key]: value }, revision);
+                  const verdict = checkResult(result);
+                  tries.push(`settings.update(${ns}, ${field.key}) → ${verdict.why}`);
+                  if (verdict.ok) done = true;
+                } catch (err) {
+                  tries.push(`settings.update(${ns}, ${field.key}) 抛错: ${err?.message ?? err}`);
+                }
               }
             }
             if (!done) throw new Error(`字段 ${field.key} 没有写成功：\n${tries.join('\n')}`);
