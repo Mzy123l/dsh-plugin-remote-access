@@ -212,6 +212,11 @@ $env:ELECTRON_RUN_AS_NODE = 1
 - **Clash Party 直接 `Start-Process` 会秒退**（无报错、无退出码），用 `explorer.exe "<exe 路径>"` 启动才正常
   （它在 `%APPDATA%\mihomo-party`，`mixed-port: 7890`；核心进程名 `mihomo`）。
 - 改完 PATH / 装完软件后，**已打开的终端不会自动生效**，要新开一个。
+- **环境是随进程继承的，会「代代相传」**：我在本会话里启动的 `win_ZQES.exe`（AHK）继承的是我那份**旧 PATH**，
+  于是用户按 Win+Q 起的 pwsh 7 里 `dsh` 还是撞上 CLI（`error: --profile <name> is required`），
+  而 Explorer 自己的环境其实早已刷新。**自启/AHK 这类常驻进程要用 `explorer.exe "<路径>"` 代为启动**
+  （或等下次登录由 Explorer 拉起），否则它拉起的终端一直带着旧环境。排查手法：`Get-CimInstance Win32_Process`
+  看父进程链 + 让 Explorer 跑一个 `.cmd` 把它看到的 `%PATH%` 写进文件比对。
 `git ls-remote` 若报 `Permission denied (publickey)`，是 Git 自带 ssh 与系统 OpenSSH 不一致，执行一次：
 `git config core.sshCommand 'C:/Windows/System32/OpenSSH/ssh.exe'`。
 
