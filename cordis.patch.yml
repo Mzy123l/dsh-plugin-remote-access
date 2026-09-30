@@ -1,7 +1,7 @@
 # dsh-remote-access —— 插入一行 Host 插件。
 #
 # 这里只写「部署默认值」；其余参数默认值由插件的 Config 声明提供，
-# 在 DSH 插件页里点这一行的「配置」就能改（保存会写进 profile 的 patch 层）。
+# 在「设置 → 远程访问」里就能改（保存会写进 profile 的 patch 层，也就是本文件所在的层）。
 - insert:
     - id: remote-access
       name: '@local/dsh-remote-access'

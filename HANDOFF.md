@@ -1,8 +1,8 @@
 # 交接文档 —— 给「创造模式」会话
 
-> 先读 `AGENTS.md`（硬约定），再读本文（现状与卡点）。
-> 你在创造模式里，**有 `cordis_inspect_query` 和 `plugin_manager`** —— 这两样正是本文卡点需要的。
-> **先查再改，不要猜 API**（本文第 3 节给了具体查询清单）。
+> 先读 `AGENTS.md`（硬约定），再读本文（现状与已查明的 DSH 事实）。
+> 第 2 节是**已解决的**老卡点（含根因与判断链），第 3 节是那份查询清单的**答案**，第 4 节是可直接复用的 DSH 内部事实。
+> **先查再改，不要猜 API。**
 
 ---
 
@@ -23,52 +23,71 @@
 **已经能用（Client 半区，`client.js`）** ✅
 
 - 注册进 **`settings.section`** → 设置左侧导航多一页「远程访问」，页面**能渲染出来**（用户已确认看到）。
+- 参数读写走官方通道 `ctx.configForms.get('remote-access')`：`getSnapshot()` 读，
+  `mutate([{ op:'set', path:[key], value }], revision)` 一次原子写。
 
-**唯一卡住的问题** ❌
-
-- **设置页里点「保存」写不进配置**（详见第 2 节）。
+**原卡点已解决** ✅ → 见第 2 节（**待重启 DSH 后实测一次**：换 JS 必须重启）。
 
 ---
 
-## 2. 卡点：设置页保存写不进配置
+## 2. 原卡点已解决：设置页保存写不进配置
 
-### 已试过的通道与结果（都是实测报错）
+### 根因（一句话）
 
-| 通道 | 结果 |
+Host 的设置文档**只服务「`Config` 是原生 Schemastery schema、且含 `.volatile()` 字段」的条目**；
+而本插件原来 `import('@deepseek-ai/cordis')` 取 `Schema`，真包名是 **`@deepseek-ai/schemastery`**
+（`cordis` 上并没有这个导出）→ `Schema` 是 undefined → `Config` 导出 undefined
+→ `Config.listConfigs` 里这一行 `status: "absent"` → **命名空间从不出现**
+→ `configForms.set` 找不到命名空间，**静默返回 false**（第 2 节原来那三条报错都是这个根因的表象）。
+
+### 判断链（都在安装包 `app.asar` 里查到的原文）
+
+| 位置 | 事实 |
 |---|---|
-| `ctx.configForms.get('remote-access').set(field, value)` | 返回 **`false`**（静默拒绝） |
-| `ctx.remote.settings.mutate('remote-access', [{ op:'set', path, value }], rev)` | `RemoteError: gateway/input-invalid`，`details: { endpoint: 'settings/mutate', field: 'ops' }` —— **`ops` 元素形状我写错了** |
-| `ctx.remote.settings.update(ns, { field: value }, rev)`（ns 依次试 `remote-access`、`@local/dsh-remote-access`） | **已改好但尚未验证**（需要重启 DSH 加载新客户端模块） |
+| `@deepseek-ai/dsh-app-boot` `isNativeConfigSchema` | 认 `Reflect.get(value, Symbol.for('schemastery')) === true` + `type` 是字符串 + `meta` 是对象；**注意 schema 实例是函数**，判据是「既不是 object 也不是 function 才算不合格」 |
+| `@deepseek-ai/dsh-tool-cordis` 的 `liveConfig` | `fiber.runtime.Config` 为 undefined → `status: 'absent'`；不是原生 schema → `'unsupported'`；原生 → `'schema'` |
+| `@deepseek-ai/dsh-settings` 的 `describe()` | 条目要同时满足：有原生 schema、`entry.fiber.state === 2`（已激活）、`volatileForm(schema)` 有结果；`ns = entry.options.id` |
+| `volatileForm` / `isVolatilePath` | 只收 `meta.volatile === true` 的字段（含最近的 volatile 祖先）；**一个 volatile 字段都没有 → 整条命名空间不出现** |
+| `@deepseek-ai/dsh-api-settings-controller` | `settings/mutate` 的 `ops` 元素是 `{ op:'set', path:[字段], value }`（`path` 是**数组**，这就是当初 `gateway/input-invalid: ops` 的原因） |
+| `ConfigFormController`（`ctx.configForms.get(ns)`） | `getSnapshot()` → `{ status, value, base, user, revision, writable, mode }`；`subscribe(fn)`；`set(field,value)` = 一条 `{op:'set',path:[field],value}`；`mutate(ops, revision)` → `remote.settings.mutate(ns, ops, revision)` → `Promise<boolean>` |
+| DSH 的模块解析 | `installRuntimeInterception` 直接改写 Node 内部的 ESM/CJS 解析器，把**安装作用域**的包供给 profile 插件，所以 profile 里的插件可以按裸名 `import('@deepseek-ai/schemastery')`（无需声明依赖、无需装在 profile 里） |
+| 写入落盘 | `configEditor.edit` 把值写进 profile 的 patch 文档（`cordis.patch.yml` 所在层），再按 Loader 正常路径重挂载 |
+| 配置变化是否重挂载 | Cordis `Fiber.update()` 最后是 `this.restart()` —— **一律重新 apply**，所以「保存即生效」；`.volatile()` 只决定「哪些字段进表单」，不是「免重启」的暗示 |
 
-### 重要线索
+### 修法
 
-- 官方文档（安装包 `app.asar` 内）明确写：**"自定义条目页以 Host 条目 id 作为注册 id；行页面使用 bundle 包名和行 id。当条目提供可编辑 Config 字段时，页面宿主传入 `form.state` 和 `form.mutate(operations, expectedRevision)`。"**
-  → 也就是说，**带官方写入通道的表单，只发给注册在 `plugins.row.config`（或 `plugins.item`）的页面**；`settings.section` 的页面**不会**自动拿到 `form`。
-  → 而用户明确要求**只保留设置里的项**，删掉了 `plugins.row.config` / `plugins.bundle.config` 两处注册。**这正是当前的矛盾点。**
-- 客户端能用的插件管理接口**没有写配置的方法**：
-  `setPluginEnabled` / `setBundleEnabled` / `removeBundle` / `listBundles` / `listPlugins` / `inspect` / `installBundle` / `waitForInstall` / `cancelInstall` / `registries`；
-  `remote.pluginInventory.list()` 也只有 `list()`。
+- `index.js`：改 `import('@deepseek-ai/schemastery')`，`Config` 的 14 个字段全部 `.volatile()`
+  （它们是纯运行期参数）；纯 node 环境解析不到时仍降级为「无 schema」，插件照常工作。
+- `client.js`：`inject: ['slots', 'configForms']`，读写改用 `configForms`；
+  保存 = 只把**改动过的**字段编成一条原子 `mutate(ops, revision)`；
+  失败时把 `status / writable / mode / revision / 已服务命名空间` 摆在页面上（不许哑巴失败）。
+- 回归：`node tools/check-config-schema.mjs` 用**安装包里的真 Schemastery** 校验
+  「原生 schema + 全字段 volatile + 表单字段与 schema 对表」，**不需要重启 DSH**。
 
-### 两条出路（建议先查证再选）
+### 为什么不走「Host 半区自己写盘 / host.call」
 
-1. **查清 `settings.update` 的 ns 与语义**：如果 `remote-access` 确实是"被服务的设置命名空间"，`update` 就能写（并且会触发插件重挂载 → 新参数生效）；
-2. **改由 Host 半区写盘**：Host 有文件权限，可以
-   - 直接改写 profile 的 `cordis.patch.yml`（需 YAML 处理，风险高），**或**
-   - 写自己的覆盖文件（例如 `<DSH_HOME>/remote-access-config.json`），Host 启动时读它并覆盖 row config；客户端通过 **`host.call` / Host⇄Client 通道**把新参数送过去。
-   官方给的通道是：Host 半区用 `harness.handle(method, fn)` 注册处理器，浏览器半区用 `host.call(method, args)` 调用（**只传 JSON**）。**注意**：这条 API 出现在安装包的"浏览器半区"文档里（浏览器半区拿到固定的 `React` / `console` / `styles` / `host`），**本项目现在的客户端是 module-loader 形态（`window.__ModuleLoader__.load({id, factory(require)})`），是否也能拿到 `host` 尚未验证** —— 用 `cordis_inspect_query` 查证。
-   好处：Host 半区可以**即时重挂载**（关旧监听、按新参数重开），做到"保存即生效"，不必动 profile 文件。
+查证后否掉了：`host.call` 只属于**动态半区**（cordis-client-runner 那种拿到固定 `React`/`console`/`styles`/`host`
+符号面的插件），module-loader 形态（`window.__ModuleLoader__.load({id, factory(require)})`）的模块表里没有 `host`
+（模块表只有 `react` / `react-dom` / `@deepseek-ai/cordis` / `dsh-client-store` / `ui-slots` / `ui-primitives` / `ui-dockkit`）。
+而官方写入通道本来就有：`configForms` → 设置控制器 → `configEditor`，落盘到 profile patch，
+比自己维护一个覆盖文件更正确，也不用碰 YAML。
 
 ---
 
-## 3. 下一步：用 `cordis_inspect_query` 查这些（按顺序）
+## 3. 原查询清单的答案（已查明，不必重查）
 
-1. **Client `ctx.configForms`**：`get(entryId)` 返回的 scope 对象有哪些方法？`set` / `unset` / `mutate` / `snapshot`（或 `getSnapshot` / `describe`）的**确切签名**；`mutate` 的 `ops` 元素 schema；`whileServed(namespaces, register)` 的签名与语义；以及"哪些命名空间会被服务"。
-2. **Client `ctx.remote.settings`**：`settings/update`、`settings/mutate`、`settings/replace`、`settings/describe` 的输入 schema（尤其 `ops` 的元素类型与 `ns` 的合法取值）。
-3. **槽位 props**：`settings.section` 与 `plugins.row.config` 注册的组件**会被传入哪些属性**（`form.state` / `form.mutate` / `entryKey` / `view` …）；`plugins.row.config` 的 `key` 语义（`<包名>#<行id>`）。
-4. **Host `Config.listConfigs`**：本插件（`@local/dsh-remote-access`）的 `packageDir` 与 schema 是否被识别（确认 `Config` 声明真的生效）。
-5. **Host⇄Client 通道**：module-loader 形态的浏览器半区能否使用 `host.call`；若不能，正确的等价物是什么（`wire` / `@Remote` 定义？）。
-
-**判定目标**：让「设置 → 远程访问」这一页**真的能写盘**。若结论是"必须用 `plugins.row.config` 的宿主 `form`"，请回头跟用户确认是否接受恢复那一处注册；若结论是"Host 自写盘可行"，按第 2 节方案 2 实施。
+1. **Client `ctx.configForms`**：`get(entryId)` 返回共享的 `ConfigFormController`（`entryId` = **Loader 条目的
+   `options.id`**，即 patch 里的行 id）；方法 `getSnapshot()` / `subscribe(fn)` / `set(field,value)` /
+   `unset(field)` / `mutate(ops, expectedRevision)`；`set`/`unset` 只是 `mutate` 的单条包装。
+   `describe()` 返回共享镜像（`getSnapshot` / `subscribe` / `ensure` / `load` / `acceptView`），
+   `whileServed(namespaces, register)` 用于「编辑别人拥有的命名空间」——编辑自己的命名空间不必用。
+2. **Client `ctx.remote.settings`**：`mutate(ns, ops, expectedRevision)` / `update(ns, patch, expectedRevision)` /
+   `replace(ns, section, expectedRevision)` / `describe()`；`ops` 元素 `{ op:'set'|'unset', path:[…], value? }`。
+   一般**不要直接调**：走 `configForms` 才有 revision 栅栏与镜像折叠。
+3. **槽位 props**：`settings.section` 的 owner props **只有 `close`**（没有 `form`）——所以设置页从来不会自动
+   拿到表单，得自己用 `configForms`。
+4. **Host `Config.listConfigs`**：`PackageDir` / `status` 已可查；**`status` 必须是 `schema`**，否则设置页写不进去。
+5. **Host⇄Client 通道**：module-loader 半区拿不到 `host.call`；本项目不需要它（见第 2 节末）。
 
 ---
 
@@ -83,7 +102,12 @@
 | `settings.section` | 设置左侧导航的一页；`settings.plugins.tab` 是「设置 → 插件」里的一个标签页 |
 | `inject` 规则 | **访问任何服务都要先在 `inject` 里声明**，否则属性访问抛 `cannot get property "..." without inject`。远程命名空间要写**点号全名**：`'remote.pluginManager'`、`'remote.settings'` |
 | Host 侧同样适用 | 本插件 Host 半区必须 `inject = ['connection']`，否则 `ctx.connection` 抛错 |
-| `Config` 声明 | `export const Config = Schema.object({…})`（`Schema` 来自 `@deepseek-ai/cordis`，运行时能解析；纯 node 环境解析不到，用动态 import + 兜底）。字段可 `.description()`、`.default()`、`.min()/.max()`、`Schema.natural()`、`Schema.array(...)` |
+| `Config` 声明 | `export const Config = Schema.object({…})`，`Schema` 是 **`@deepseek-ai/schemastery` 的默认导出**（不是 cordis 上的 `Schema`！）。DSH 改写 Node 解析器，profile 插件按裸名 import 即可；纯 node 环境解析不到，用动态 import + 兜底 |
+| `Config` 的两个硬前提 | ① 原生 schema（`Symbol.for('schemastery')`，实例是**函数**）；② 至少要有一个 **`.volatile()`** 字段，否则 Host 设置文档根本不列这条命名空间（`volatileForm`） |
+| 设置命名空间 id | = **Loader 条目的 `options.id`**（patch 里的行 id，本插件是 `remote-access`），不是包名 |
+| `.volatile()` 的含义 | 只决定「哪些字段进设置表单」，**不是「免重启」**：Cordis `Fiber.update()` 最后一律 `restart()`，插件会重新 apply |
+| 设置写入落盘在哪 | profile 的 patch 文档（`cordis.patch.yml` 那一层），由 `configEditor.edit()` 写入后按 Loader 正常路径重挂载 |
+| `host.call` 的适用范围 | 只属于**动态半区**（cordis-client-runner，符号面固定为 `React`/`console`/`styles`/`host`）。module-loader 半区的模块表里**没有** `host` |
 | config 入参形态 | 声明 `Config` 后，`apply` 拿到的 config 可能是 **Schema 字段引用**，读值要用 `.get()` 兜底（本插件已做） |
 | 改代码的生效条件 | **换 JS 必须重启 DSH**（热重载只重组配置，不换模块代）；`cordis.patch.yml` / home patch 的改动会触发重组（可热生效） |
 | 重启的副作用 | 每次重启换 **token**（带票网址失效）与**随机端口**（除非 `port` 固定）；DSH 的 cookie **绑定 hostname:port** → 改端口后手机上要重新打开一次带票网址 |
@@ -104,6 +128,7 @@
 | `E:\Applications\DeepSeek Harness\resources\app.asar` | DSH 安装包（`read` 工具读不了，`grep` 能看内容行；`tools/asar-extract.mjs` 可整文件提取） |
 | `docs/` | 本地提取的 DSH 官方插件开发文档（**已 gitignore，勿提交**） |
 | `tools/test-remote-access.mjs` | 独立功能测试（起假上游，无需 DSH） |
+| `tools/check-config-schema.mjs` | 用安装包里的真 Schemastery 校验 `Config`（原生 + 全字段 volatile + 与 `client.js` 表单对表），无需重启 DSH |
 
 **git**：`git@github.com:Mzy123l/dsh-remote-access.git`，分支 `main`。
 `git ls-remote` 若报 `Permission denied (publickey)`，是 Git 自带 ssh 与系统 OpenSSH 不一致，执行一次：
@@ -124,8 +149,10 @@
 
 ## 7. 待办清单
 
-1. **[当前卡点]** 让设置页「保存」真正落盘（第 2、3 节）。
-2. 建议把 `port` 固定（例如 `19388`），否则手机网址每次重启都变。
-3. `README.md` 的"怎么改参数"一节还是旧的（只写了改 `cordis.patch.yml`），需要补上"设置 → 远程访问"这一页。
-4. 可选：命令行工具（`E:\Applications\dsh-remote-access`）——按参数启动 DSH、已在跑则改参数（用户提过，但 GUI 优先）。
-5. 可选：客户端页面显示**当前生效的带票网址**（现在只能读文件）。需要 Host⇄Client 数据通道。
+1. **[待用户]** 重启 DSH 后到「设置 → 远程访问」实测一次保存：页面上应看到
+   `status=ready`、`writable=true`，且列出的已服务命名空间里含 `remote-access`。
+2. 建议把 `port` 固定（例如 `19388`），否则手机网址每次重启都变（现在可以在设置页里改）。
+3. 可选：命令行工具（`E:\Applications\dsh-remote-access`）——按参数启动 DSH、已在跑则改参数（用户提过，但 GUI 优先）。
+4. 可选：客户端页面显示**当前生效的带票网址**（现在只能读文件）。需要 Host⇄Client 数据通道——
+   注意 module-loader 半区拿不到 `host.call`，可行路线是让 Host 半区把网址写进状态文件后由页面读文件、
+   或按官方做法定义一个 `@Remote` 端点（要带 typert 生成的 codec）。

@@ -1,4 +1,4 @@
-﻿# dsh-remote-access
+# dsh-remote-access
 
 给 **DeepSeek Harness（DSH）桌面版**用的一个小插件：把本机 DSH 的网页界面**只开放给你指定的网段**
 （默认 Tailscale 的 `100.64.0.0/10`），让你可以用手机 / 另一台电脑通过一条「带票的网址」访问它。
@@ -29,7 +29,10 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 
 ## 配置
 
-改 `cordis.patch.yml` 里那一行的 `config`（或在 profile/home patch 里覆盖同 `id` 的行）：
+**首选：设置 → 远程访问**（设置左侧导航里那一页）。保存会写进 profile 的 `cordis.patch.yml`，
+并按 Loader 的正常路径重新挂载插件 —— 端口可能变化，新网址以状态文件为准。
+
+也可以直接改 `cordis.patch.yml` 里那一行的 `config`（或在 profile/home patch 里覆盖同 `id` 的行）：
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -43,6 +46,11 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 | `printUrl` | `true` | 同时打到 DSH 日志 |
 
 **那个状态文件里有访问令牌，等于本机操作权限**，按 `0600` 写入，别外传。
+
+> 设置页能写盘的前提，是这一行的 `Config` 是**原生 Schemastery schema**（`@deepseek-ai/schemastery`）
+> 且每个字段都标了 `.volatile()`：Host 的设置文档由 `volatileForm` / `isVolatilePath` 过滤，
+> 只服务「含 volatile 字段」的条目。`node tools/check-config-schema.mjs` 会用安装包里的真
+> Schemastery 校验这两点（不需要重启 DSH）。
 
 ## 使用
 
@@ -63,10 +71,15 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 ```bash
 node --check index.js                       # 语法
 node tools/test-remote-access.mjs           # 独立功能测试（无需 DSH，起一个假上游）
+node tools/check-config-schema.mjs          # 用安装包里的真 Schemastery 校验 Config（找不到安装包则 SKIP）
 ```
 
 `tools/test-remote-access.mjs` 覆盖：转发、`Host`/`Origin` 改写、`x-forwarded-for`、WebSocket `101` 透传、
 网段外 `403`、拿不到令牌时的降级、状态文件与带票网址。
+
+`tools/check-config-schema.mjs` 覆盖「设置页写不写得进去」的两条硬前提：`Config` 是原生 Schemastery
+schema、且每个字段都标了 `.volatile()`；顺带对表 `client.js` 的表单字段与 `Config` 字段、控件类型与
+schema 类型。它把安装包里的 `schemastery` 铺进临时 `node_modules` 再加载 `index.js`，因此不需要 DSH。
 
 `tools/asar-extract.mjs` 可以从 `app.asar` 里读文件（DSH 的实现、技能、模板都在里面）：
 
