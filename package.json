@@ -3,8 +3,20 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Expose this machine's DSH web GUI to a chosen network range (e.g. Tailscale), token-gated.",
+  "description": "Expose this machine's DSH web GUI to a chosen network range (e.g. Tailscale), with an optional numeric access code.",
+  "license": "MIT",
   "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mzy123l/dsh-remote-access.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "remote-access",
+    "tailscale"
+  ],
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
   },
@@ -19,11 +31,13 @@
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "README.md",
+    "LICENSE"
   ],
   "meta": {
     "title": "远程访问入口（限网段）",
-    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10），只允许带令牌的访问；参数可在设置页里直接改。"
+    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10）：只监听网段内的本机地址，网段外一律拒绝；可复制带票网址，也可设 6 位数字密码直接访问。"
   },
   "dsh": {
     "bundle": {

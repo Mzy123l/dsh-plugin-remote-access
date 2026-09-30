@@ -186,40 +186,11 @@ $env:ELECTRON_RUN_AS_NODE = 1
 | `C:\Users\15861\.dsh\cordis.patch.yml` | 本用户的 home patch（现只剩 `llm-deepseek`；`agent-preset-registry` 那条已删，因为它压住了 `selectedDefault` 让模式切不动；备份 `cordis.patch.yml.bak-20260930-151254`） |
 | `C:\Users\15861\.dsh\remote-access-url.txt` | 状态文件：带票网址 + 生效配置 + 诊断（模式 0600，含令牌，别外传） |
 | `E:\Applications\DeepSeek Harness\resources\app.asar` | DSH 安装包（`read` 工具读不了，`grep` 能看内容行；`tools/asar-extract.mjs` 可整文件提取） |
-| `E:\Applications\DeepSeek Harness\dsh.cmd` | **命令行启动桌面版**（默认进托盘）。Windows 命令名不分大小写，所以 `dsh` 与 `DSH` 是同一条；无参/`-show` 走桌面版，**其他参数透传给自带 CLI**（`dsh plugin …` 因此照旧可用）。必须 ASCII + CRLF（cmd 会错解 LF 行尾的标签） |
-| `E:\Applications\DeepSeek Harness\dsh-launch.ps1` | 上者的实现：放好 `background-close-confirmed` 标记 → 启动 → 等主窗口 → 发 `WM_CLOSE`，让应用按它自己的「关窗进托盘」逻辑隐藏（桌面壳没有 `--tray/--hidden` 参数）。开关一律小写（`-show` / `-help`）；带 BOM，中文在 PS 5.1 也不乱码 |
-| 本机没有 PowerShell 7 | ~~`pwsh.exe` 两个常见位置都不存在~~ → **2026-10-01 已装 PowerShell 7.6.6（机器范围）**，见下 |
-| `C:\Program Files\PowerShell\7\profile.ps1` | **所有用户**的 pwsh 7 默认值：区域性 zh-CN + 编码 UTF-8 无 BOM（`[Console]::OutputEncoding` / `$OutputEncoding` / `$PSDefaultParameterValues['*:Encoding']='utf8NoBOM'`）。文件本身也是 UTF-8 无 BOM |
-| PowerShell 7（机器范围） | 装法：`api.github.com` 能通但 `github.com:443` 直连超时 → 先起 Clash Party，再用 `curl.exe --proxy http://127.0.0.1:7890` 拉 MSI（112MB，签名 Microsoft 校验通过），`msiexec /i … /qn ADD_PATH=1 REGISTER_MANIFEST=1`。**ADD_PATH 会自动把 `C:\Program Files\PowerShell\7\` 追加进机器层 PATH** |
-| Windows Terminal 默认配置 | `defaultProfile` 从 Windows PowerShell 5.1 的 `{61c54bbd-…}` 改成 PowerShell 7 的 `{574e775e-4f2a-5b96-ac1e-a2962a402336}`，并在 `profiles.list` 头部插入同 GUID 的 `source: Windows.Terminal.PowershellCore` 条目；备份 `settings.json.bak-…` |
-| `HKLM\SOFTWARE\OpenSSH` | SSH 会话的默认 shell。原值指向 5.1（`…\WindowsPowerShell\v1.0\powershell.exe`），已改成 `C:\Program Files\PowerShell\7\pwsh.exe` + `DefaultShellCommandOption = -c`（官方 wiki：`-c` 本就是默认值；`DefaultShellEscapeArguments` 对 powershell/bash/cmd 类不适用，故不设）。改完**重启了 sshd 服务**（重启前确认 0 个活动会话）。Win32-OpenSSH 9.5p2 |
-| `E:\Applications\AutoHotKey\HotKeys\win_ZQES.ahk` | Common Startup 里「自定义快捷键.lnk」指向的编译产物 `win_ZQES.exe` 的源码：Win+Q 开 PowerShell、Win+W 经 PowerShell 进 WSL。已改成**优先 pwsh 7**（`EnvGet("ProgramW6432") "\PowerShell\7\pwsh.exe"`，找不到才回落 5.1；32 位进程走 SysNative 的分支保留） |
-| `C:\ProgramData\…\StartUp\自定义快捷键.lnk` | **所有用户**开机自启（Common Startup）。重新编译后已重写该快捷方式（目标/WD/图标指向新 exe），并用**启动这个 lnk** 验证过：只起一个 `win_ZQES` 进程、无运行时错误 |
-| 系统（机器层）PATH | 已把 `E:\Applications\DeepSeek Harness` 加到**机器层最前**，于是 `dsh` 抢在用户层那个 CLI `dsh.cmd`（`resources\runtime\cli\bin`）之前解析；CLI 仍可用同样的 `dsh <参数>` 走到 |
 | `docs/` | 本地提取的 DSH 官方插件开发文档（**已 gitignore，勿提交**） |
 | `tools/test-remote-access.mjs` | 独立功能测试（起假上游，无需 DSH） |
 | `tools/check-config-schema.mjs` | 用安装包里的真 Schemastery 校验 `Config`（原生 + 全字段 volatile + 与 `client.js` 表单对表），无需重启 DSH |
 
 **git**：`git@github.com:Mzy123l/dsh-remote-access.git`，分支 `main`。
-
-**本机环境踩坑（2026-10-01 收尾）**：
-
-- **AutoHotkey v2 一律按 UTF-8 读脚本**：无 BOM 正常（实测 `StrLen("中文测试")=4`、`Ord("中")=20013`），
-  **GBK 会坏**（得到 `ord=65533`）。所以 `.ahk` 存 UTF-8 无 BOM 即可；编译用
-  `Ahk2Exe.exe /in x.ahk /out x.exe /base <v2 的 AutoHotkey32.exe>`（本机没有 `.bin` 基座，且原 exe 就是 32 位基座）。
-- **`.ps1` 存 UTF-8 无 BOM 时，Windows PowerShell 5.1 会把中文读成乱码**（它按 ANSI 码页读）。
-  所以 `dsh-launch.ps1` 现在是无 BOM，但**必须**由 pwsh 7 跑（`dsh.cmd` 里 `where pwsh` 现在能找到）；
-  哪天 pwsh 7 被卸了，会回落 5.1 → 功能照旧、中文乱码。
-- **Clash Party 直接 `Start-Process` 会秒退**（无报错、无退出码），用 `explorer.exe "<exe 路径>"` 启动才正常
-  （它在 `%APPDATA%\mihomo-party`，`mixed-port: 7890`；核心进程名 `mihomo`）。
-- 改完 PATH / 装完软件后，**已打开的终端不会自动生效**，要新开一个。
-- **环境是随进程继承的，会「代代相传」**：我在本会话里启动的 `win_ZQES.exe`（AHK）继承的是我那份**旧 PATH**，
-  于是用户按 Win+Q 起的 pwsh 7 里 `dsh` 还是撞上 CLI（`error: --profile <name> is required`），
-  而 Explorer 自己的环境其实早已刷新。**自启/AHK 这类常驻进程要用 `explorer.exe "<路径>"` 代为启动**
-  （或等下次登录由 Explorer 拉起），否则它拉起的终端一直带着旧环境。排查手法：`Get-CimInstance Win32_Process`
-  看父进程链 + 让 Explorer 跑一个 `.cmd` 把它看到的 `%PATH%` 写进文件比对。
-`git ls-remote` 若报 `Permission denied (publickey)`，是 Git 自带 ssh 与系统 OpenSSH 不一致，执行一次：
-`git config core.sshCommand 'C:/Windows/System32/OpenSSH/ssh.exe'`。
 
 ---
 

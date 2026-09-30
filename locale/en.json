@@ -1,4 +1,4 @@
 {
   "title": "Remote access entry (network range)",
-  "description": "Expose this machine's DSH web GUI to a chosen network range (Tailscale 100.64.0.0/10 by default): only addresses inside the range are bound, peers outside it are refused, and DSH's own token still gates every request."
+  "description": "Expose this machine's DSH web GUI to a chosen network range (Tailscale 100.64.0.0/10 by default): only addresses inside the range are bound and peers outside it are refused, so you can reach it from a phone either with a tokenized URL or with a numeric access code."
 }
