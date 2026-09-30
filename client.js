@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-remote-access 的浏览器半区：只在「设置」里提供一页可编辑的参数表单。
  *
  * 注册位置：settings.section（设置左侧导航的一页）。插件页那两处（plugins.row.config /
@@ -109,7 +109,7 @@ window.__ModuleLoader__.load({
 
     return {
       // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
-      inject: ['slots', 'configForms', 'remote'],
+      inject: ['slots', 'configForms', 'remote', 'remote.pluginManager', 'remote.settings'],
       apply(ctx) {
         const diagnostics = [];
         const diag = (line) => {
@@ -192,7 +192,7 @@ window.__ModuleLoader__.load({
                 tries.push(`settings.mutate(${field.key}) 抛错: ${err?.message ?? err}`);
               }
             }
-            if (!done) throw new Error(`字段 ${field.key} 没有写成功：\n${tries.slice(-3).join('\n')}`);
+            if (!done) throw new Error(`字段 ${field.key} 没有写成功：\n${tries.join('\n')}`);
           }
           return tries;
         }
