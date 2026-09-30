@@ -1,14 +1,14 @@
 /**
- * dsh-remote-access 的浏览器半区。
+ * dsh-remote-access 的浏览器半区：只在「设置」里提供一页可编辑的参数表单。
  *
- * 三处注册（都是 DSH 自己声明的槽位）：
- *  1. settings.section      → 在「设置」左侧导航里多一页「远程访问」（可改参数）
- *  2. plugins.row.config    key = <包名>#<行 id> → 给 remote-access 这一行加「配置」控件
- *  3. plugins.bundle.config key = <包名>        → 组合包详情页里也放同一张表单
+ * 注册位置：settings.section（设置左侧导航的一页）。插件页那两处（plugins.row.config /
+ * plugins.bundle.config）按使用要求已移除。
  *
- * 写参数的通道：这一行（Host 条目 id = remote-access）本身就是设置命名空间，
- * 用 ctx.configForms.get(entryId) 拿到写入队列，scope.set(field, value) 提交。
- * 保存后 Host 半区会重新挂载：关掉旧端口、按新参数重开，状态文件随之更新。
+ * 读写通道（全部带返回值检查与页面内诊断，避免"显示成功实则没写"）：
+ *  读：remote.pluginManager.listPlugins()  —— 官方清单，带行与它们的实时 config
+ *  写：依次尝试 ctx.configForms.get(行id).set(field, value)
+ *              → remote.settings.mutate(行id, [{ op:'set', path, value }], revision)
+ *      两者都失败时，把当前值按 YAML 打出来让用户粘贴（保证不会卡死）
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-remote-access',
@@ -20,12 +20,11 @@ window.__ModuleLoader__.load({
     const ROW_ID = 'remote-access';
     const STATUS_HINT = 'DSH 家目录\\remote-access-url.txt';
 
-    /** 与 Host 半区 Config 对齐的字段表 */
     const FIELDS = [
       { key: 'enabled', type: 'boolean', label: '启用', hint: '关掉即停止监听，不必卸载插件' },
-      { key: 'allowCidrs', type: 'list', label: '允许的网段', hint: '唯一的安全边界；也是自动选择监听地址的依据。一行一个或用逗号分隔，例如 100.64.0.0/10' },
+      { key: 'allowCidrs', type: 'list', label: '允许的网段', hint: '唯一的安全边界；也是自动选择监听地址的依据。一行一个或用逗号分隔' },
       { key: 'denyCidrs', type: 'list', label: '排除的网段', hint: '白名单内的例外黑名单，可留空' },
-      { key: 'listen', type: 'list', label: '监听地址', hint: '留空或 auto = 只监听允许网段里属于本机的地址' },
+      { key: 'listen', type: 'list', label: '监听地址', hint: 'auto 或留空 = 只监听允许网段里属于本机的地址' },
       { key: 'port', type: 'number', label: '监听端口', hint: '0 = 系统随机；固定成 19388 之类，手机网址就稳定了' },
       { key: 'maxConnections', type: 'number', label: '并发上限', hint: '0 = 不限制' },
       { key: 'allowWebSocket', type: 'boolean', label: '透传 WebSocket', hint: '界面实时推送需要它，一般别关' },
@@ -65,8 +64,7 @@ window.__ModuleLoader__.load({
     const note = (style, ...children) =>
       h('div', { style: { lineHeight: 1.7, marginTop: 8, ...style } }, children);
 
-    const listToText = (v) =>
-      Array.isArray(v) ? v.join('\n') : v === undefined || v === null ? '' : String(v);
+    const listToText = (v) => (Array.isArray(v) ? v.join('\n') : v === undefined || v === null ? '' : String(v));
     const textToList = (t) =>
       String(t ?? '')
         .split(/[\n,]/)
@@ -90,87 +88,169 @@ window.__ModuleLoader__.load({
       return value;
     }
 
+    /** 从 pluginManager.listPlugins() 的结果里抠出自己这一行的 config */
+    function configFromInventory(inventory) {
+      const buckets = [];
+      if (Array.isArray(inventory)) buckets.push(...inventory);
+      else if (inventory && typeof inventory === 'object') {
+        for (const value of Object.values(inventory)) if (Array.isArray(value)) buckets.push(...value);
+      }
+      for (const entry of buckets) {
+        if (!entry || typeof entry !== 'object') continue;
+        const name = entry.name ?? entry.package ?? entry.id;
+        const rowId = entry.rowId ?? entry.entryId ?? entry.id;
+        if (name === PACKAGE || rowId === ROW_ID || entry.id === ROW_ID) {
+          const config = entry.config ?? entry.resolvedConfig ?? entry.value;
+          if (config && typeof config === 'object') return config;
+        }
+      }
+      return undefined;
+    }
+
     return {
-      // 必须声明 configForms，否则 ctx.configForms 的属性访问会抛
-      // "cannot get property ... without inject"（Host 侧访问 connection 同理）
-      inject: ['slots', 'configForms'],
+      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
+      inject: ['slots', 'configForms', 'remote'],
       apply(ctx) {
-        /** 读当前生效值：优先快照的 value/user，再逐字段试 scope.get(field) */
-        function readCurrent(scope) {
-          let snapshot;
+        const diagnostics = [];
+        const diag = (line) => {
+          diagnostics.push(line);
+          return line;
+        };
+
+        function servedNamespaces() {
           try {
-            if (typeof scope?.snapshot === 'function') snapshot = scope.snapshot();
-            else if (typeof scope?.get === 'function') snapshot = scope.get();
-            else snapshot = scope;
-          } catch { /* 忽略 */ }
-          const value =
-            snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
-              ? snapshot.value ?? snapshot.user ?? snapshot
-              : {};
-          const out = {};
-          for (const field of FIELDS) {
-            let v;
-            try {
-              if (typeof scope?.get === 'function') v = scope.get(field.key);
-            } catch { /* 忽略 */ }
-            // 若 get() 其实是无参快照，这里会拿到对象 —— 丢掉它，改用 value[field]
-            if (v !== undefined && (typeof v !== 'object' || Array.isArray(v))) {
-              out[field.key] = decode(field, v);
-            } else {
-              const fromValue = value && typeof value === 'object' ? value[field.key] : undefined;
-              out[field.key] = decode(field, fromValue);
-            }
+            const described = ctx.configForms.describe?.();
+            const snap =
+              typeof described?.getSnapshot === 'function' ? described.getSnapshot() : described;
+            const list =
+              snap?.namespaces ?? snap?.entries ?? (snap && typeof snap === 'object' ? Object.keys(snap) : []);
+            return Array.isArray(list) ? list : [];
+          } catch (err) {
+            diag(`describe() 失败: ${err?.message ?? err}`);
+            return [];
           }
-          return out;
         }
 
-        /** 提交全部字段：优先 scope.set(field, value)，退化到 mutate(ops, revision) */
-        async function submit(scope, draft) {
-          let revision;
+        async function readFromInventory() {
           try {
-            const snap = typeof scope?.snapshot === 'function' ? scope.snapshot() : scope;
-            revision = snap?.revision;
-          } catch { /* 忽略 */ }
+            const inventory = await ctx.remote.pluginManager.listPlugins();
+            const config = configFromInventory(inventory);
+            if (config) diag('读：来自 remote.pluginManager.listPlugins()');
+            else diag('读：清单里没找到本行的 config，退回快照/默认值');
+            return config;
+          } catch (err) {
+            diag(`读：listPlugins() 失败 ${err?.message ?? err}`);
+            return undefined;
+          }
+        }
+
+        /** 返回值检查：false / 带 error 的对象都算失败 */
+        function checkResult(result) {
+          if (result === false) return { ok: false, why: '返回 false' };
+          if (result && typeof result === 'object') {
+            if (result.error) return { ok: false, why: `返回 error: ${JSON.stringify(result.error).slice(0, 200)}` };
+            if (result.accepted === false || result.ok === false)
+              return { ok: false, why: `返回 ${JSON.stringify(result).slice(0, 200)}` };
+          }
+          return { ok: true, why: result === undefined ? '无返回值（视为通过）' : `返回 ${JSON.stringify(result).slice(0, 120)}` };
+        }
+
+        async function writeAll(scope, draft) {
+          const revision = (() => {
+            try {
+              const snap = typeof scope?.snapshot === 'function' ? scope.snapshot() : scope;
+              return snap?.revision;
+            } catch {
+              return undefined;
+            }
+          })();
+          const tries = [];
           for (const field of FIELDS) {
             const value = encode(field, draft[field.key]);
+            let done = false;
             if (typeof scope?.set === 'function') {
-              await scope.set(field.key, value);
-            } else if (typeof scope?.mutate === 'function') {
-              await scope.mutate([{ op: 'set', path: field.key, value }], revision);
+              try {
+                const result = await scope.set(field.key, value);
+                const verdict = checkResult(result);
+                tries.push(`configForms.set(${field.key}) → ${verdict.why}`);
+                if (verdict.ok) done = true;
+              } catch (err) {
+                tries.push(`configForms.set(${field.key}) 抛错: ${err?.message ?? err}`);
+              }
+            }
+            if (!done && typeof ctx.remote?.settings?.mutate === 'function') {
+              try {
+                const result = await ctx.remote.settings.mutate(
+                  ROW_ID,
+                  [{ op: 'set', path: field.key, value }],
+                  revision,
+                );
+                const verdict = checkResult(result);
+                tries.push(`settings.mutate(${field.key}) → ${verdict.why}`);
+                if (verdict.ok) done = true;
+              } catch (err) {
+                tries.push(`settings.mutate(${field.key}) 抛错: ${err?.message ?? err}`);
+              }
+            }
+            if (!done) throw new Error(`字段 ${field.key} 没有写成功：\n${tries.slice(-3).join('\n')}`);
+          }
+          return tries;
+        }
+
+        function yamlSnippet(draft) {
+          const lines = [`- id: ${ROW_ID}`, `  name: '${PACKAGE}'`, '  config:'];
+          for (const field of FIELDS) {
+            const value = encode(field, draft[field.key]);
+            if (field.type === 'list') {
+              lines.push(`    ${field.key}:`);
+              for (const item of value) lines.push(`      - ${item}`);
             } else {
-              throw new Error('当前 DSH 没有暴露可写接口（scope.set / scope.mutate 都不可用）');
+              lines.push(`    ${field.key}: ${typeof value === 'string' ? JSON.stringify(value) : value}`);
             }
           }
+          return lines.join('\n');
         }
 
         function Panel() {
-          const [resolved] = React.useState(() => {
+          const [scope] = React.useState(() => {
             try {
-              return { scope: ctx.configForms.get(ROW_ID) };
+              return { value: ctx.configForms.get(ROW_ID) };
             } catch (err) {
               return { error: String(err?.message ?? err) };
             }
           });
-          const scope = resolved.scope;
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
+          const [tries, setTries] = React.useState([]);
           const [busy, setBusy] = React.useState(false);
 
-          React.useEffect(() => {
-            if (draft === null && scope) setDraft(readCurrent(scope));
-          }, [scope, draft]);
+          const load = React.useCallback(async () => {
+            const fromInventory = await readFromInventory();
+            const snapshotValue = (() => {
+              try {
+                const s = typeof scope.value?.snapshot === 'function' ? scope.value.snapshot() : scope.value;
+                const v = s?.value ?? s?.user;
+                return v && typeof v === 'object' ? v : {};
+              } catch {
+                return {};
+              }
+            })();
+            const source = { ...snapshotValue, ...(fromInventory ?? {}) };
+            const next = {};
+            for (const field of FIELDS) next[field.key] = decode(field, source[field.key]);
+            return next;
+          }, [scope.value]);
 
-          if (!scope) {
-            return h(
-              'div',
-              { style: { lineHeight: 1.7 } },
-              '拿不到设置写入通道：ctx.configForms.get("remote-access") 失败。',
-              resolved.error
-                ? h('div', { style: { ...mono, marginTop: 8, whiteSpace: 'pre-wrap' } }, resolved.error)
-                : null,
-              h('div', { style: { marginTop: 8, opacity: 0.75 } }, '把这段错误原文发给我即可定位。'),
-            );
-          }
+          React.useEffect(() => {
+            let alive = true;
+            load().then((next) => {
+              if (alive) setDraft(next);
+            });
+            return () => {
+              alive = false;
+            };
+          }, [load]);
+
           if (draft === null) return h('div', null, '读取中…');
 
           const setField = (key, value) => setDraft({ ...draft, [key]: value });
@@ -178,9 +258,15 @@ window.__ModuleLoader__.load({
           const onSave = async () => {
             setBusy(true);
             setStatus('保存中…');
+            setTries([]);
             try {
-              await submit(scope, draft);
-              setStatus('已保存。插件会重新挂载：端口可能变化，新网址见状态文件。');
+              if (scope.error) throw new Error(`拿不到写入通道：${scope.error}`);
+              const attempted = await writeAll(scope.value, draft);
+              setTries(attempted.slice(-4));
+              const verify = await load();
+              setDraft(verify);
+              const changed = FIELDS.some((f) => JSON.stringify(verify[f.key]) !== JSON.stringify(draft[f.key]));
+              setStatus(changed ? '写入返回成功，但回读发现值没变 —— 说明这条路没真正落盘。' : '已保存。插件会重新挂载：端口可能变化，新网址见状态文件。');
             } catch (err) {
               setStatus(`保存失败：${err?.message ?? err}`);
             } finally {
@@ -258,6 +344,8 @@ window.__ModuleLoader__.load({
             ];
           });
 
+          const namespaceServed = servedNamespaces().includes(ROW_ID);
+
           return h(
             'div',
             { style: { padding: '2px 0' } },
@@ -272,33 +360,49 @@ window.__ModuleLoader__.load({
               'div',
               { style: { marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' } },
               h('button', { type: 'button', onClick: onSave, disabled: busy }, busy ? '保存中…' : '保存'),
-              h('button', { type: 'button', onClick: () => setDraft(readCurrent(scope)), disabled: busy }, '重新读取'),
-              status ? h('span', { style: { opacity: 0.85 } }, status) : null,
+              h(
+                'button',
+                {
+                  type: 'button',
+                  disabled: busy,
+                  onClick: () => {
+                    setStatus('');
+                    setTries([]);
+                    load().then(setDraft);
+                  },
+                },
+                '重新读取',
+              ),
+              status ? h('span', { style: { opacity: 0.9 } }, status) : null,
+            ),
+            tries.length
+              ? h(
+                  'div',
+                  { style: { ...mono, display: 'block', marginTop: 8, whiteSpace: 'pre-wrap' } },
+                  tries.join('\n'),
+                )
+              : null,
+            note(
+              { opacity: 0.8 },
+              '诊断：命名空间 ',
+              code(ROW_ID),
+              namespaceServed ? ' 已在已服务列表中' : ' **不在**已服务列表中（这通常意味着这条路写不进去）',
+              diagnostics.length ? `；${diagnostics.join('；')}` : '',
             ),
             note(
               { opacity: 0.8 },
-              '保存写入 profile 的 patch 层（等同手改 ',
+              '如果保存失败，可以把下面这段贴进 profile 的 ',
               code('cordis.patch.yml'),
-              '）；',
-              code('allowCidrs'),
-              ' 是唯一的安全边界，写宽了等于把本机命令执行权限放开。自测：',
-              code('node tools/test-remote-access.mjs'),
-              '。',
+              '（把 ',
+              code('- insert:'),
+              ' 里那一行的 config 换成它），然后重启 DSH：',
             ),
+            h('pre', { style: { ...mono, display: 'block', marginTop: 6, whiteSpace: 'pre-wrap' } }, yamlSnippet(draft)),
           );
         }
 
-        // 1) 设置左侧导航里的一页
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register({ name: 'settings.section', id: ROW_ID, order: 100, label: '远程访问' }, Panel),
-        );
-        // 2) remote-access 这一行的「配置」控件（key = 包名#行 id）
-        ctx.slots.inject('plugins.row.config', () =>
-          ctx.slots.register({ name: 'plugins.row.config', key: `${PACKAGE}#${ROW_ID}`, order: 100 }, Panel),
-        );
-        // 3) 组合包详情页里的配置区（key = 包名）
-        ctx.slots.inject('plugins.bundle.config', () =>
-          ctx.slots.register({ name: 'plugins.bundle.config', key: PACKAGE, order: 100 }, Panel),
         );
       },
     };
