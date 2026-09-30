@@ -40,6 +40,45 @@ Host 的设置文档**只服务「`Config` 是原生 Schemastery schema、且含
 → `Config.listConfigs` 里这一行 `status: "absent"` → **命名空间从不出现**
 → `configForms.set` 找不到命名空间，**静默返回 false**（第 2 节原来那三条报错都是这个根因的表象）。
 
+### 第二道门：link: 装的插件必须声明 peerDependencies（第一轮修完仍然 absent）
+
+改成 `import('@deepseek-ai/schemastery')` 后重启，`Config.listConfigs` **仍然是 absent**。原因是 DSH 的
+模块解析拦截（`installRuntimeInterception`）对「哪些裸名可以借安装目录里的包」有额外条件：
+
+- `linkedProfileRoots()` 把 profile 里 `link:` 的目标目录登记为 **linked root**（本项目就是
+  `@local/dsh-remote-access → C:\ProgramData\dsh-plugins\dsh-remote-access`）；
+- `findInterceptionLayer()` 因此会命中（`hasInterceptionLayerForUrl` 返回 true，但这**只是必要条件**）；
+- 真正决定放行的是 `ResolutionRouter.routeLinked()`：它沿插件的祖先目录找 `node_modules`，
+  只有**某个祖先目录的 `package.json` 把该包列在 `peerDependencies` 里**（`readPeerNames`）时，
+  才把裸名路由到安装里的那个包；否则退回 `{ kind: 'native' }` —— 原生解析看不到 `app.asar` 里的
+  `dsh/node_modules`，于是 `import` 抛 `ERR_MODULE_NOT_FOUND`。
+
+所以 `package.json` 必须写：
+
+```json
+"peerDependencies": { "@deepseek-ai/schemastery": "^3.18.1" }
+```
+
+peer **不会**被 pnpm 装进 profile（`app.asar` 供包，profile 里仍然没有 `@deepseek-ai` 目录，零依赖不变；
+`dshmarket` 也正是这样声明 `@deepseek-ai/cordis` / `@deepseek-ai/schemastery` 的）。
+
+**实测凭据**（用 DSH 自带运行时跑真解析器，A/B 只差 package.json 里那一条 peer）：
+
+```
+A 有 peer（插件真实目录）→ E:\...\app.asar\dsh\node_modules\@deepseek-ai\schemastery
+B 无 peer（同一份 index.js）→ (解析不到 → 裸名 import 会失败)
+linkedRoots: @local/dsh-remote-access → C:\ProgramData\dsh-plugins\dsh-remote-access
+```
+
+复现方式（不需要重启 GUI；`cli.js` 那条路对 desktop profile 会被拒绝，得自己 mount `PluginPackages`）：
+
+```powershell
+$env:ELECTRON_RUN_AS_NODE = 1
+& "E:\Applications\DeepSeek Harness\DeepSeek Harness.exe" --expose-internals <探针.mjs>
+# 探针里：createRuntimeResolution({installAnchor, profile, home}) → new PluginPackages(ctx, {resolution})
+#          → pluginPackages.packageOf('@deepseek-ai/schemastery', <插件的 index.js 的 file URL>)
+```
+
 ### 判断链（都在安装包 `app.asar` 里查到的原文）
 
 | 位置 | 事实 |
@@ -50,19 +89,21 @@ Host 的设置文档**只服务「`Config` 是原生 Schemastery schema、且含
 | `volatileForm` / `isVolatilePath` | 只收 `meta.volatile === true` 的字段（含最近的 volatile 祖先）；**一个 volatile 字段都没有 → 整条命名空间不出现** |
 | `@deepseek-ai/dsh-api-settings-controller` | `settings/mutate` 的 `ops` 元素是 `{ op:'set', path:[字段], value }`（`path` 是**数组**，这就是当初 `gateway/input-invalid: ops` 的原因） |
 | `ConfigFormController`（`ctx.configForms.get(ns)`） | `getSnapshot()` → `{ status, value, base, user, revision, writable, mode }`；`subscribe(fn)`；`set(field,value)` = 一条 `{op:'set',path:[field],value}`；`mutate(ops, revision)` → `remote.settings.mutate(ns, ops, revision)` → `Promise<boolean>` |
-| DSH 的模块解析 | `installRuntimeInterception` 直接改写 Node 内部的 ESM/CJS 解析器，把**安装作用域**的包供给 profile 插件，所以 profile 里的插件可以按裸名 `import('@deepseek-ai/schemastery')`（无需声明依赖、无需装在 profile 里） |
+| DSH 的模块解析 | `installRuntimeInterception` 直接改写 Node 内部的 ESM/CJS 解析器：**安装作用域**的包由它供给 profile 插件。命中拦截只是必要条件——`link:` 装的插件还要在 `package.json` 的 `peerDependencies` 里声明该包（`routeLinked` + `readPeerNames`），否则裸名退回原生解析必然失败 |
 | 写入落盘 | `configEditor.edit` 把值写进 profile 的 patch 文档（`cordis.patch.yml` 所在层），再按 Loader 正常路径重挂载 |
 | 配置变化是否重挂载 | Cordis `Fiber.update()` 最后是 `this.restart()` —— **一律重新 apply**，所以「保存即生效」；`.volatile()` 只决定「哪些字段进表单」，不是「免重启」的暗示 |
 
 ### 修法
 
-- `index.js`：改 `import('@deepseek-ai/schemastery')`，`Config` 的 14 个字段全部 `.volatile()`
-  （它们是纯运行期参数）；纯 node 环境解析不到时仍降级为「无 schema」，插件照常工作。
+- `package.json`：把 `@deepseek-ai/schemastery` 声明为 **peerDependency**（见上，这是能从安装目录借到包的凭据）。
+- `index.js`：`import('@deepseek-ai/schemastery')`，`Config` 的 14 个字段全部 `.volatile()`
+  （它们是纯运行期参数）；纯 node 环境解析不到时仍降级为「无 schema」，插件照常工作——
+  并且**把解析结果（成功来源 / 报错原文）写进状态文件的诊断区**，不许再哑巴失败。
 - `client.js`：`inject: ['slots', 'configForms']`，读写改用 `configForms`；
   保存 = 只把**改动过的**字段编成一条原子 `mutate(ops, revision)`；
   失败时把 `status / writable / mode / revision / 已服务命名空间` 摆在页面上（不许哑巴失败）。
-- 回归：`node tools/check-config-schema.mjs` 用**安装包里的真 Schemastery** 校验
-  「原生 schema + 全字段 volatile + 表单字段与 schema 对表」，**不需要重启 DSH**。
+- 回归：`node tools/check-config-schema.mjs` 验**两道门**——peer 声明（含版本范围）+ 用安装包里的真
+  Schemastery 验「原生 schema + 全字段 volatile + 表单字段/类型对表」，**不需要重启 DSH**。
 
 ### 为什么不走「Host 半区自己写盘 / host.call」
 
@@ -102,7 +143,7 @@ Host 的设置文档**只服务「`Config` 是原生 Schemastery schema、且含
 | `settings.section` | 设置左侧导航的一页；`settings.plugins.tab` 是「设置 → 插件」里的一个标签页 |
 | `inject` 规则 | **访问任何服务都要先在 `inject` 里声明**，否则属性访问抛 `cannot get property "..." without inject`。远程命名空间要写**点号全名**：`'remote.pluginManager'`、`'remote.settings'` |
 | Host 侧同样适用 | 本插件 Host 半区必须 `inject = ['connection']`，否则 `ctx.connection` 抛错 |
-| `Config` 声明 | `export const Config = Schema.object({…})`，`Schema` 是 **`@deepseek-ai/schemastery` 的默认导出**（不是 cordis 上的 `Schema`！）。DSH 改写 Node 解析器，profile 插件按裸名 import 即可；纯 node 环境解析不到，用动态 import + 兜底 |
+| `Config` 声明 | `export const Config = Schema.object({…})`，`Schema` 是 **`@deepseek-ai/schemastery` 的默认导出**（不是 cordis 上的 `Schema`！）。裸名能解析的前提是 `package.json` 把该包声明为 **peerDependency**（见第 2 节第二道门）；纯 node 环境解析不到，用动态 import + 兜底 |
 | `Config` 的两个硬前提 | ① 原生 schema（`Symbol.for('schemastery')`，实例是**函数**）；② 至少要有一个 **`.volatile()`** 字段，否则 Host 设置文档根本不列这条命名空间（`volatileForm`） |
 | 设置命名空间 id | = **Loader 条目的 `options.id`**（patch 里的行 id，本插件是 `remote-access`），不是包名 |
 | `.volatile()` 的含义 | 只决定「哪些字段进设置表单」，**不是「免重启」**：Cordis `Fiber.update()` 最后一律 `restart()`，插件会重新 apply |
@@ -150,9 +191,13 @@ Host 的设置文档**只服务「`Config` 是原生 Schemastery schema、且含
 ## 7. 待办清单
 
 1. **[待用户]** 重启 DSH 后到「设置 → 远程访问」实测一次保存：页面上应看到
-   `status=ready`、`writable=true`，且列出的已服务命名空间里含 `remote-access`。
+   `status=ready`、`writable=true`，且列出的已服务命名空间里含 `remote-access`；
+   状态文件的诊断区应出现 `Config schema 已就绪（@deepseek-ai/schemastery…）`。
+   若仍是 `unavailable`：先看状态文件里那条 `Config schema 没拿到（…）` 的原文，再对照第 2 节两道门。
 2. 建议把 `port` 固定（例如 `19388`），否则手机网址每次重启都变（现在可以在设置页里改）。
-3. 可选：命令行工具（`E:\Applications\dsh-remote-access`）——按参数启动 DSH、已在跑则改参数（用户提过，但 GUI 优先）。
-4. 可选：客户端页面显示**当前生效的带票网址**（现在只能读文件）。需要 Host⇄Client 数据通道——
+3. 可选：把第 2 节那段「用 DSH 自带运行时跑真解析器 A/B」的探针做成 `tools/check-resolution.mjs`，
+   这样连 peer 是否真的生效都能在重启前验掉（本轮是手写临时探针跑的）。
+4. 可选：命令行工具（`E:\Applications\dsh-remote-access`）——按参数启动 DSH、已在跑则改参数（用户提过，但 GUI 优先）。
+5. 可选：客户端页面显示**当前生效的带票网址**（现在只能读文件）。需要 Host⇄Client 数据通道——
    注意 module-loader 半区拿不到 `host.call`，可行路线是让 Host 半区把网址写进状态文件后由页面读文件、
    或按官方做法定义一个 `@Remote` 端点（要带 typert 生成的 codec）。

@@ -47,10 +47,14 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 
 **那个状态文件里有访问令牌，等于本机操作权限**，按 `0600` 写入，别外传。
 
-> 设置页能写盘的前提，是这一行的 `Config` 是**原生 Schemastery schema**（`@deepseek-ai/schemastery`）
-> 且每个字段都标了 `.volatile()`：Host 的设置文档由 `volatileForm` / `isVolatilePath` 过滤，
-> 只服务「含 volatile 字段」的条目。`node tools/check-config-schema.mjs` 会用安装包里的真
-> Schemastery 校验这两点（不需要重启 DSH）。
+> 设置页能写盘的前提有两道门，缺一条保存就会失败：
+> 1. 这一行的 `Config` 是**原生 Schemastery schema**（`@deepseek-ai/schemastery`）且每个字段都标了
+>    `.volatile()` —— Host 的设置文档由 `volatileForm` / `isVolatilePath` 过滤，只服务「含 volatile 字段」的条目；
+> 2. `package.json` 把 `@deepseek-ai/schemastery` 声明为 **peerDependency** —— 本插件是用 `link:` 装进
+>    profile 的，DSH 的解析器只对「声明过的 peer」放行安装目录（`app.asar\dsh\node_modules`）里的包；
+>    peer 不会被 pnpm 装进 profile，所以依然是零依赖。
+>
+> `node tools/check-config-schema.mjs` 会把两道门都验掉（不需要重启 DSH）。
 
 ## 使用
 
@@ -77,9 +81,10 @@ node tools/check-config-schema.mjs          # 用安装包里的真 Schemastery 
 `tools/test-remote-access.mjs` 覆盖：转发、`Host`/`Origin` 改写、`x-forwarded-for`、WebSocket `101` 透传、
 网段外 `403`、拿不到令牌时的降级、状态文件与带票网址。
 
-`tools/check-config-schema.mjs` 覆盖「设置页写不写得进去」的两条硬前提：`Config` 是原生 Schemastery
-schema、且每个字段都标了 `.volatile()`；顺带对表 `client.js` 的表单字段与 `Config` 字段、控件类型与
-schema 类型。它把安装包里的 `schemastery` 铺进临时 `node_modules` 再加载 `index.js`，因此不需要 DSH。
+`tools/check-config-schema.mjs` 覆盖「设置页写不写得进去」的硬前提：`peerDependencies` 是否声明了
+`@deepseek-ai/schemastery`（含版本范围容不容得下装着的版本）、`Config` 是否是原生 Schemastery schema、
+是否每个字段都标了 `.volatile()`；顺带对表 `client.js` 的表单字段与 `Config` 字段、控件类型与 schema 类型。
+它把安装包里的 `schemastery` 铺进临时 `node_modules` 再加载 `index.js`，因此不需要 DSH。
 
 `tools/asar-extract.mjs` 可以从 `app.asar` 里读文件（DSH 的实现、技能、模板都在里面）：
 

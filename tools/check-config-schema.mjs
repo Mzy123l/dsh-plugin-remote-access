@@ -49,10 +49,39 @@ function formFields(clientSource) {
 
 const EXPECTED_TYPE = { boolean: 'boolean', number: 'number', string: 'string', list: 'array' };
 
+/** `^3.18.1` 这类 caret 范围的粗判（只用于「peer 范围是否容得下装着的版本」这条提示） */
+function caretSatisfies(range, version) {
+  const m = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(String(range).trim());
+  if (!m) return null;
+  const [major, minor, patch] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const v = String(version).split('.').map(Number);
+  if (v[0] !== major || major === 0) return false;
+  return v[1] > minor || (v[1] === minor && v[2] >= patch);
+}
+
 const asarPath = findAsar();
 if (!asarPath) {
   console.log('SKIP  找不到 DSH 安装包（app.asar）——设 DSH_ASAR 环境变量后可校验 Config');
   process.exit(0);
+}
+
+// 这一条与 schema 无关，但同属「装进 DSH 才发现」的坑，而且是本项目真实踩过的：
+// DSH 把 profile 里以 link: 装的插件当作 linked 层，routeLinked() 只对
+// 「某个祖先目录的 package.json 在 peerDependencies 里列过」的裸名放行，
+// 否则退回原生解析 —— 安装目录里的包永远找不到，Config 就静默变成 undefined。
+{
+  const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const range = manifest.peerDependencies?.['@deepseek-ai/schemastery'];
+  check(
+    'package.json 把 @deepseek-ai/schemastery 声明为 peerDependency',
+    typeof range === 'string' && range.length > 0,
+    typeof range === 'string' ? range : 'link: 装的插件不声明 peer，DSH 就不会把安装目录里的这个包借给它',
+  );
+  if (typeof range === 'string') {
+    const installed = JSON.parse(readAsarBuffer(asarPath, `${SCHEMA_PKG}/package.json`).toString('utf8')).version;
+    const ok = caretSatisfies(range, installed);
+    if (ok !== null) check('peer 范围容得下安装包里的版本', ok, `声明的 ${range} ↔ 装着的 ${installed}`);
+  }
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-schema-'));

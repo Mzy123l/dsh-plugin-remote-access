@@ -36,14 +36,22 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，设置左侧导航出现「远程访问」一页，
 参数读写走官方通道 `ctx.configForms.get('remote-access')`（`getSnapshot` 读、`mutate([{op:'set',path:[key],value}], revision)` 原子写）。
 
-**设置页保存已修好** ✅（原卡点的根因见下）。**待用户重启 DSH 后实测一次**（换 JS 必须重启）。
+**设置页保存已修好** ✅（两道门的根因见下）。**待用户重启 DSH 后实测一次**（换 JS 必须重启）。
 
-**根因（原来写不进去的原因）**：Host 的设置文档只服务「`Config` 是原生 Schemastery schema、且含
+**根因一（写不进去）**：Host 的设置文档只服务「`Config` 是原生 Schemastery schema、且含
 `.volatile()` 字段」的条目（`@deepseek-ai/dsh-settings` 的 `volatileForm` / `isVolatilePath`）。
 `@deepseek-ai/dsh-app-boot` 的 `isNativeConfigSchema` 认的是 `Symbol.for('schemastery')`，而真包名是
 **`@deepseek-ai/schemastery`**（不是 `cordis`）。原来 `import('@deepseek-ai/cordis')` 取 `Schema`
 得到 undefined → `Config` 没导出 → `Config.listConfigs` 里这一行 `status: "absent"` → 命名空间从不出现
 → `configForms.set` 静默返回 false。
+
+**根因二（第一轮修完仍然 absent）**：DSH 把 profile 里以 `link:` 装的插件当作 **linked 层**，
+`ResolutionRouter.routeLinked()` 只对「某个祖先目录的 `package.json` 在 `peerDependencies` 里列过」的
+裸名放行，否则退回原生解析——安装目录（`app.asar\dsh\node_modules`）里的包永远找不到。
+所以 `package.json` **必须**声明 `"peerDependencies": { "@deepseek-ai/schemastery": "^3.18.1" }`：
+peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么声明 cordis/schemastery 的），
+但它是 DSH 肯把安装目录里的包借给你的**唯一凭据**。
+`node tools/check-config-schema.mjs` 现在把这两道门都验了（12 项），**改完先验再重启**。
 
 **关键教训**：
 - 客户端 `inject` 必须写点号全名（`'remote.pluginManager'`、`'remote.settings'`），只写 `'remote'` 会报 `without inject`；
