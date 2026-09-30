@@ -524,21 +524,44 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
       headers: upstreamHeaders(req.headers, up, cfg, peer),
     };
     if (cfg.timeoutMs > 0) options.timeout = cfg.timeoutMs;
-    const upReq = http.request(options, (upRes) => {
-      res.writeHead(upRes.statusCode || 502, upRes.headers);
-      upRes.pipe(res);
-    });
-    upReq.on('timeout', () => {
-      note('debug', `上游响应超时（${cfg.timeoutMs}ms）`);
-      upReq.destroy(new Error('upstream timeout'));
-    });
-    upReq.on('error', (err) => {
+
+    const failUpstream = (err) => {
       note('debug', `上游请求失败: ${err?.message}`);
       try {
         res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
         res.end('502 bad gateway: upstream unreachable\n');
       } catch { /* 已发出 */ }
+    };
+
+    // 只有幂等方法才敢「带票重放」（重放时请求体已经流走了）
+    const canRepair = authorized && /^(GET|HEAD)$/i.test(String(req.method));
+    let repaired = false;
+
+    const onUpstream = (upRes) => {
+      // 上游说没票，可我们明明判过已授权 → 多半是浏览器那张 DSH cookie 失效了（每次重启 DSH 都换）。
+      // 用本实例当前的票再试一次：DSH 会 303 + 发一张新 cookie，用户不用手动清 cookie、换网址。
+      if (upRes.statusCode === 401 && canRepair && !repaired) {
+        repaired = true;
+        upRes.resume(); // 丢掉这次的 401 响应
+        note('info', `${peer} 的 DSH cookie 已失效 → 带本实例当前的票自动重试一次`);
+        const retry = http.request(
+          { ...options, path: gate.withTicket(req.url, req.headers.cookie, true) },
+          onUpstream,
+        );
+        retry.on('error', failUpstream);
+        retry.end();
+        return;
+      }
+      res.writeHead(upRes.statusCode || 502, upRes.headers);
+      upRes.pipe(res);
+    };
+
+    const upReq = http.request(options, onUpstream);
+    upReq.on('timeout', () => {
+      note('debug', `上游响应超时（${cfg.timeoutMs}ms）`);
+      upReq.destroy(new Error('upstream timeout'));
     });
+    upReq.on('error', failUpstream);
     req.pipe(upReq);
   });
 
@@ -552,7 +575,8 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
     socket.on('close', () => { active -= 1; });
   });
 
-  // WebSocket / 事件流透传（DSH 界面靠它推送）。升级请求走 DSH cookie，不补票（补票会被 303 打断）。
+  // WebSocket / 事件流透传（DSH 界面靠它推送）。升级请求走 DSH cookie，不补票（补票会被 303 打断）；
+  // cookie 失效时先靠上面那次「401 → 带票重试」把 cookie 换新（页面导航会走到），WS 自己不做重试。
   server.on('upgrade', (req, socket, head) => {
     const peer = bareIp(socket.remoteAddress);
     if (!peerAllowed(peer, cfg) || gate.banned(peer)) {
@@ -874,9 +898,10 @@ export function apply(ctx, config) {
       if (/dsh-auth-/i.test(cookie)) return true;
       return Boolean(cfg.accessCode) && cookie.includes(`${UNLOCK_COOKIE}=${cookieValue}`);
     },
-    /** 给已授权但还没有 DSH cookie 的请求补票；**顺手把旧票换成本实例当前这张** */
-    withTicket(url, cookie) {
-      if (/dsh-auth-/i.test(String(cookie ?? ''))) return url;
+    /** 给已授权但还没有 DSH cookie 的请求补票；force=true 时连「已有 DSH cookie」也照样补
+     *  （只在自动修复那条路上用：cookie 失效时得靠票把 DSH 重新认下来） */
+    withTicket(url, cookie, force = false) {
+      if (!force && /dsh-auth-/i.test(String(cookie ?? ''))) return url;
       if (!ticket) return url;
       const stripped = String(url)
         .replace(/([?&])token=[^&]*&?/i, (_, sep) => (sep === '?' ? '?' : ''))

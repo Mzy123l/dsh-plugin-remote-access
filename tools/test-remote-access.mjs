@@ -14,10 +14,22 @@ const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'}  $
 
 // 假上游：模拟 DSH 界面（把收到的 Host/Origin/token 回显出来）+ 一个 upgrade 端点
 const upstream = http.createServer((req, res) => {
-  const token = new URL(req.url, 'http://x').searchParams.get('token') ?? '-';
+  const cookie = String(req.headers.cookie ?? '');
+  const token = new URL(req.url, 'http://x').searchParams.get('token');
+  // 顺便模拟 DSH 的鉴权：cookie 失效且没票 → 401（那句英文）；带票 → 303 + 发一张新 cookie
+  if (cookie.includes('dsh-auth-stale') && !token) {
+    res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('dsh web authentication required; reopen the URL printed by dsh web.\n');
+    return;
+  }
+  if (cookie.includes('dsh-auth-stale') && token) {
+    res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-fresh; Path=/; HttpOnly' });
+    res.end();
+    return;
+  }
   res.writeHead(200, { 'content-type': 'text/plain' });
   res.end(
-    `upstream host=${req.headers.host} origin=${req.headers.origin ?? '-'} xff=${req.headers['x-forwarded-for'] ?? '-'} token=${token}`,
+    `upstream host=${req.headers.host} origin=${req.headers.origin ?? '-'} xff=${req.headers['x-forwarded-for'] ?? '-'} token=${token ?? '-'}`,
   );
 });
 upstream.on('upgrade', (req, socket) => {
@@ -249,6 +261,26 @@ check(
   '已授权 + 旧票：转发前换成本实例当前的票',
   swapped.status === 200 && swapped.body.includes('token=TESTTOKEN') && !swapped.body.includes('STALE'),
   swapped.body,
+);
+
+// ---- 场景 5d：浏览器那张 DSH cookie 失效时，代理自动带票重试一次（DSH 会 303 发新 cookie）----
+const healed = await call(port5, { headers: { cookie: 'dsh-auth-stale', accept: 'text/html' } });
+check(
+  '失效的 DSH cookie：自动带票重试 → 303 + 新 cookie（不再是那句英文 401）',
+  healed.status === 303 && String(healed.headers['set-cookie'] ?? '').includes('dsh-auth-fresh'),
+  `HTTP ${healed.status} ${String(healed.headers['set-cookie'] ?? '').slice(0, 40)}`,
+);
+const healedNav = await call(port5, { headers: { cookie: 'dsh-auth-fresh', accept: 'text/html' } });
+check(
+  '换到新 cookie 后正常直达上游',
+  healedNav.status === 200 && healedNav.body.includes('upstream host='),
+  `HTTP ${healedNav.status}`,
+);
+const noTicket = await call(port5, { headers: { cookie: 'dsh-auth-fresh' } });
+check(
+  '有效 cookie 不会被塞票（塞了 DSH 每次都会 303）',
+  noTicket.status === 200 && noTicket.body.includes('token=-'),
+  noTicket.body,
 );
 
 // ---- 场景 5b：写配置失败时，仍然立刻拦住 + 暂存下来（失败必须可见）----
