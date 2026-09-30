@@ -163,7 +163,10 @@ $env:ELECTRON_RUN_AS_NODE = 1
 | 改代码的生效条件 | **换 JS 必须重启 DSH**（热重载只重组配置，不换模块代）；`cordis.patch.yml` / home patch 的改动**不会自己**触发重组（实测：手工改 `maxConnections` 3→7，盯 16 秒无反应） |
 | 配置热重载的钩子 | `configEditor.edit()` 写盘后会 `reconcileProfilePatches()`，它在**根上下文**发 **`app-boot/config-reload`**（settings provider 自己就挂这个事件失效缓存：`ctx.on("app-boot/config-reload", …)`）。Cordis 事件是**父→子**派发，所以在自己 context 上 `ctx.on` 就能收到根上发的事件；反过来（听兄弟服务在自己 context 上 emit 的 `settings/document-updated`）**收不到** |
 | 读「生效配置」的正确姿势 | 服务名是 **`settings`**（`SettingsForms`，`super(ownerContext, "settings")`，`static inject = ["configEditor","profileContext"]`）。`ctx.get('settings').describe({redactSecrets:true})` 返回描述符数组，每项有 `ns / value / base / user / revision`。**`value` 是运行中 fiber 的旧值**（不可靠），`user` 是刚写进 patch 的那层、`base` 是它下面继承的层 —— 热重载要读 `{...base, ...user}` |
-| 重启的副作用 | 每次重启换 **token**（带票网址失效）与**随机端口**（除非 `port` 固定）；DSH 的 cookie **绑定 hostname:port** → 改端口后手机上要重新做一次解锁/带票访问 |
+| 远程页面为什么改不了配置 | DSH 的**客户端**策略写死：ui-settings 里 `persistence = ctx.remote.$host.isLoopback ? "host" : "memory"`，非回环页面连写都不发（`ConfigFormController` 直接 `unavailable`）。插件改不了这条策略，只能自己开一条路 |
+| 远程改配置的做法 | Host 半区在监听里接 `POST /__remote_access__/config`（只收 `FORM_KEYS`）→ 先用同一套 `Config(...)` 校验 → **先回执再落盘**（落盘会重挂监听、可能掐断这条连接）→ `ctx.get('configEditor').edit(entry, () => next)`，与设置页同一条官方落盘路径。注意 `toRawConfig()`：运行期的 `listen: 'auto'` 是字面量，schema 要的是 `['auto']`，直接写回会校验失败 |
+| 放行 cookie 的密钥 | 独立文件 `remote-access-secret`（`0600`），**与 `accessCode` 解耦** —— 改密码、重启 DSH 都不踢人；删文件才强制所有设备重新输密码。cookie 值必须是固定密钥，用每次启动的随机数就做不到「改密码不影响登录」 |
+| 重启的副作用 | 每次重启换 **token**（带票网址失效）与**随机端口**（除非 `port` 固定）；DSH 的 cookie **绑定 hostname:port** → 改端口后手机上要重新做一次解锁/带票访问（我们自己的放行 cookie 不做限制） |
 | 创造模式 | preset id 是 **`cordis`**，显示名「创造模式」；它额外提供 `cordis_inspect_*` 与 `plugin_manager`。标准模式（`standard`）没有这两样 |
 | 模式是会话级 | 会话创建时钉住 preset；新会话解析 `selectedDefault`。**子智能体没有 preset 参数**，只能继承所处会话（实测：标准模式会话起的 subagent 也是标准模式） |
 

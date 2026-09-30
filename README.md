@@ -29,9 +29,9 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 
 ## 配置
 
-**首选：设置 → 远程访问**（设置左侧导航里那一页），只有 6 项：启用、允许的网段、排除的网段、端口、
-并发上限、日志级别。保存写进 profile 的 `cordis.patch.yml`，插件随后**热重载**（原地关掉旧监听、
-按新参数重开），不用重启 DSH —— 端口会变，新网址以状态文件为准。
+**首选：设置 → 远程访问**（设置左侧导航里那一页），只有 7 项：启用、允许的网段、排除的网段、端口、
+并发上限、日志级别、访问密码。保存写进 profile 的 `cordis.patch.yml`，插件随后**热重载**（原地关掉旧监听、
+按新参数重开），不用重启 DSH —— 端口会变，新网址以状态文件为准。手机上的那一页同样能改（见下）。
 
 其余参数只在 `cordis.patch.yml` 里配（也不建议常用）：
 
@@ -51,8 +51,16 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 | `allowWebSocket` | `true` | 透传 WebSocket（界面实时推送靠它） | — |
 | `urlFile` | `''` → `<DSH_HOME>/remote-access-url.txt` | 带票网址写哪；`off` = 不写 | — |
 | `printUrl` | `true` | 同时打到 DSH 日志 | — |
-| `accessCode` | `''` | 网段内的解锁密码（4–12 位数字）。设了就**不用复制 token**：手机直接开裸地址，输一次即可；**输错一次就把该地址拉黑** | — |
+| `accessCode` | `''` | 网段内的访问密码（4–12 位数字）。设了就**不用复制 token**：手机直接开裸地址，输一次即可；**输错一次就把该地址拉黑** | ✅ |
 | `banFile` | `''` → 与状态文件同目录的 `remote-access-bans.txt` | 拉黑名单；删掉里面那一行即可解封（最多 1 秒生效） | — |
+
+> 手机（远程页面）也能改配置：DSH 规定非回环页面不写 Host 设置，所以那一页改走 Host 半区自己的
+> `POST /__remote_access__/config`，由 Host 用官方的 `configEditor.edit()` 落盘 —— 与设置页写的是**同一个地方**。
+> 这条端点只收表单里那 7 个字段，别的字段仍然只认 `cordis.patch.yml`。
+
+**改密码不会把已经进来的设备踢下线**：放行 cookie 的密钥与 `accessCode` 无关，单独存在
+`<DSH_HOME>\remote-access-secret`（`0600`），DSH 重启后也照样有效。想让所有设备重新输一次密码，
+删掉那个文件即可。
 
 **那个状态文件里有访问令牌，等于本机操作权限**，按 `0600` 写入，别外传（`accessCode` 会在里面打码）。
 

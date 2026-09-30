@@ -230,7 +230,86 @@ check('热重载：旧监听已关闭', oldPort.status === 0, `status=${oldPort.
 const newPort = await call(portAfter, {});
 check('热重载：新监听可用', newPort.status === 200 && newPort.body.includes('upstream host='), `status=${newPort.status}`);
 
-for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6]) {
+// ---- 场景 7：远程页面改配置（Host 端点 → configEditor.edit 落盘）----
+const rwFile = path.join(os.tmpdir(), `ra-rw-${Date.now()}.txt`);
+const rwBan = path.join(os.tmpdir(), `ra-rwban-${Date.now()}.txt`);
+let written = null;
+const rwCtx = {
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
+  effect: () => {},
+  get: (name) =>
+    name === 'configEditor'
+      ? {
+          entries: () => [{ options: { id: 'remote-access', name: '@local/dsh-remote-access' } }],
+          edit: async (_entry, change) => {
+            written = change({}, {});
+          },
+        }
+      : undefined,
+};
+const dispose7 = apply(rwCtx, {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${upPort}`,
+  urlFile: rwFile,
+  banFile: rwBan,
+  accessCode: '126710',
+});
+await sleep(400);
+const port7 = Number(new URL(readUrl(rwFile).url).port);
+
+const anon = await call(port7, { path: '/__remote_access__/config' });
+check('远程配置端点：未授权 → 401', anon.status === 401, `HTTP ${anon.status}`);
+
+const unlocked7 = await unlockO(port7, 'code=126710');
+const cookie7 = String(unlocked7.headers['set-cookie']).split(';')[0];
+const got = await call(port7, { path: '/__remote_access__/config', headers: { cookie: cookie7 } });
+const gotBody = JSON.parse(got.body || '{}');
+check('远程配置端点：GET 返回生效配置', got.status === 200 && gotBody.ok === true && gotBody.config.port === 0,
+  `HTTP ${got.status} ${JSON.stringify(gotBody.config ?? {})}`.slice(0, 90));
+
+const badCode = await call(port7, {
+  method: 'POST',
+  path: '/__remote_access__/config',
+  headers: { cookie: cookie7, 'content-type': 'application/json' },
+  body: JSON.stringify({ patch: { accessCode: 'abc' } }),
+});
+check('远程配置端点：非法密码 → 400', badCode.status === 400, `HTTP ${badCode.status}`);
+
+const badField = await call(port7, {
+  method: 'POST',
+  path: '/__remote_access__/config',
+  headers: { cookie: cookie7, 'content-type': 'application/json' },
+  body: JSON.stringify({ patch: { upstream: 'http://evil' } }),
+});
+check('远程配置端点：只收白名单字段', badField.status === 400, `HTTP ${badField.status}`);
+
+const posted = await call(port7, {
+  method: 'POST',
+  path: '/__remote_access__/config',
+  headers: { cookie: cookie7, 'content-type': 'application/json' },
+  body: JSON.stringify({ patch: { port: 19388, maxConnections: 64 } }),
+});
+check('远程配置端点：合法 patch → 200', posted.status === 200, `HTTP ${posted.status}`);
+await sleep(150);
+check('远程配置端点：经 configEditor 落盘（listen 还原成数组）',
+  written !== null && written.port === 19388 && written.maxConnections === 64 && Array.isArray(written.listen),
+  JSON.stringify(written && { port: written.port, maxConnections: written.maxConnections, listen: written.listen }));
+
+// 改密码不该影响已有 cookie（密钥与密码解耦）
+const again = await call(port7, {
+  method: 'POST',
+  path: '/__remote_access__/config',
+  headers: { cookie: cookie7, 'content-type': 'application/json' },
+  body: JSON.stringify({ patch: { accessCode: '246813' } }),
+});
+check('改密码：写入成功', again.status === 200, `HTTP ${again.status}`);
+const stillIn = await call(port7, { path: '/__remote_access__/config', headers: { cookie: cookie7 } });
+check('改密码不影响已登录状态（同一 cookie 仍可用）', stillIn.status === 200, `HTTP ${stillIn.status}`);
+
+for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6, dispose7]) {
   try {
     d();
   } catch {
@@ -238,7 +317,7 @@ for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6]) {
   }
 }
 upstream.close();
-for (const f of [statusFile, statusFile2, banFile, hotFile]) {
+for (const f of [statusFile, statusFile2, banFile, hotFile, rwFile, rwBan, path.join(os.tmpdir(), 'remote-access-secret')]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
 }
 

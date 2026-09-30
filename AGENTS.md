@@ -14,8 +14,9 @@
   **例外是用户 2026-10-01 明确选定的**：设了 `accessCode` 就走「网段 + 6 位密码」——解锁后由 Host 半区
   在服务端补票（浏览器始终看不到 token），一次输错即把该地址拉黑。这条路径上 token 不再是第二道门，
   不要以为它还挡着；也不要在这条路上再放松别的东西（比如给密码加"记住上次输入"之类的旁路）。
-- **密码 / 令牌不进仓库**：`accessCode` 只写在 profile 的 `cordis.patch.yml`（`Schema.string()`，YAML 里必须加引号，
-  否则会被解析成数字导致校验失败），状态文件里打码。
+- **密码 / 令牌不进仓库**：`accessCode` 的**默认值不要写死**在代码里（写死等于提交密码）；它只在 profile 的
+  `cordis.patch.yml` 或设置页里改。手写 YAML 时必须加引号（`accessCode: "126710"`），否则会被解析成数字、
+  schema 校验失败。状态文件里打码成 `***`。
 - **失败必须可见**：任何提前退出都要写状态文件（`<DSH_HOME>/remote-access-url.txt`），不许"哑巴失败"。
 
 ## 常用命令
@@ -38,15 +39,21 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **Host 半区已完成** ✅：只监听允许网段内的本机地址、网段外对端 403、HTTP/WS 透传、Host+Origin 改写、
 带 token 网址写入状态文件、上游自检重试 8×2 秒、失败必写状态文件、`ctx.effect` 关监听；
 **热重载**：设置页保存后 DSH 发 `app-boot/config-reload`，插件原地关旧监听、按新参数重开（不重启 DSH）；
-**解锁模式**：设 `accessCode` 时网段内开裸地址 → 解锁页 → 输一次 6 位密码 → 服务端补票进 DSH，
-**错一次即拉黑该 IP**（名单在 `banFile`，删行即解封）。
-独立测试 **25/25** 通过（含解锁/拉黑/热重载），Config 校验 **12/12**。
+**解锁模式**：设 `accessCode` 时网段内开裸地址 → 解锁页 → 输一次密码 → 服务端补票进 DSH，
+**错一次即拉黑该 IP**（名单在 `banFile`，删行即解封）；
+**远程改配置**：`POST /__remote_access__/config`（只收 `FORM_KEYS`），用官方的 `configEditor.edit()`
+落盘到 profile 的 patch 层，与设置页同一个地方；放行 cookie 的密钥独立存在
+`remote-access-secret`（与 `accessCode` 解耦，**改密码/重启都不踢人**，删文件才强制重新输）。
+独立测试 **33/33** 通过（含解锁/拉黑/热重载/远程改配置），Config 校验 **13/13**。
 手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
 
-**Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，只留 6 项（启用 / 允许的网段 /
-排除的网段 / 端口 / 并发上限 / 日志级别下拉）+ 保存；读写走官方通道
-`ctx.configForms.get('remote-access')`（`getSnapshot` 读、`mutate([{op:'set',path:[key],value}], revision)` 原子写）。
-页面上只说人话，内部状态（status/mode/revision…）只写开发者控制台。
+**Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，7 项（启用 / 允许的网段 / 排除的网段 /
+端口 / 并发上限 / 日志级别下拉 / 访问密码）+ 保存；界面上不写英文键名、不放说明文字，空值靠灰色占位符
+（`换行分割` / `0=随机` / `0=不限制` / `6位数字`），数字 0 显示成空好让占位符露出来。
+读写有**两条通道**：回环页面走官方 `ctx.configForms.get('remote-access')`
+（`getSnapshot` 读、`mutate([{op:'set',path:[key],value}], revision)` 原子写）；
+非回环页面（手机）改走 Host 端点 `POST /__remote_access__/config`。页面上只说人话，
+内部状态只写开发者控制台。
 
 **设置页保存已修好** ✅（两道门的根因见下）。**换 JS 仍需重启一次 DSH**；那之后改参数就是热重载了。
 
@@ -63,7 +70,7 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 所以 `package.json` **必须**声明 `"peerDependencies": { "@deepseek-ai/schemastery": "^3.18.1" }`：
 peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么声明 cordis/schemastery 的），
 但它是 DSH 肯把安装目录里的包借给你的**唯一凭据**。
-`node tools/check-config-schema.mjs` 现在把这两道门都验了（12 项），**改完先验再重启**。
+`node tools/check-config-schema.mjs` 现在把这两道门都验了（13 项），**改完先验再重启**。
 
 **关键教训**：
 - 客户端 `inject` 必须写点号全名（`'remote.pluginManager'`、`'remote.settings'`），只写 `'remote'` 会报 `without inject`；
