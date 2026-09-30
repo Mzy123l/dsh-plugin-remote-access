@@ -1,4 +1,4 @@
-# dsh-remote-access —— 插入一行 Host 插件。
+﻿# dsh-remote-access —— 插入一行 Host 插件。
 # 下面 config 的每一项都是参数，按你的环境改；也可以在 profile 的 cordis.patch.yml
 # 或 home patch 里覆盖同一 id 的这一行。
 - insert:
@@ -10,7 +10,7 @@
         # 支持 IPv4 CIDR（100.64.0.0/10）或精确地址；IPv6 用精确/前缀字符串。
         allowCidrs:
           - 100.64.0.0/10
-        # 'auto' = 只监听上面网段里属于本机的地址；也可写死，例如 ['100.64.0.3']
+        # 'auto' = 只监听上面网段里属于本机的地址；也可写死，例如 ['100.x.y.z']
         listen: auto
         # 监听端口；0 = 交给系统挑
         port: 0

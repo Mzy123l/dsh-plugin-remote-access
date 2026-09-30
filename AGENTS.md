@@ -1,4 +1,4 @@
-# dsh-remote-access — 项目约定与现状
+﻿# dsh-remote-access — 项目约定与现状
 
 给 **DSH（DeepSeek Harness）桌面版**用的「限网段远程访问入口」插件：让手机 / 另一台设备在指定网段
 （默认 Tailscale `100.64.0.0/10`）通过一条带令牌的网址打开本机 DSH 的网页界面。
@@ -29,7 +29,7 @@ node tools/test-remote-access.mjs     # 独立功能测试（起假上游，无�
 ## 现状（2026-09-30）
 
 - 插件已装进共享 profile（`C:\Users\Assistant\.dsh\profiles\desktop`；本用户经 junction 指向它）。
-- 已在本机 `100.64.0.3` 上成功监听；**不带令牌的请求被 DSH 挡成 401**（边界成立）。
+- 已在本机 tailnet 地址（100.64.0.0/10 内）上成功监听；**不带令牌的请求被 DSH 挡成 401**（边界成立）。
 - 已修两处：缺 `inject: ['connection']`（否则铸不出带票网址）、上游自检改为重试 8 次 × 2 秒（避免界面晚起误报）。
 - **待办**：重启一次 DSH 让新代码生效，确认状态文件里出现完整的 `?token=...` 网址；手机打开一次换 cookie。
 

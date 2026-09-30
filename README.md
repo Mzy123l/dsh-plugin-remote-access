@@ -1,4 +1,4 @@
-# dsh-remote-access
+﻿# dsh-remote-access
 
 给 **DeepSeek Harness（DSH）桌面版**用的一个小插件：把本机 DSH 的网页界面**只开放给你指定的网段**
 （默认 Tailscale 的 `100.64.0.0/10`），让你可以用手机 / 另一台电脑通过一条「带票的网址」访问它。
@@ -35,7 +35,7 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 |---|---|---|
 | `enabled` | `true` | 关掉它只需设 false，不必卸载 |
 | `allowCidrs` | `['100.64.0.0/10']` | 允许来访的网段；也是 `listen: auto` 挑选本机监听地址的依据 |
-| `listen` | `'auto'` | `auto` = 只监听上面网段里的本机地址；也可写 `['100.64.0.3']` |
+| `listen` | `'auto'` | `auto` = 只监听上面网段里的本机地址；也可写 `['100.x.y.z']` |
 | `port` | `0` | 监听端口，`0` = 系统随机 |
 | `upstream` | `'http://127.0.0.1:19387'` | DSH 界面端口；写 `'auto'` 则依次探测 `ctx.webStartup` / `webServer` / `webRuntime` / `$DSH_WEB_PORT` |
 | `rewriteHost` | `true` | 改写 `Host`/`Origin` 为上游 authority |
