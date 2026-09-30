@@ -1,0 +1,25 @@
+# dsh-remote-access —— 插入一行 Host 插件。
+# 下面 config 的每一项都是参数，按你的环境改；也可以在 profile 的 cordis.patch.yml
+# 或 home patch 里覆盖同一 id 的这一行。
+- insert:
+    - id: remote-access
+      name: '@local/dsh-remote-access'
+      config:
+        enabled: true
+        # 允许来访的网段；listen=auto 时也用它挑选「本机要监听哪些地址」。
+        # 支持 IPv4 CIDR（100.64.0.0/10）或精确地址；IPv6 用精确/前缀字符串。
+        allowCidrs:
+          - 100.64.0.0/10
+        # 'auto' = 只监听上面网段里属于本机的地址；也可写死，例如 ['100.64.0.3']
+        listen: auto
+        # 监听端口；0 = 交给系统挑
+        port: 0
+        # DSH 界面端口。本机实测是 127.0.0.1:19387；若换端口，改这里或改回 'auto'
+        # （'auto' = 依次探测 ctx.webStartup/webServer/webRuntime 与 $DSH_WEB_PORT）
+        upstream: http://127.0.0.1:19387
+        # 把 Host/Origin 改写成上游回环 authority（默认开，省去改 client-connection）
+        rewriteHost: true
+        # 带票网址写到哪里；'' = 默认 <DSH_HOME>/remote-access-url.txt；'off' = 不写
+        urlFile: ''
+        # 同时打到 DSH 日志
+        printUrl: true
