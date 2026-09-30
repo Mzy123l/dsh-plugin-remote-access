@@ -8,11 +8,10 @@
  *   命名空间就是 Loader 条目的 options.id，也就是 cordis.patch.yml 里那一行的 id（remote-access）。
  *   读：form.getSnapshot() → { status, value, base, user, revision, writable, mode }
  *   写：form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>
- *   Host 侧落到 profile 的 patch 层（cordis.patch.yml），并按 Loader 正常路径重新挂载插件。
+ *   Host 侧把值落到 profile 的 patch 层（cordis.patch.yml），重启 DSH 后生效。
  *
- * 注意：configForms 在「命名空间没被 Host 服务」时只会静默返回 false，
- * 所以这里把 status / writable / mode / revision 与已服务命名空间一并摆在页面上，
- * 失败必须看得见（同 AGENTS.md 的硬约定）。
+ * 页面上只说人话：失败给一句「用户下一步该做什么」，内部状态（status / mode / revision 之类）
+ * 只往开发者控制台写，不摆在界面上。configForms 在命名空间没被服务时只会静默返回 false。
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-remote-access',
@@ -99,13 +98,13 @@ window.__ModuleLoader__.load({
       return next;
     }
 
-    /** status 不是 ready 时说清「为什么写不进去」 */
-    function whyNotReady(snap) {
-      if (snap?.status === 'loading') return '设置文档还在读取，稍等一下再保存。';
+    /** 保存失败时说人话：告诉用户下一步做什么，而不是抛内部状态码 */
+    function failureHint(snap) {
+      if (snap?.status === 'loading') return '设置还在读取，请稍等一下再保存。';
       if (snap?.status === 'unavailable') {
-        return '这一行没有被 Host 服务：要么插件的 Config 里没有 volatile 字段，要么当前页面不是回环地址（DSH 规定非回环页面不写 Host 设置，只留在浏览器内存里）。';
+        return '这一行的配置现在不能在这里修改：如果是从别的设备打开的页面，请回到运行 DSH 的那台机器上改。';
       }
-      return `当前 status=${snap?.status ?? '(未知)'}。`;
+      return '这一行的配置暂时不可写。';
     }
 
     return {
@@ -124,31 +123,6 @@ window.__ModuleLoader__.load({
             return Promise.resolve();
           }
         };
-
-        /** 已服务的命名空间（Host 侧设置文档的快照）——写不进时的第一手线索 */
-        function servedNamespaces() {
-          try {
-            const snap = describe?.getSnapshot?.();
-            const list = snap?.view?.namespaces;
-            return Array.isArray(list) ? list.map((row) => row.ns) : [];
-          } catch {
-            return [];
-          }
-        }
-
-        function yamlSnippet(draft) {
-          const lines = [`- id: ${NS}`, "  name: '@local/dsh-remote-access'", '  config:'];
-          for (const field of FIELDS) {
-            const value = encode(field, draft[field.key]);
-            if (field.type === 'list') {
-              lines.push(`    ${field.key}:`);
-              for (const item of value) lines.push(`      - ${item}`);
-            } else {
-              lines.push(`    ${field.key}: ${typeof value === 'string' ? JSON.stringify(value) : value}`);
-            }
-          }
-          return lines.join('\n');
-        }
 
         function Panel() {
           const [snap, setSnap] = React.useState(() => form.getSnapshot());
@@ -175,9 +149,9 @@ window.__ModuleLoader__.load({
             setStatus('保存中…');
             try {
               const now = form.getSnapshot();
-              if (now.status !== 'ready') throw new Error(`这一行现在不可写。${whyNotReady(now)}`);
+              if (now.status !== 'ready') throw new Error(failureHint(now));
               if (now.writable !== true) {
-                throw new Error(`Host 现在不接受设置写入（writable=${String(now.writable)}，mode=${now.mode ?? '?'}）。`);
+                throw new Error('这一行的配置现在不能在这里修改：如果是从别的设备打开的页面，请回到运行 DSH 的那台机器上改。');
               }
               const ops = [];
               for (const field of FIELDS) {
@@ -192,14 +166,12 @@ window.__ModuleLoader__.load({
               }
               const accepted = await form.mutate(ops, now.revision);
               if (accepted !== true) {
-                throw new Error(
-                  `Host 拒绝了这次写入（返回 ${String(accepted)}）——通常是 revision 冲突或命名空间已停止服务；页面已重读，请对照后重试。`,
-                );
+                throw new Error('写入被拒绝（配置可能刚被别处改过），请点「重新读取」后再试一次。');
               }
-              setStatus(
-                `已写入 ${ops.length} 个字段，落在 profile 的 patch 层。插件随即重新挂载：端口可能变化，新的带票网址见 ${STATUS_HINT}`,
-              );
+              setStatus(`已保存 ${ops.length} 项，重启 DSH 后生效。`);
             } catch (err) {
+              // 细节留给开发者控制台，页面上只说人话
+              try { console.error('[remote-access] 保存失败', err); } catch { /* 忽略 */ }
               setStatus(`保存失败：${err?.message ?? err}`);
             } finally {
               setBusy(false);
@@ -282,7 +254,6 @@ window.__ModuleLoader__.load({
             ];
           });
 
-          const served = servedNamespaces();
           const ready = snap.status === 'ready';
 
           return h(
@@ -302,33 +273,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', disabled: busy, onClick: onReload }, '重新读取'),
               status ? h('span', { style: { opacity: 0.9 } }, status) : null,
             ),
-            note(
-              { opacity: 0.8 },
-              '诊断：命名空间 ',
-              code(NS),
-              ` → status=${snap.status ?? '?'}，revision=${snap.revision ?? '?'}，writable=${String(snap.writable)}，mode=${snap.mode ?? '?'}；Host 已服务的命名空间：`,
-              served.length ? served.join(', ') : '（还没有）',
-            ),
-            ready
-              ? null
-              : note({ opacity: 0.8 }, whyNotReady(snap)),
-            note(
-              { opacity: 0.8 },
-              '保存会写进 profile 的 ',
-              code('cordis.patch.yml'),
-              '（那一行的 ',
-              code('config'),
-              '），所以重启也不会丢；写完插件立即重新挂载。',
-            ),
-            note(
-              { opacity: 0.8 },
-              '如果保存一直失败（例如在手机的非回环页面上打开本页——DSH 不允许那种页面写 Host 设置），可以把下面这段贴进 profile 的 ',
-              code('cordis.patch.yml'),
-              '（替换 ',
-              code('- insert:'),
-              ' 里那一行的 config），然后重启 DSH：',
-            ),
-            h('pre', { style: { ...mono, display: 'block', marginTop: 6, whiteSpace: 'pre-wrap' } }, yamlSnippet(current)),
+            ready ? null : note({ opacity: 0.8 }, failureHint(snap)),
           );
         }
 

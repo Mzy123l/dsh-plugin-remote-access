@@ -100,8 +100,9 @@ $env:ELECTRON_RUN_AS_NODE = 1
   （它们是纯运行期参数）；纯 node 环境解析不到时仍降级为「无 schema」，插件照常工作——
   并且**把解析结果（成功来源 / 报错原文）写进状态文件的诊断区**，不许再哑巴失败。
 - `client.js`：`inject: ['slots', 'configForms']`，读写改用 `configForms`；
-  保存 = 只把**改动过的**字段编成一条原子 `mutate(ops, revision)`；
-  失败时把 `status / writable / mode / revision / 已服务命名空间` 摆在页面上（不许哑巴失败）。
+  保存 = 只把**改动过的**字段编成一条原子 `mutate(ops, revision)`。
+  页面上只说人话（内部状态、诊断、YAML 兜底都已收掉，细节改往开发者控制台写）；
+  保存成功的提示是「重启 DSH 后生效」。
 - 回归：`node tools/check-config-schema.mjs` 验**两道门**——peer 声明（含版本范围）+ 用安装包里的真
   Schemastery 验「原生 schema + 全字段 volatile + 表单字段/类型对表」，**不需要重启 DSH**。
 
@@ -190,11 +191,13 @@ $env:ELECTRON_RUN_AS_NODE = 1
 
 ## 7. 待办清单
 
-1. **[待用户]** 重启 DSH 后到「设置 → 远程访问」实测一次保存：页面上应看到
-   `status=ready`、`writable=true`，且列出的已服务命名空间里含 `remote-access`；
-   状态文件的诊断区应出现 `Config schema 已就绪（@deepseek-ai/schemastery…）`。
-   若仍是 `unavailable`：先看状态文件里那条 `Config schema 没拿到（…）` 的原文，再对照第 2 节两道门。
-2. 建议把 `port` 固定（例如 `19388`），否则手机网址每次重启都变（现在可以在设置页里改）。
+1. **[待用户]** 重启 DSH 才会让保存的参数生效（**实测：这个 profile 下 patch 改动不热生效**——
+   手工只改 `cordis.patch.yml` 里的 `maxConnections` 3→7，盯 16 秒，插件没重挂载、监听端口没变）。
+   重启后状态文件诊断区应出现 `Config schema 已就绪（@deepseek-ai/schemastery…）`；
+   若出现 `Config schema 没拿到（…）`，照第 2 节两道门查。
+2. **手机端每次换端口/重启都要重新用带票网址开一次**：DSH 每次重启换 token，cookie 又绑 hostname:port。
+   无票访问会得到 DSH 自己的 `401 authentication required`（这不是插件的问题；实测带票 → `303` + `Set-Cookie`）。
+   把 `port` 固定成 `19388` 之后，手机上开一次带票网址，之后直接输 `http://100.64.0.3:19388/` 即可。
 3. 可选：把第 2 节那段「用 DSH 自带运行时跑真解析器 A/B」的探针做成 `tools/check-resolution.mjs`，
    这样连 peer 是否真的生效都能在重启前验掉（本轮是手写临时探针跑的）。
 4. 可选：命令行工具（`E:\Applications\dsh-remote-access`）——按参数启动 DSH、已在跑则改参数（用户提过，但 GUI 优先）。
