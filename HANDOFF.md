@@ -186,8 +186,9 @@ $env:ELECTRON_RUN_AS_NODE = 1
 | `C:\Users\15861\.dsh\cordis.patch.yml` | 本用户的 home patch（现只剩 `llm-deepseek`；`agent-preset-registry` 那条已删，因为它压住了 `selectedDefault` 让模式切不动；备份 `cordis.patch.yml.bak-20260930-151254`） |
 | `C:\Users\15861\.dsh\remote-access-url.txt` | 状态文件：带票网址 + 生效配置 + 诊断（模式 0600，含令牌，别外传） |
 | `E:\Applications\DeepSeek Harness\resources\app.asar` | DSH 安装包（`read` 工具读不了，`grep` 能看内容行；`tools/asar-extract.mjs` 可整文件提取） |
-| `E:\Applications\DeepSeek Harness\dsh.cmd` | **命令行启动桌面版**（默认进托盘）。Windows 命令名不分大小写，所以 `dsh` 与 `DSH` 是同一条；无参/`-Show` 走桌面版，**其他参数透传给自带 CLI**（`dsh plugin …` 因此照旧可用）。必须 ASCII + CRLF（cmd 会错解 LF 行尾的标签） |
-| `E:\Applications\DeepSeek Harness\dsh-launch.ps1` | 上者的实现：放好 `background-close-confirmed` 标记 → 启动 → 等主窗口 → 发 `WM_CLOSE`，让应用按它自己的「关窗进托盘」逻辑隐藏（桌面壳没有 `--tray/--hidden` 参数）。带 BOM，中文在 PS 5.1 也不乱码 |
+| `E:\Applications\DeepSeek Harness\dsh.cmd` | **命令行启动桌面版**（默认进托盘）。Windows 命令名不分大小写，所以 `dsh` 与 `DSH` 是同一条；无参/`-show` 走桌面版，**其他参数透传给自带 CLI**（`dsh plugin …` 因此照旧可用）。必须 ASCII + CRLF（cmd 会错解 LF 行尾的标签） |
+| `E:\Applications\DeepSeek Harness\dsh-launch.ps1` | 上者的实现：放好 `background-close-confirmed` 标记 → 启动 → 等主窗口 → 发 `WM_CLOSE`，让应用按它自己的「关窗进托盘」逻辑隐藏（桌面壳没有 `--tray/--hidden` 参数）。开关一律小写（`-show` / `-help`）；带 BOM，中文在 PS 5.1 也不乱码 |
+| 本机没有 PowerShell 7 | `pwsh.exe` 两个常见位置都不存在，DSH 的 `pwsh` 工具其实跑的是 `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`（5.1）。所以 `dsh.cmd` 里 `where pwsh` 永远失败、回落 `powershell` 是对的；写脚本时按 5.1 兼容来（`-File` + 字面量开关能正常绑定，带 BOM 的 UTF-8 中文正常） |
 | 系统（机器层）PATH | 已把 `E:\Applications\DeepSeek Harness` 加到**机器层最前**，于是 `dsh` 抢在用户层那个 CLI `dsh.cmd`（`resources\runtime\cli\bin`）之前解析；CLI 仍可用同样的 `dsh <参数>` 走到 |
 | `docs/` | 本地提取的 DSH 官方插件开发文档（**已 gitignore，勿提交**） |
 | `tools/test-remote-access.mjs` | 独立功能测试（起假上游，无需 DSH） |
