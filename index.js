@@ -4,12 +4,14 @@
  *
  * 设计要点：
  *  1. 只监听「允许网段」里属于本机的地址（listen=auto），别的一律不绑，绝不含 0.0.0.0；
- *  2. 每个连进来的对端也必须落在允许网段内、且不在黑名单里，否则 403；
- *  3. 访问仍需 DSH 自己的令牌/cookie（没票就是 401），本插件不提供任何绕过；
+ *  2. 每个连进来的对端也必须落在允许网段内、且不在黑名单 / 拉黑名单里，否则 403；
+ *  3. 默认仍走 DSH 自己的令牌/cookie（没票就是 401）；可选用 accessCode 开一个「网段内输一次 6 位密码」
+ *     的解锁页，解锁后由本插件在服务端补票，浏览器始终看不到 token —— 一次输错就把该地址拉黑；
  *  4. 默认把 Host/Origin 改写成上游回环 authority，因此不必去改 client-connection 的配置；
- *  5. 无论成功失败都会写一份「自诊断文件」，把生效配置、上游探测、监听结果写清楚。
+ *  5. 无论成功失败都会写一份「自诊断文件」，把生效配置、上游探测、监听结果写清楚；
+ *  6. 设置页保存后靠 `app-boot/config-reload` 原地重挂监听（热重载），不必重启 DSH。
  *
- * 参数全部走 Config（在「设置 → 远程访问」里改），零第三方依赖。
+ * 参数全部走 Config（在「设置 → 远程访问」里改，其余只在 cordis.patch.yml 里配），零第三方依赖。
  */
 
 import http from 'node:http';
@@ -17,6 +19,7 @@ import net from 'node:net';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 // DSH 的 Config 协议就是 Schemastery（用 Symbol.for('schemastery') 认领原生 schema）。
 // 该包由 DSH 安装目录随运行时提供，但**借它要声明**：DSH 把 profile 里以 link: 安装的插件
@@ -74,6 +77,15 @@ export const Config = Schema
         '带票网址写到哪；留空 = <DSH_HOME>/remote-access-url.txt，填 off = 不写',
       ),
       printUrl: field(Schema.boolean().default(true), '把监听结果与网址同时打到 DSH 日志'),
+      // 只在 patch（cordis.patch.yml）里配，不进设置页：6 位数字密码是凭据，不该躺在表单里被随手看见
+      accessCode: field(
+        Schema.string().default(''),
+        '网段内的解锁密码（6 位数字）；留空 = 关闭解锁页，必须用带票网址访问。设了它，手机直接打开裸地址输一次密码即可',
+      ),
+      banFile: field(
+        Schema.string().default(''),
+        '拉黑名单写到哪；留空 = 与状态文件同目录的 remote-access-bans.txt。删掉里面那行即可解封',
+      ),
       logLevel: field(Schema.string().default('info'), '日志详细程度：silent / info / debug（默认 info）'),
     })
   : undefined;
@@ -92,10 +104,15 @@ const DEFAULTS = {
   timeoutMs: 0,
   urlFile: '',
   printUrl: true,
+  accessCode: '',
+  banFile: '',
   logLevel: 'info',
 };
 
 // ---------------------------------------------------------------- 配置
+
+/** Loader 行 id = 设置命名空间 = cordis.patch.yml 里那一行的 id（热重载按它找配置） */
+const ROW_ID = 'remote-access';
 
 function asArray(v) {
   if (v === undefined || v === null) return [];
@@ -138,8 +155,25 @@ function normalizeConfig(rawIn) {
   c.forwardClientHeaders = c.forwardClientHeaders !== false;
   c.allowWebSocket = c.allowWebSocket !== false;
   c.printUrl = c.printUrl !== false;
+  // 解锁密码只收「纯数字」，长度不限（用 6 位）；带空格或别的字符一律视为没设，避免误开
+  c.accessCode = /^\d{4,12}$/.test(String(unwrap(c.accessCode) ?? '')) ? String(c.accessCode) : '';
+  c.banFile = String(unwrap(c.banFile) ?? '').trim();
   c.logLevel = ['silent', 'info', 'debug'].includes(String(c.logLevel)) ? String(c.logLevel) : 'info';
   return c;
+}
+
+/** 状态文件路径（urlFile 为空 → <DSH_HOME>/remote-access-url.txt；'off' → 不写） */
+function statusPathOf(cfg) {
+  if (cfg.urlFile === 'off') return '';
+  return cfg.urlFile && cfg.urlFile !== '' ? cfg.urlFile : defaultStatusFile();
+}
+
+/** 拉黑名单文件路径 */
+function banPathOf(cfg) {
+  if (cfg.banFile) return cfg.banFile;
+  const statusPath = statusPathOf(cfg);
+  const dir = statusPath ? path.dirname(statusPath) : path.dirname(defaultStatusFile());
+  return path.join(dir, 'remote-access-bans.txt');
 }
 
 // ---------------------------------------------------------------- IP / 网段
@@ -270,6 +304,54 @@ function resolveUpstream(ctx, cfg, note) {
 
 // ---------------------------------------------------------------- 反向代理
 
+/** 解锁页路径与我们的放行 cookie 名（cookie 值是每次启动随机的，不是固定 "1"） */
+const UNLOCK_PATH = '/__remote_access__/unlock';
+const UNLOCK_COOKIE = 'dsh-ra-ok';
+
+/** 极简解锁页：只在手机上调一次，够用就好，不依赖任何外部资源 */
+function unlockPageHtml(hint) {
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>远程访问</title><style>
+:root{color-scheme:light dark}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#e8eaed;
+font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:min(92vw,320px);padding:24px;border-radius:14px;background:#171a21;box-shadow:0 8px 32px #0006;text-align:center}
+h1{margin:0 0 6px;font-size:18px;font-weight:600}
+p{margin:0 0 16px;font-size:13px;opacity:.7}
+input{width:100%;box-sizing:border-box;padding:12px;font:inherit;font-size:22px;letter-spacing:.3em;text-align:center;
+border-radius:10px;border:1px solid #2c313c;background:#0f1115;color:inherit}
+button{margin-top:12px;width:100%;padding:12px;font:inherit;font-weight:600;border:0;border-radius:10px;background:#3b82f6;color:#fff}
+.err{margin-top:12px;font-size:13px;color:#f87171;min-height:1.2em}
+</style></head><body><main>
+<h1>远程访问</h1><p>请输入访问密码</p>
+<form method="post" action="${UNLOCK_PATH}" autocomplete="off">
+<input name="code" type="password" inputmode="numeric" maxlength="12" autofocus required>
+<button type="submit">进入</button></form>
+<div class="err">${hint}</div>
+</main></body></html>`;
+}
+
+/** 读一个小请求体（解锁表单，限 2KB） */
+function readSmallBody(req, limit = 2048) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error('body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
 function upstreamHeaders(headers, up, cfg, peer) {
   const h = { ...headers };
   if (cfg.rewriteHost) {
@@ -286,22 +368,65 @@ function upstreamHeaders(headers, up, cfg, peer) {
   return h;
 }
 
-function startProxy(addr, cfg, up, note, onListening) {
+/**
+ * 起一个监听。
+ * @param gate 访问门：`{ accessCode, cookieValue, banPath, authorize(req), banned(ip), ban(ip), withTicket(url, cookie), note }`
+ *   —— 门只在 accessCode 非空时启用；为空时行为与以前完全一致（裸地址交给 DSH 自己 401）。
+ */
+function startProxy(addr, cfg, up, note, onListening, gate) {
   let active = 0;
+
+  const deny = (res, code, text) => {
+    res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end(text);
+  };
 
   const server = http.createServer((req, res) => {
     const peer = bareIp(req.socket.remoteAddress);
-    if (!peerAllowed(peer, cfg)) {
-      note('debug', `拒绝 ${peer} → 403（不在允许网段或命中黑名单）`);
-      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('403 forbidden: peer not allowed\n');
+    if (!peerAllowed(peer, cfg) || gate.banned(peer)) {
+      note('debug', `拒绝 ${peer} → 403（不在允许网段、命中黑名单，或在拉黑名单里）`);
+      deny(res, 403, '403 forbidden: peer not allowed\n');
       return;
     }
+
+    // 解锁提交：一次不过就拉黑
+    if (req.method === 'POST' && String(req.url).startsWith(UNLOCK_PATH) && gate.accessCode) {
+      readSmallBody(req).then((body) => {
+        const code = new URLSearchParams(body).get('code') ?? '';
+        if (code === '') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(unlockPageHtml('密码不能为空'));
+          return;
+        }
+        if (code === gate.accessCode) {
+          note('info', `${peer} 解锁成功`);
+          res.writeHead(303, {
+            location: '/',
+            'set-cookie': `${UNLOCK_COOKIE}=${gate.cookieValue}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`,
+          });
+          res.end();
+          return;
+        }
+        gate.ban(peer);
+        note('warn', `${peer} 密码错误，已加入拉黑名单（删掉 ${gate.banPath} 里那一行即可解封）`);
+        deny(res, 403, '403 forbidden: wrong code, this address is now blocked\n');
+      }).catch(() => deny(res, 400, '400 bad request\n'));
+      return;
+    }
+
+    const authorized = gate.authorize(req);
+    // 没授权 + 是个页面导航 → 给解锁页；其余一律交给 DSH 自己答（保持原来的 401 行为）
+    if (!authorized && gate.accessCode && isNavigation(req)) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(unlockPageHtml(''));
+      return;
+    }
+
     const options = {
       host: up.host,
       port: up.port,
       method: req.method,
-      path: req.url,
+      path: authorized ? gate.withTicket(req.url, req.headers.cookie) : req.url,
       headers: upstreamHeaders(req.headers, up, cfg, peer),
     };
     if (cfg.timeoutMs > 0) options.timeout = cfg.timeoutMs;
@@ -333,10 +458,10 @@ function startProxy(addr, cfg, up, note, onListening) {
     socket.on('close', () => { active -= 1; });
   });
 
-  // WebSocket / 事件流透传（DSH 界面靠它推送）
+  // WebSocket / 事件流透传（DSH 界面靠它推送）。升级请求走 DSH cookie，不补票（补票会被 303 打断）。
   server.on('upgrade', (req, socket, head) => {
     const peer = bareIp(socket.remoteAddress);
-    if (!peerAllowed(peer, cfg)) {
+    if (!peerAllowed(peer, cfg) || gate.banned(peer)) {
       note('debug', `拒绝 ${peer} 的 WebSocket`);
       socket.destroy();
       return;
@@ -376,6 +501,14 @@ function startProxy(addr, cfg, up, note, onListening) {
   return server;
 }
 
+/** 是不是「浏览器地址栏打开的页面」——只有这种请求才值得回解锁页 */
+function isNavigation(req) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const url = String(req.url ?? '/');
+  if (url === '/' || url.startsWith('/?') || url.startsWith('/#')) return true;
+  return String(req.headers.accept ?? '').includes('text/html');
+}
+
 // ---------------------------------------------------------------- 带票网址
 
 function connectionOf(ctx) {
@@ -390,26 +523,31 @@ function connectionOf(ctx) {
   }
 }
 
-function mintUrl(ctx, up, extAddr, port, note) {
-  const hostPart = String(extAddr).includes(':') ? `[${extAddr}]` : String(extAddr);
-  const external = `http://${hostPart}:${port}/`;
+/** 从 connection 服务铸一张票，返回 token 本身（补票要用；拿不到就返回 null） */
+function mintTicket(ctx, up, note) {
   const conn = connectionOf(ctx);
   const fn = conn?.authenticatedUrl;
   if (typeof fn !== 'function') {
-    note('warn', '拿不到 connection.authenticatedUrl（铸不出带票网址）');
-    return external;
+    note('warn', '拿不到 connection.authenticatedUrl（铸不出带票网址，也没法给解锁后的请求补票）');
+    return null;
   }
   try {
     const tokenized = fn.call(conn, `http://${up.host}:${up.port}`);
     if (typeof tokenized === 'string') {
-      const q = tokenized.includes('?') ? tokenized.slice(tokenized.indexOf('?')) : '';
-      if (q) return external + q;
+      const m = /[?&]token=([^&\s]+)/.exec(tokenized);
+      if (m) return decodeURIComponent(m[1]);
       note('warn', 'authenticatedUrl 未带 token 参数');
     }
   } catch (err) {
     note('warn', `authenticatedUrl 调用失败: ${err?.message}`);
   }
-  return external;
+  return null;
+}
+
+function mintUrl(ticket, extAddr, port) {
+  const hostPart = String(extAddr).includes(':') ? `[${extAddr}]` : String(extAddr);
+  const external = `http://${hostPart}:${port}/`;
+  return ticket ? `${external}?token=${encodeURIComponent(ticket)}` : external;
 }
 
 function defaultStatusFile() {
@@ -451,10 +589,16 @@ async function verifyUpstream(up, note, attempts = 8, intervalMs = 2000) {
 export const inject = ['connection'];
 
 export function apply(ctx, config) {
-  const cfg = normalizeConfig(config);
+  let cfg = normalizeConfig(config);
   const notes = [];
-  const urls = [];
-  const statusPath = cfg.urlFile && cfg.urlFile !== '' && cfg.urlFile !== 'off' ? cfg.urlFile : defaultStatusFile();
+  let urls = [];
+  let servers = [];
+  let ticket = null; // 当前进程的 DSH token：给「已解锁但还没有 DSH cookie」的请求补票
+  let closed = false;
+  const cookieValue = randomBytes(16).toString('hex');
+  let bans = new Set();
+  let bansMtime = 0;
+  let bansCheckedAt = 0;
 
   function render() {
     return [
@@ -462,9 +606,12 @@ export function apply(ctx, config) {
       `# 更新时间: ${new Date().toISOString()}`,
       '',
       urls.length ? `远程访问网址: ${urls.join('  ')}` : '远程访问网址: （尚未生成）',
+      cfg.accessCode && urls.length ? `手机访问: ${urls[0].split('?')[0]} —— 直接打开，输一次访问密码即可` : '',
+      `解锁密码: ${cfg.accessCode ? '已设置（网段内一次不过即拉黑）' : '未设置（必须用带票网址访问）'}`,
+      `拉黑名单: ${banPathOf(cfg)}（删掉里面那行即可解封，最长 1 秒生效）`,
       '',
       '--- 生效配置 ---',
-      JSON.stringify(cfg, null, 2),
+      JSON.stringify({ ...cfg, accessCode: cfg.accessCode ? '***' : '' }, null, 2),
       '',
       '--- 诊断 ---',
       ...notes.map((n) => `${n.at}  [${n.level}] ${n.msg}`),
@@ -475,7 +622,7 @@ export function apply(ctx, config) {
   function flush() {
     if (cfg.urlFile === 'off') return;
     try {
-      fs.writeFileSync(statusPath, render(), { mode: 0o600 });
+      fs.writeFileSync(statusPathOf(cfg), render(), { mode: 0o600 });
     } catch (err) {
       try { ctx?.logger?.warn?.(`[remote-access] 写状态文件失败: ${err?.message}`); } catch { /* 忽略 */ }
     }
@@ -483,6 +630,7 @@ export function apply(ctx, config) {
 
   const note = (level, msg) => {
     notes.push({ at: new Date().toISOString(), level, msg });
+    if (notes.length > 200) notes.splice(0, notes.length - 200); // 热重载会反复跑，别把状态文件撑爆
     const toLogger = cfg.logLevel === 'debug' || (cfg.logLevel === 'info' && level !== 'debug');
     if (toLogger) {
       try {
@@ -506,56 +654,201 @@ export function apply(ctx, config) {
     );
   }
 
-  if (!cfg.enabled) {
-    note('info', 'enabled=false，不启动');
-    return () => {};
-  }
+  // ---------------------------------------------------------------- 拉黑名单
+  // 一次密码输错就拉黑；名单落在文件里，删掉那一行即可解封（最多 1 秒后自动重读）
 
-  const up = resolveUpstream(ctx, cfg, note);
-  if (!up) {
-    note('error', '找不到 DSH 界面端口：请在插件页把 upstream 显式设成 http://127.0.0.1:<端口>');
-    flush();
-    return () => {};
-  }
-  note('info', `上游确定为 ${up.host}:${up.port}`);
-  void verifyUpstream(up, note);
-
-  const addrs = cfg.listen === 'auto' ? localAddrsIn(cfg.allowCidrs) : cfg.listen;
-  note('info', `本机候选地址(${JSON.stringify(cfg.allowCidrs)}) = ${JSON.stringify(addrs)}`);
-  if (addrs.length === 0) {
-    note('error', '没有可监听的本机地址：请把 allowCidrs 改成实际网段，或显式设置 listen');
-    flush();
-    return () => {};
-  }
-
-  const servers = [];
-  let closed = false;
-  for (const addr of addrs) {
+  function refreshBans(force) {
+    const now = Date.now();
+    if (!force && now - bansCheckedAt < 1000) return;
+    bansCheckedAt = now;
+    let stat;
     try {
-      servers.push(
-        startProxy(addr, cfg, up, note, (boundAddr, port) => {
-          const url = mintUrl(ctx, up, boundAddr, port, note);
-          urls.push(url);
-          if (cfg.printUrl) note('info', `远程访问网址: ${url}`);
-          flush();
-        }),
-      );
-    } catch (err) {
-      note('error', `启动 ${addr} 失败: ${err?.message}`);
+      stat = fs.statSync(banPathOf(cfg));
+    } catch {
+      if (force) {
+        bans = new Set();
+        bansMtime = 0;
+      }
+      return;
     }
+    if (!force && stat.mtimeMs === bansMtime) return;
+    bansMtime = stat.mtimeMs;
+    try {
+      bans = new Set(
+        fs
+          .readFileSync(banPathOf(cfg), 'utf8')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line && !line.startsWith('#')),
+      );
+    } catch { /* 读不到就维持现状 */ }
   }
-  flush();
 
-  const dispose = () => {
+  function ban(peer) {
+    refreshBans(false);
+    if (bans.has(peer)) return;
+    bans.add(peer);
+    try {
+      const file = banPathOf(cfg);
+      const head = fs.existsSync(file) ? '' : '# dsh-remote-access 拉黑名单：一行一个 IP；删掉那一行即可解封\n';
+      fs.appendFileSync(file, `${head}${peer}\n`, { mode: 0o600 });
+      bansMtime = 0; // 下次检查重新读一遍文件
+    } catch { /* 写不进去也不影响内存里的拉黑 */ }
+  }
+
+  // ---------------------------------------------------------------- 访问门
+  // accessCode 为空时整扇门是「透明的」：行为与以前完全一致（裸地址交给 DSH 自己 401）。
+
+  const gate = {
+    get accessCode() { return cfg.accessCode; },
+    get banPath() { return banPathOf(cfg); },
+    cookieValue,
+    banned(peer) {
+      refreshBans(false);
+      return bans.has(peer);
+    },
+    ban,
+    /** 已授权：带票、DSH 自己的 cookie，或我们发过的放行 cookie */
+    authorize(req) {
+      if (/(?:[?&])token=/.test(String(req.url ?? ''))) return true;
+      const cookie = String(req.headers.cookie ?? '');
+      if (/dsh-auth-/i.test(cookie)) return true;
+      return Boolean(cfg.accessCode) && cookie.includes(`${UNLOCK_COOKIE}=${cookieValue}`);
+    },
+    /** 给已授权但还没有 DSH cookie 的请求补票（浏览器始终看不到 token） */
+    withTicket(url, cookie) {
+      if (!ticket) return url;
+      if (/dsh-auth-/i.test(String(cookie ?? ''))) return url;
+      if (/(?:[?&])token=/.test(url)) return url;
+      return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(ticket)}`;
+    },
+  };
+
+  // ---------------------------------------------------------------- 起停
+
+  function stopServers() {
+    for (const server of servers) {
+      try { server.closeAllConnections?.(); } catch { /* 忽略 */ }
+      try { server.close(); } catch { /* 已关闭 */ }
+    }
+    servers = [];
+    urls = [];
+  }
+
+  function start() {
+    stopServers();
+    if (!cfg.enabled) {
+      note('info', 'enabled=false，不启动');
+      return;
+    }
+
+    const up = resolveUpstream(ctx, cfg, note);
+    if (!up) {
+      note('error', '找不到 DSH 界面端口：把 cordis.patch.yml 里那一行的 upstream 设成 http://127.0.0.1:<端口>');
+      return;
+    }
+    note('info', `上游确定为 ${up.host}:${up.port}`);
+    void verifyUpstream(up, note);
+
+    ticket = mintTicket(ctx, up, note);
+    refreshBans(true);
+    if (cfg.accessCode) {
+      note('info', `解锁密码已启用：网段内直接打开裸地址、输一次密码即可（输错一次即拉黑）`);
+    }
+    if (bans.size) note('warn', `当前拉黑 ${bans.size} 个地址: ${[...bans].join(', ')}`);
+
+    const addrs = cfg.listen === 'auto' ? localAddrsIn(cfg.allowCidrs) : cfg.listen;
+    note('info', `本机候选地址(${JSON.stringify(cfg.allowCidrs)}) = ${JSON.stringify(addrs)}`);
+    if (addrs.length === 0) {
+      note('error', '没有可监听的本机地址：请把 allowCidrs 改成实际网段，或显式设置 listen');
+      return;
+    }
+
+    for (const addr of addrs) {
+      try {
+        servers.push(
+          startProxy(addr, cfg, up, note, (boundAddr, port) => {
+            urls.push(mintUrl(ticket, boundAddr, port));
+            if (cfg.printUrl) note('info', `远程访问网址: ${urls[urls.length - 1]}`);
+            flush();
+          }, gate),
+        );
+      } catch (err) {
+        note('error', `启动 ${addr} 失败: ${err?.message}`);
+      }
+    }
+    flush();
+  }
+
+  function dispose() {
     if (closed) return;
     closed = true;
-    for (const s of servers) {
-      try { s.close(); } catch { /* 已关闭 */ }
-    }
+    stopServers();
     note('info', '已停止监听');
-  };
+  }
+
+  // ---------------------------------------------------------------- 热重载
+  // 设置页保存 → configEditor 写 patch 并重组 → 根上下文发 app-boot/config-reload
+  // （settings provider 自己也听这个事件）。我们跟着重读生效配置、原地重挂监听，不必重启 DSH。
+
+  /** 从 settings 服务读这一行的生效配置：user 是刚写进 patch 的那层，base 是它下面继承的层 */
+  function configFromSettings() {
+    let settings;
+    try {
+      settings = typeof ctx.get === 'function' ? ctx.get('settings') : undefined;
+    } catch {
+      return undefined;
+    }
+    if (!settings || typeof settings.describe !== 'function') return undefined;
+    try {
+      const view = settings.describe({ redactSecrets: true }).find((row) => row?.ns === ROW_ID);
+      if (!view) return undefined;
+      return normalizeConfig({ ...(view.base ?? {}), ...(view.user ?? {}) });
+    } catch (err) {
+      note('warn', `热重载读配置失败: ${err?.message}`);
+      return undefined;
+    }
+  }
+
+  function reapply() {
+    if (closed) return;
+    const next = configFromSettings();
+    if (!next) return;
+    if (JSON.stringify(next) === JSON.stringify(cfg)) return;
+    const changed = Object.keys(next).filter((key) => JSON.stringify(next[key]) !== JSON.stringify(cfg[key]));
+    cfg = next;
+    note('info', `配置热重载（${changed.join(', ') || '无字段差异'}），按新参数重挂监听`);
+    start();
+  }
+
+  // ---------------------------------------------------------------- 首次启动 + 收尾
+
+  note('info', `apply 开始；DSH_HOME=${process.env.DSH_HOME ?? '(未设置)'} DSH_PROFILE=${process.env.DSH_PROFILE ?? '(未设置)'}`);
+  if (Schema) {
+    note('debug', `Config schema 已就绪（${schemaSource}）→「设置 → 远程访问」可写`);
+  } else {
+    note(
+      'error',
+      `Config schema 没拿到（${schemaSource}）→「设置 → 远程访问」点保存会失败。` +
+        'profile 里以 link: 安装的插件，必须在自己的 package.json 的 peerDependencies 里' +
+        '列出要从 DSH 安装目录借用的包（DSH 的 routeLinked 只对声明过的裸名放行）；改完需重启 DSH。',
+    );
+  }
+
+  start();
+
   try {
     if (typeof ctx?.effect === 'function') ctx.effect(() => dispose);
   } catch { /* 靠返回值清理 */ }
+  try {
+    if (typeof ctx?.on === 'function') {
+      ctx.on('app-boot/config-reload', reapply);
+      note('debug', '已挂上 app-boot/config-reload：设置页保存后热重载');
+    } else {
+      note('debug', '这个上下文没有 ctx.on，热重载没挂上（保存后需重启 DSH）');
+    }
+  } catch (err) {
+    note('warn', `热重载没挂上: ${err?.message}`);
+  }
   return dispose;
 }

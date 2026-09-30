@@ -22,37 +22,33 @@ window.__ModuleLoader__.load({
     const NS = 'remote-access';
     const STATUS_HINT = 'DSH 家目录\\remote-access-url.txt';
 
+    // 只留常用项；listen / allowWebSocket / upstream / rewriteHost / forwardClientHeaders /
+    // timeoutMs / urlFile / printUrl / accessCode / banFile 这些只在 cordis.patch.yml 里配
     const FIELDS = [
       { key: 'enabled', type: 'boolean', label: '启用', hint: '关掉即停止监听，不必卸载插件' },
       { key: 'allowCidrs', type: 'list', label: '允许的网段', hint: '唯一的安全边界；也是自动选择监听地址的依据。一行一个或用逗号分隔' },
       { key: 'denyCidrs', type: 'list', label: '排除的网段', hint: '白名单内的例外黑名单，可留空' },
-      { key: 'listen', type: 'list', label: '监听地址', hint: 'auto 或留空 = 只监听允许网段里属于本机的地址' },
-      { key: 'port', type: 'number', label: '监听端口', hint: '0 = 系统随机；固定成 19388 之类，手机网址就稳定了' },
+      { key: 'port', type: 'number', label: '端口', hint: '0 = 系统随机；固定成 19388 之类，手机网址就稳定了' },
       { key: 'maxConnections', type: 'number', label: '并发上限', hint: '0 = 不限制' },
-      { key: 'allowWebSocket', type: 'boolean', label: '透传 WebSocket', hint: '界面实时推送需要它，一般别关' },
-      { key: 'upstream', type: 'string', label: 'DSH 界面地址', hint: 'auto = 自动探测；也可写 http://127.0.0.1:19387' },
-      { key: 'rewriteHost', type: 'boolean', label: '改写 Host/Origin', hint: '改写为上游地址，省去改别的插件配置' },
-      { key: 'forwardClientHeaders', type: 'boolean', label: '转发 x-forwarded-*', hint: '只在需要上游看真实来源时打开' },
-      { key: 'timeoutMs', type: 'number', label: '上游超时(ms)', hint: '0 = 不超时' },
-      { key: 'urlFile', type: 'string', label: '状态文件路径', hint: `留空 = ${STATUS_HINT}；填 off = 不写` },
-      { key: 'printUrl', type: 'boolean', label: '同时写日志', hint: '把监听结果与带票网址打到 DSH 日志' },
-      { key: 'logLevel', type: 'string', label: '日志级别', hint: 'silent / info / debug' },
+      {
+        key: 'logLevel',
+        type: 'select',
+        label: '日志级别',
+        hint: '写进 DSH 日志的详细程度',
+        options: [
+          { value: 'silent', label: '静默' },
+          { value: 'info', label: '普通' },
+          { value: 'debug', label: '详细' },
+        ],
+      },
     ];
 
     const DEFAULTS = {
       enabled: true,
       allowCidrs: ['100.64.0.0/10'],
       denyCidrs: [],
-      listen: ['auto'],
       port: 0,
       maxConnections: 64,
-      allowWebSocket: true,
-      upstream: 'auto',
-      rewriteHost: true,
-      forwardClientHeaders: true,
-      timeoutMs: 0,
-      urlFile: '',
-      printUrl: true,
       logLevel: 'info',
     };
 
@@ -168,7 +164,7 @@ window.__ModuleLoader__.load({
               if (accepted !== true) {
                 throw new Error('写入被拒绝（配置可能刚被别处改过），请点「重新读取」后再试一次。');
               }
-              setStatus(`已保存 ${ops.length} 项，重启 DSH 后生效。`);
+              setStatus(`已保存 ${ops.length} 项，已按新参数重挂监听。`);
             } catch (err) {
               // 细节留给开发者控制台，页面上只说人话
               try { console.error('[remote-access] 保存失败', err); } catch { /* 忽略 */ }
@@ -232,6 +228,18 @@ window.__ModuleLoader__.load({
                 style: inputStyle,
                 onChange: (e) => setField(field.key, e.target.value),
               });
+            } else if (field.type === 'select') {
+              input = h(
+                'select',
+                {
+                  key: `${field.key}-i`,
+                  value: value ?? '',
+                  disabled: busy,
+                  style: inputStyle,
+                  onChange: (e) => setField(field.key, e.target.value),
+                },
+                field.options.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
+              );
             } else {
               input = h('input', {
                 key: `${field.key}-i`,
