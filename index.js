@@ -162,6 +162,11 @@ function normalizeConfig(rawIn) {
   return c;
 }
 
+/** 规范化后的配置要写回 schema 时得还原形态：listen 在运行期是 'auto' 字面量，schema 要的是数组 */
+function toRawConfig(c) {
+  return { ...c, listen: c.listen === 'auto' ? ['auto'] : c.listen };
+}
+
 /** 状态文件路径（urlFile 为空 → <DSH_HOME>/remote-access-url.txt；'off' → 不写） */
 function statusPathOf(cfg) {
   if (cfg.urlFile === 'off') return '';
@@ -174,6 +179,29 @@ function banPathOf(cfg) {
   const statusPath = statusPathOf(cfg);
   const dir = statusPath ? path.dirname(statusPath) : path.dirname(defaultStatusFile());
   return path.join(dir, 'remote-access-bans.txt');
+}
+
+/**
+ * 放行 cookie 的密钥：落盘持久化，**故意**与 accessCode 解耦 ——
+ * 改密码（甚至重启 DSH）都不会把已经进来的手机踢出去。想强制所有人重新输密码，删掉这个文件。
+ */
+function secretPathOf(cfg) {
+  const statusPath = statusPathOf(cfg);
+  const dir = statusPath ? path.dirname(statusPath) : path.dirname(defaultStatusFile());
+  return path.join(dir, 'remote-access-secret');
+}
+
+function loadSecret(cfg) {
+  const file = secretPathOf(cfg);
+  try {
+    const saved = fs.readFileSync(file, 'utf8').trim();
+    if (/^[0-9a-f]{32,}$/i.test(saved)) return saved;
+  } catch { /* 还没有就建一个 */ }
+  const created = randomBytes(24).toString('hex');
+  try {
+    fs.writeFileSync(file, `${created}\n`, { mode: 0o600 });
+  } catch { /* 写不进去就只在本次进程内有效 */ }
+  return created;
 }
 
 // ---------------------------------------------------------------- IP / 网段
@@ -304,9 +332,13 @@ function resolveUpstream(ctx, cfg, note) {
 
 // ---------------------------------------------------------------- 反向代理
 
-/** 解锁页路径与我们的放行 cookie 名（cookie 值是每次启动随机的，不是固定 "1"） */
+/** 解锁页路径与我们的放行 cookie 名（cookie 密钥落盘持久化，改密码不会把人踢下线） */
 const UNLOCK_PATH = '/__remote_access__/unlock';
 const UNLOCK_COOKIE = 'dsh-ra-ok';
+/** 远程页面读写配置的端点：只在通过本插件监听的页面上存在（loopback 页面走 configForms） */
+const RW_PATH = '/__remote_access__/config';
+/** 允许从远程页面改的字段：与 client.js 的表单字段一致（check-config-schema.mjs 会断言两边同步） */
+const FORM_KEYS = ['enabled', 'allowCidrs', 'denyCidrs', 'port', 'maxConnections', 'logLevel', 'accessCode'];
 
 /** 极简解锁页：只在手机上调一次，够用就好，不依赖任何外部资源 */
 function unlockPageHtml(hint) {
@@ -372,8 +404,9 @@ function upstreamHeaders(headers, up, cfg, peer) {
  * 起一个监听。
  * @param gate 访问门：`{ accessCode, cookieValue, banPath, authorize(req), banned(ip), ban(ip), withTicket(url, cookie), note }`
  *   —— 门只在 accessCode 非空时启用；为空时行为与以前完全一致（裸地址交给 DSH 自己 401）。
+ * @param rw 远程配置端点：`{ read(), validate(patch), persist(patch) }`
  */
-function startProxy(addr, cfg, up, note, onListening, gate) {
+function startProxy(addr, cfg, up, note, onListening, gate, rw) {
   let active = 0;
 
   const deny = (res, code, text) => {
@@ -411,6 +444,47 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
         note('warn', `${peer} 密码错误，已加入拉黑名单（删掉 ${gate.banPath} 里那一行即可解封）`);
         deny(res, 403, '403 forbidden: wrong code, this address is now blocked\n');
       }).catch(() => deny(res, 400, '400 bad request\n'));
+      return;
+    }
+
+    // 远程页面读写配置：只有「通过本插件监听进来的」页面够得着这个路径，
+    // 所以手机端也能改配置（loopback 页面走 DSH 自己的 configForms）。
+    if (String(req.url).split('?')[0] === RW_PATH) {
+      if (!gate.authorize(req)) {
+        deny(res, 401, '401 authentication required\n');
+        return;
+      }
+      const json = (status, payload) => {
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (req.method === 'GET') {
+        json(200, { ok: true, config: rw.read() });
+        return;
+      }
+      if (req.method !== 'POST') {
+        deny(res, 405, '405 method not allowed\n');
+        return;
+      }
+      readSmallBody(req, 8192)
+        .then((body) => {
+          let parsed;
+          try {
+            parsed = JSON.parse(body || '{}');
+          } catch {
+            json(400, { ok: false, error: '请求体不是 JSON' });
+            return;
+          }
+          const verdict = rw.validate(parsed?.patch);
+          if (!verdict.ok) {
+            json(400, { ok: false, error: verdict.error });
+            return;
+          }
+          // 先把回执发出去，再落盘：落盘会触发监听重挂，可能掐断这条连接
+          json(200, { ok: true, config: rw.read() });
+          setImmediate(() => rw.persist(verdict.patch));
+        })
+        .catch(() => deny(res, 400, '400 bad request\n'));
       return;
     }
 
@@ -595,7 +669,7 @@ export function apply(ctx, config) {
   let servers = [];
   let ticket = null; // 当前进程的 DSH token：给「已解锁但还没有 DSH cookie」的请求补票
   let closed = false;
-  const cookieValue = randomBytes(16).toString('hex');
+  let cookieValue = ''; // start() 里从持久化密钥读出来
   let bans = new Set();
   let bansMtime = 0;
   let bansCheckedAt = 0;
@@ -609,6 +683,7 @@ export function apply(ctx, config) {
       cfg.accessCode && urls.length ? `手机访问: ${urls[0].split('?')[0]} —— 直接打开，输一次访问密码即可` : '',
       `解锁密码: ${cfg.accessCode ? '已设置（网段内一次不过即拉黑）' : '未设置（必须用带票网址访问）'}`,
       `拉黑名单: ${banPathOf(cfg)}（删掉里面那行即可解封，最长 1 秒生效）`,
+      `放行密钥: ${secretPathOf(cfg)}（改密码不会踢人；想让所有设备重新输密码就删掉它）`,
       '',
       '--- 生效配置 ---',
       JSON.stringify({ ...cfg, accessCode: cfg.accessCode ? '***' : '' }, null, 2),
@@ -702,7 +777,7 @@ export function apply(ctx, config) {
   const gate = {
     get accessCode() { return cfg.accessCode; },
     get banPath() { return banPathOf(cfg); },
-    cookieValue,
+    get cookieValue() { return cookieValue; },
     banned(peer) {
       refreshBans(false);
       return bans.has(peer);
@@ -721,6 +796,64 @@ export function apply(ctx, config) {
       if (/dsh-auth-/i.test(String(cookie ?? ''))) return url;
       if (/(?:[?&])token=/.test(url)) return url;
       return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(ticket)}`;
+    },
+  };
+
+  // ---------------------------------------------------------------- 远程改配置
+  // 手机端页面拿不到 configForms（DSH 规定非回环页面不写 Host 设置），
+  // 所以给它一条自己的路：通过本插件的监听 POST 到 RW_PATH，由 Host 半区走官方的
+  // configEditor.edit() 落盘到 profile 的 patch 层 —— 与设置页写的是同一个地方。
+
+  const rw = {
+    /** 当前生效配置（写回 schema 要的形态） */
+    read() {
+      return toRawConfig(cfg);
+    },
+    /** 只收表单里那几个字段；空 accessCode = 不改；最后用同一套 schema 校验一遍 */
+    validate(input) {
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, error: 'patch 必须是对象' };
+      const patch = {};
+      for (const key of FORM_KEYS) if (Object.hasOwn(input, key)) patch[key] = input[key];
+      if (Object.keys(patch).length === 0) return { ok: false, error: `没有可改的字段（只接受 ${FORM_KEYS.join(', ')}）` };
+      if (Object.hasOwn(patch, 'accessCode')) {
+        const code = String(patch.accessCode ?? '');
+        if (code !== '' && !/^\d{4,12}$/.test(code)) return { ok: false, error: '访问密码要 4–12 位数字' };
+        if (code === '') delete patch.accessCode; // 留空 = 不改（避免误清）
+      }
+      if (Object.hasOwn(patch, 'logLevel') && !['silent', 'info', 'debug'].includes(String(patch.logLevel))) {
+        return { ok: false, error: '日志级别只能是 silent / info / debug' };
+      }
+      if (Config) {
+        try {
+          Config(toRawConfig({ ...cfg, ...patch }));
+        } catch (err) {
+          return { ok: false, error: `配置不合法：${err?.message ?? err}` };
+        }
+      }
+      return { ok: true, patch };
+    },
+    /** 落盘：与设置页同一条官方路径（configEditor.edit → 写 profile patch → 发 config-reload） */
+    persist(patch) {
+      const editor = typeof ctx.get === 'function' ? ctx.get('configEditor') : undefined;
+      if (!editor || typeof editor.edit !== 'function') {
+        note('error', '远程改配置失败：拿不到 configEditor 服务');
+        return;
+      }
+      let entry;
+      try {
+        entry = editor.entries().find((row) => row?.options?.id === ROW_ID);
+      } catch (err) {
+        note('error', `远程改配置失败：${err?.message ?? err}`);
+        return;
+      }
+      if (!entry) {
+        note('error', `远程改配置失败：找不到 Loader 条目 ${ROW_ID}`);
+        return;
+      }
+      const next = toRawConfig({ ...cfg, ...patch });
+      Promise.resolve(editor.edit(entry, () => next))
+        .then(() => note('info', `远程页面改了配置（${Object.keys(patch).join(', ')}），已写进 profile 的 patch 层，监听随即重挂`))
+        .catch((err) => note('error', `远程改配置失败：${err?.message ?? err}`));
     },
   };
 
@@ -751,6 +884,7 @@ export function apply(ctx, config) {
     void verifyUpstream(up, note);
 
     ticket = mintTicket(ctx, up, note);
+    cookieValue = loadSecret(cfg);
     refreshBans(true);
     if (cfg.accessCode) {
       note('info', `解锁密码已启用：网段内直接打开裸地址、输一次密码即可（输错一次即拉黑）`);
@@ -771,7 +905,7 @@ export function apply(ctx, config) {
             urls.push(mintUrl(ticket, boundAddr, port));
             if (cfg.printUrl) note('info', `远程访问网址: ${urls[urls.length - 1]}`);
             flush();
-          }, gate),
+          }, gate, rw),
         );
       } catch (err) {
         note('error', `启动 ${addr} 失败: ${err?.message}`);

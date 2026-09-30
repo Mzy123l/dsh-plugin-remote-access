@@ -1,17 +1,17 @@
 /**
  * dsh-remote-access 的浏览器半区：只在「设置」里提供一页可编辑的参数表单。
  *
- * 注册位置：settings.section（设置左侧导航的一页）。插件页那两处（plugins.row.config /
- * plugins.bundle.config）按使用要求已移除。
+ * 注册位置：settings.section（设置左侧导航的一页）。
  *
- * 写盘通道 = 官方唯一通道：ctx.configForms.get(命名空间)
- *   命名空间就是 Loader 条目的 options.id，也就是 cordis.patch.yml 里那一行的 id（remote-access）。
- *   读：form.getSnapshot() → { status, value, base, user, revision, writable, mode }
- *   写：form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>
- *   Host 侧把值落到 profile 的 patch 层（cordis.patch.yml），重启 DSH 后生效。
+ * 两条读写通道，按页面所在位置自动选：
+ *   1. 本机（回环）页面 —— 官方通道 ctx.configForms.get('remote-access')：
+ *      读 form.getSnapshot() → { status, value, revision, writable, mode }，
+ *      写 form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>。
+ *   2. 手机等远程页面 —— DSH 规定非回环页面不写 Host 设置（configForms 恒为 unavailable），
+ *      所以走 Host 半区自己的端点 POST /__remote_access__/config（此时页面正经过本插件的监听），
+ *      由 Host 用官方的 configEditor.edit() 落盘到 profile 的 patch 层。两条路写的是同一个地方。
  *
- * 页面上只说人话：失败给一句「用户下一步该做什么」，内部状态（status / mode / revision 之类）
- * 只往开发者控制台写，不摆在界面上。configForms 在命名空间没被服务时只会静默返回 false。
+ * 页面上只说人话：失败给一句「下一步做什么」，内部状态只写开发者控制台。
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-remote-access',
@@ -20,47 +20,38 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const NS = 'remote-access';
-    const STATUS_HINT = 'DSH 家目录\\remote-access-url.txt';
+    const RW_PATH = '/__remote_access__/config';
+    const SAVED_HINT = '已保存';
 
-    // 只留常用项；listen / allowWebSocket / upstream / rewriteHost / forwardClientHeaders /
-    // timeoutMs / urlFile / printUrl / accessCode / banFile 这些只在 cordis.patch.yml 里配
+    // 表单字段（与 index.js 的 FORM_KEYS 保持一致，check-config-schema.mjs 会断言）
     const FIELDS = [
-      { key: 'enabled', type: 'boolean', label: '启用', hint: '关掉即停止监听，不必卸载插件' },
-      { key: 'allowCidrs', type: 'list', label: '允许的网段', hint: '唯一的安全边界；也是自动选择监听地址的依据。一行一个或用逗号分隔' },
-      { key: 'denyCidrs', type: 'list', label: '排除的网段', hint: '白名单内的例外黑名单，可留空' },
-      { key: 'port', type: 'number', label: '端口', hint: '0 = 系统随机；固定成 19388 之类，手机网址就稳定了' },
-      { key: 'maxConnections', type: 'number', label: '并发上限', hint: '0 = 不限制' },
+      { key: 'enabled', type: 'boolean', label: '启用' },
+      { key: 'allowCidrs', type: 'list', label: '允许的网段', placeholder: '换行分割' },
+      { key: 'denyCidrs', type: 'list', label: '排除的网段', placeholder: '换行分割' },
+      { key: 'port', type: 'number', label: '端口', placeholder: '0=随机' },
+      { key: 'maxConnections', type: 'number', label: '并发上限', placeholder: '0=不限制' },
       {
         key: 'logLevel',
         type: 'select',
         label: '日志级别',
-        hint: '写进 DSH 日志的详细程度',
         options: [
           { value: 'silent', label: '静默' },
           { value: 'info', label: '普通' },
           { value: 'debug', label: '详细' },
         ],
       },
+      { key: 'accessCode', type: 'password', label: '访问密码', placeholder: '6位数字' },
     ];
 
     const DEFAULTS = {
       enabled: true,
-      allowCidrs: ['100.64.0.0/10'],
+      allowCidrs: [],
       denyCidrs: [],
       port: 0,
-      maxConnections: 64,
+      maxConnections: 0,
       logLevel: 'info',
+      accessCode: '',
     };
-
-    const mono = {
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-      padding: '1px 4px',
-      borderRadius: 3,
-      background: 'rgba(127,127,127,0.18)',
-    };
-    const code = (text, key) => h('code', { key, style: mono }, text);
-    const note = (style, ...children) =>
-      h('div', { style: { lineHeight: 1.7, marginTop: 8, ...style } }, children);
 
     const listToText = (v) => (Array.isArray(v) ? v.join('\n') : v === undefined || v === null ? '' : String(v));
     const textToList = (t) =>
@@ -86,7 +77,13 @@ window.__ModuleLoader__.load({
       return value;
     }
 
-    /** 把 Host 快照里的 value 摊成草稿（缺字段回落到本地默认值，保证表单永远可编辑） */
+    /** 输入框里显示什么：0 显示成空（好让占位符露出来） */
+    const display = (field, value) => {
+      if (field.type === 'number') return Number(value) === 0 ? '' : String(value);
+      if (field.type === 'boolean') return value === true;
+      return value === undefined || value === null ? '' : value;
+    };
+
     function draftFrom(value) {
       const source = value && typeof value === 'object' ? value : {};
       const next = {};
@@ -94,18 +91,29 @@ window.__ModuleLoader__.load({
       return next;
     }
 
-    /** 保存失败时说人话：告诉用户下一步做什么，而不是抛内部状态码 */
-    function failureHint(snap) {
-      if (snap?.status === 'loading') return '设置还在读取，请稍等一下再保存。';
-      if (snap?.status === 'unavailable') {
-        return '这一行的配置现在不能在这里修改：如果是从别的设备打开的页面，请回到运行 DSH 的那台机器上改。';
-      }
-      return '这一行的配置暂时不可写。';
+    /** 远程页面（手机）读配置：走 Host 半区的端点 */
+    async function readRemote() {
+      const res = await fetch(RW_PATH, { headers: { accept: 'application/json' }, cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      if (body?.ok !== true) throw new Error(body?.error ?? '读取失败');
+      return body.config ?? {};
+    }
+
+    /** 远程页面写配置：Host 半区用 configEditor.edit() 落盘，与设置页同一个地方 */
+    async function writeRemote(patch) {
+      const res = await fetch(RW_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ patch }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body?.ok !== true) throw new Error(body?.error ?? `HTTP ${res.status}`);
+      return body.config ?? {};
     }
 
     return {
-      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"。
-      // remote / remote.settings 已不再需要：读写都走 configForms（它内部持有 remote.settings）。
+      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
       inject: ['slots', 'configForms'],
       apply(ctx) {
         // ui-settings 提供的共享表单控制器：同一个条目在浏览器里只有一个实例，
@@ -122,51 +130,67 @@ window.__ModuleLoader__.load({
 
         function Panel() {
           const [snap, setSnap] = React.useState(() => form.getSnapshot());
+          const [remote, setRemote] = React.useState(null);
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
           const revisionRef = React.useRef(snap.revision);
 
-          // 订阅共享表单：Host 每次刷新设置文档都会推一个新快照过来
+          // 回环页面用 configForms（官方通道）；拿不到就退到 Host 端点（远程页面）
+          const viaForms = snap.status === 'ready' && snap.writable === true;
+          const source = viaForms ? snap.value : remote;
+
           React.useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), []);
 
-          // 快照换版（首次就绪、外部改动、保存回执）→ 丢掉草稿，用新值重画
           React.useEffect(() => {
             if (revisionRef.current === snap.revision) return;
             revisionRef.current = snap.revision;
             setDraft(null);
           }, [snap.revision]);
 
-          const current = draft ?? draftFrom(snap.value);
+          React.useEffect(() => {
+            if (viaForms) {
+              setRemote(null);
+              return undefined;
+            }
+            let alive = true;
+            readRemote()
+              .then((config) => { if (alive) setRemote(config); })
+              .catch((err) => {
+                try { console.error('[remote-access] 读远端配置失败', err); } catch { /* 忽略 */ }
+                if (alive) setRemote({});
+              });
+            return () => { alive = false; };
+          }, [viaForms]);
+
+          const current = draft ?? draftFrom(source);
           const setField = (key, value) => setDraft({ ...current, [key]: value });
 
           const onSave = async () => {
             setBusy(true);
             setStatus('保存中…');
             try {
-              const now = form.getSnapshot();
-              if (now.status !== 'ready') throw new Error(failureHint(now));
-              if (now.writable !== true) {
-                throw new Error('这一行的配置现在不能在这里修改：如果是从别的设备打开的页面，请回到运行 DSH 的那台机器上改。');
-              }
-              const ops = [];
+              const base = source ?? {};
+              const changed = {};
               for (const field of FIELDS) {
                 const next = encode(field, current[field.key]);
-                if (JSON.stringify(next) !== JSON.stringify(now.value?.[field.key])) {
-                  ops.push({ op: 'set', path: [field.key], value: next });
-                }
+                if (JSON.stringify(next) !== JSON.stringify(base[field.key])) changed[field.key] = next;
               }
-              if (ops.length === 0) {
-                setStatus('没有改动，未写入。');
+              const count = Object.keys(changed).length;
+              if (count === 0) {
+                setStatus('没有改动。');
                 return;
               }
-              const accepted = await form.mutate(ops, now.revision);
-              if (accepted !== true) {
-                throw new Error('写入被拒绝（配置可能刚被别处改过），请点「重新读取」后再试一次。');
+              if (viaForms) {
+                const ops = Object.entries(changed).map(([key, value]) => ({ op: 'set', path: [key], value }));
+                const accepted = await form.mutate(ops, snap.revision);
+                if (accepted !== true) throw new Error('写入被拒绝，请点「重新读取」后再试一次。');
+              } else {
+                setRemote(await writeRemote(changed));
               }
-              setStatus(`已保存 ${ops.length} 项，已按新参数重挂监听。`);
+              setDraft(null);
+              setStatus(`${SAVED_HINT} ${count} 项。`);
             } catch (err) {
-              // 细节留给开发者控制台，页面上只说人话
               try { console.error('[remote-access] 保存失败', err); } catch { /* 忽略 */ }
               setStatus(`保存失败：${err?.message ?? err}`);
             } finally {
@@ -177,15 +201,20 @@ window.__ModuleLoader__.load({
           const onReload = () => {
             setStatus('');
             setDraft(null);
-            reload().then(() => setSnap(form.getSnapshot()));
+            if (viaForms) {
+              reload().then(() => setSnap(form.getSnapshot()));
+              return;
+            }
+            readRemote()
+              .then((config) => setRemote(config))
+              .catch(() => setRemote({}));
           };
 
           const rowStyle = {
             display: 'grid',
-            gridTemplateColumns: 'minmax(150px, max-content) minmax(220px, 1fr)',
-            gap: '6px 12px',
+            gridTemplateColumns: 'minmax(84px, max-content) minmax(180px, 1fr)',
+            gap: '8px 12px',
             alignItems: 'center',
-            marginTop: 6,
           };
           const inputStyle = {
             width: '100%',
@@ -197,10 +226,15 @@ window.__ModuleLoader__.load({
             border: '1px solid rgba(127,127,127,0.35)',
             borderRadius: 4,
           };
-          const hintStyle = { gridColumn: '2', opacity: 0.65, fontSize: '0.92em' };
 
           const rows = FIELDS.flatMap((field) => {
-            const value = current[field.key];
+            const value = display(field, current[field.key]);
+            const common = {
+              key: `${field.key}-i`,
+              disabled: busy,
+              style: inputStyle,
+              onChange: (e) => setField(field.key, e.target.value),
+            };
             let input;
             if (field.type === 'boolean') {
               input = h('input', {
@@ -212,67 +246,43 @@ window.__ModuleLoader__.load({
               });
             } else if (field.type === 'list') {
               input = h('textarea', {
-                key: `${field.key}-i`,
+                ...common,
                 rows: 2,
-                value: value ?? '',
-                disabled: busy,
-                style: { ...inputStyle, fontFamily: mono.fontFamily },
-                onChange: (e) => setField(field.key, e.target.value),
-              });
-            } else if (field.type === 'number') {
-              input = h('input', {
-                key: `${field.key}-i`,
-                type: 'number',
-                value: value ?? 0,
-                disabled: busy,
-                style: inputStyle,
-                onChange: (e) => setField(field.key, e.target.value),
+                value,
+                placeholder: field.placeholder,
+                style: { ...inputStyle, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
               });
             } else if (field.type === 'select') {
               input = h(
                 'select',
-                {
-                  key: `${field.key}-i`,
-                  value: value ?? '',
-                  disabled: busy,
-                  style: inputStyle,
-                  onChange: (e) => setField(field.key, e.target.value),
-                },
+                { ...common, value: current[field.key] ?? '' },
                 field.options.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
               );
+            } else if (field.type === 'password') {
+              input = h('input', {
+                ...common,
+                type: 'password',
+                autoComplete: 'new-password',
+                value,
+                placeholder: field.placeholder,
+              });
             } else {
               input = h('input', {
-                key: `${field.key}-i`,
-                type: 'text',
-                value: value ?? '',
-                disabled: busy,
-                style: inputStyle,
-                onChange: (e) => setField(field.key, e.target.value),
+                ...common,
+                type: field.type === 'number' ? 'number' : 'text',
+                value,
+                placeholder: field.placeholder,
               });
             }
             return [
-              h(
-                'div',
-                { key: `${field.key}-l`, style: { display: 'flex', gap: 8, alignItems: 'baseline' } },
-                code(field.key),
-                h('span', null, field.label),
-              ),
+              h('div', { key: `${field.key}-l` }, field.label),
               input,
-              h('div', { key: `${field.key}-h`, style: hintStyle }, field.hint),
             ];
           });
-
-          const ready = snap.status === 'ready';
 
           return h(
             'div',
             { style: { padding: '2px 0' } },
-            note(
-              { marginTop: 0 },
-              '把本机 DSH 的网页界面开放给指定网段：只监听该网段里属于本机的地址，网段外的对端一律 403；访问仍需 DSH 自己的令牌。带票网址写在 ',
-              code(STATUS_HINT),
-              '，手机打开一次后 30 天免票。',
-            ),
             h('div', { style: rowStyle }, rows),
             h(
               'div',
@@ -281,7 +291,6 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', disabled: busy, onClick: onReload }, '重新读取'),
               status ? h('span', { style: { opacity: 0.9 } }, status) : null,
             ),
-            ready ? null : note({ opacity: 0.8 }, failureHint(snap)),
           );
         }
 
