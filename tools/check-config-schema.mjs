@@ -47,7 +47,7 @@ function formFields(clientSource) {
   return found;
 }
 
-const EXPECTED_TYPE = { boolean: 'boolean', number: 'number', string: 'string', list: 'array' };
+const EXPECTED_TYPE = { boolean: 'boolean', number: 'number', string: 'string', list: 'array', select: 'string' };
 
 /** `^3.18.1` 这类 caret 范围的粗判（只用于「peer 范围是否容得下装着的版本」这条提示） */
 function caretSatisfies(range, version) {
@@ -139,8 +139,25 @@ try {
   const missingInSchema = fields.filter((f) => !keys.includes(f.key)).map((f) => f.key);
   check('表单字段都在 Config 里', missingInSchema.length === 0, missingInSchema.length ? `缺: ${missingInSchema.join(', ')}` : '');
 
-  const missingInForm = keys.filter((k) => !fields.some((f) => f.key === k));
-  check('Config 字段都在表单里', missingInForm.length === 0, missingInForm.length ? `缺: ${missingInForm.join(', ')}` : '');
+  // 设置页只留常用项，其余只在 cordis.patch.yml 里配；两边合起来必须正好等于 Config 的字段集
+  const PATCH_ONLY = [
+    'listen',
+    'allowWebSocket',
+    'upstream',
+    'rewriteHost',
+    'forwardClientHeaders',
+    'timeoutMs',
+    'urlFile',
+    'printUrl',
+    'accessCode',
+    'banFile',
+  ];
+  const accounted = new Set([...fields.map((f) => f.key), ...PATCH_ONLY]);
+  const unaccounted = keys.filter((k) => !accounted.has(k));
+  const stale = [...accounted].filter((k) => !keys.includes(k));
+  check('Config 字段 = 表单字段 + 仅 patch 字段', unaccounted.length === 0 && stale.length === 0,
+    [unaccounted.length ? `既不在表单也不在 patch 白名单: ${unaccounted.join(', ')}` : '', stale.length ? `白名单里有已不存在的字段: ${stale.join(', ')}` : '']
+      .filter(Boolean).join('；'));
 
   const mismatched = fields
     .filter((f) => dict[f.key] !== undefined)

@@ -96,15 +96,24 @@ $env:ELECTRON_RUN_AS_NODE = 1
 ### 修法
 
 - `package.json`：把 `@deepseek-ai/schemastery` 声明为 **peerDependency**（见上，这是能从安装目录借到包的凭据）。
-- `index.js`：`import('@deepseek-ai/schemastery')`，`Config` 的 14 个字段全部 `.volatile()`
+- `index.js`：`import('@deepseek-ai/schemastery')`，`Config` 的字段全部 `.volatile()`
   （它们是纯运行期参数）；纯 node 环境解析不到时仍降级为「无 schema」，插件照常工作——
   并且**把解析结果（成功来源 / 报错原文）写进状态文件的诊断区**，不许再哑巴失败。
-- `client.js`：`inject: ['slots', 'configForms']`，读写改用 `configForms`；
+- `index.js` 热重载：把「起监听」抽成 `start()`（先 `stopServers()` 再按当前 `cfg` 重开），
+  挂 `ctx.on('app-boot/config-reload', reapply)`；`reapply()` 用
+  `ctx.get('settings').describe()` 的 `{...base, ...user}` 算出生效配置，有差异才重挂。
+- `index.js` 解锁门：`accessCode` 非空时，网段内的页面导航请求先给一张极简解锁页；
+  POST 密码正确 → 发一枚随机的 `dsh-ra-ok` cookie（30 天）+ 303 回 `/`；
+  **错误一次** → 把该 IP 追加进 `banFile` 并 403。已授权（带票 / DSH cookie / 我们的 cookie）的请求，
+  在没有 DSH cookie 时由代理在**服务端**补 `?token=`，所以浏览器地址栏里不出现 token。
+  密码为空时整扇门透明，行为与以前一致（裸地址交给 DSH 自己 401）。
+- `client.js`：`inject: ['slots', 'configForms']`，只留 6 项（日志级别是下拉框）；
   保存 = 只把**改动过的**字段编成一条原子 `mutate(ops, revision)`。
   页面上只说人话（内部状态、诊断、YAML 兜底都已收掉，细节改往开发者控制台写）；
-  保存成功的提示是「重启 DSH 后生效」。
+  保存成功的提示是「已按新参数重挂监听」。
 - 回归：`node tools/check-config-schema.mjs` 验**两道门**——peer 声明（含版本范围）+ 用安装包里的真
-  Schemastery 验「原生 schema + 全字段 volatile + 表单字段/类型对表」，**不需要重启 DSH**。
+  Schemastery 验「原生 schema + 全字段 volatile + 表单字段/仅 patch 字段/类型对表」，**不需要重启 DSH**；
+  `node tools/test-remote-access.mjs` **25 项**（含解锁页、错一次拉黑、解封、服务端补票、热重载换端口）。
 
 ### 为什么不走「Host 半区自己写盘 / host.call」
 
@@ -151,8 +160,10 @@ $env:ELECTRON_RUN_AS_NODE = 1
 | 设置写入落盘在哪 | profile 的 patch 文档（`cordis.patch.yml` 那一层），由 `configEditor.edit()` 写入后按 Loader 正常路径重挂载 |
 | `host.call` 的适用范围 | 只属于**动态半区**（cordis-client-runner，符号面固定为 `React`/`console`/`styles`/`host`）。module-loader 半区的模块表里**没有** `host` |
 | config 入参形态 | 声明 `Config` 后，`apply` 拿到的 config 可能是 **Schema 字段引用**，读值要用 `.get()` 兜底（本插件已做） |
-| 改代码的生效条件 | **换 JS 必须重启 DSH**（热重载只重组配置，不换模块代）；`cordis.patch.yml` / home patch 的改动会触发重组（可热生效） |
-| 重启的副作用 | 每次重启换 **token**（带票网址失效）与**随机端口**（除非 `port` 固定）；DSH 的 cookie **绑定 hostname:port** → 改端口后手机上要重新打开一次带票网址 |
+| 改代码的生效条件 | **换 JS 必须重启 DSH**（热重载只重组配置，不换模块代）；`cordis.patch.yml` / home patch 的改动**不会自己**触发重组（实测：手工改 `maxConnections` 3→7，盯 16 秒无反应） |
+| 配置热重载的钩子 | `configEditor.edit()` 写盘后会 `reconcileProfilePatches()`，它在**根上下文**发 **`app-boot/config-reload`**（settings provider 自己就挂这个事件失效缓存：`ctx.on("app-boot/config-reload", …)`）。Cordis 事件是**父→子**派发，所以在自己 context 上 `ctx.on` 就能收到根上发的事件；反过来（听兄弟服务在自己 context 上 emit 的 `settings/document-updated`）**收不到** |
+| 读「生效配置」的正确姿势 | 服务名是 **`settings`**（`SettingsForms`，`super(ownerContext, "settings")`，`static inject = ["configEditor","profileContext"]`）。`ctx.get('settings').describe({redactSecrets:true})` 返回描述符数组，每项有 `ns / value / base / user / revision`。**`value` 是运行中 fiber 的旧值**（不可靠），`user` 是刚写进 patch 的那层、`base` 是它下面继承的层 —— 热重载要读 `{...base, ...user}` |
+| 重启的副作用 | 每次重启换 **token**（带票网址失效）与**随机端口**（除非 `port` 固定）；DSH 的 cookie **绑定 hostname:port** → 改端口后手机上要重新做一次解锁/带票访问 |
 | 创造模式 | preset id 是 **`cordis`**，显示名「创造模式」；它额外提供 `cordis_inspect_*` 与 `plugin_manager`。标准模式（`standard`）没有这两样 |
 | 模式是会话级 | 会话创建时钉住 preset；新会话解析 `selectedDefault`。**子智能体没有 preset 参数**，只能继承所处会话（实测：标准模式会话起的 subagent 也是标准模式） |
 
@@ -191,16 +202,18 @@ $env:ELECTRON_RUN_AS_NODE = 1
 
 ## 7. 待办清单
 
-1. **[待用户]** 重启 DSH 才会让保存的参数生效（**实测：这个 profile 下 patch 改动不热生效**——
-   手工只改 `cordis.patch.yml` 里的 `maxConnections` 3→7，盯 16 秒，插件没重挂载、监听端口没变）。
-   重启后状态文件诊断区应出现 `Config schema 已就绪（@deepseek-ai/schemastery…）`；
-   若出现 `Config schema 没拿到（…）`，照第 2 节两道门查。
-2. **手机端每次换端口/重启都要重新用带票网址开一次**：DSH 每次重启换 token，cookie 又绑 hostname:port。
-   无票访问会得到 DSH 自己的 `401 authentication required`（这不是插件的问题；实测带票 → `303` + `Set-Cookie`）。
-   把 `port` 固定成 `19388` 之后，手机上开一次带票网址，之后直接输 `http://100.64.0.3:19388/` 即可。
-3. 可选：把第 2 节那段「用 DSH 自带运行时跑真解析器 A/B」的探针做成 `tools/check-resolution.mjs`，
+1. **[待用户]** 重启一次 DSH 装上这一代 JS（首启之后，改参数就是热重载，不必再重启）。
+   重启后状态文件应出现 `手机访问: http://…` 与 `解锁密码: 已设置`；若出现 `Config schema 没拿到（…）`，
+   照第 2 节两道门查。
+2. **[安全]** 现在设了 `accessCode`（用户选定「网段 + 6 位密码」）：网段内开裸地址输一次即进，
+   解锁后由插件在服务端补票，**token 在这条路上不再是第二道门**；**错一次即把该 IP 拉黑**
+   （`%USERPROFILE%\.dsh\remote-access-bans.txt`，删掉那一行 1 秒内解封）。
+   想回到严格模式：把 `cordis.patch.yml` 里的 `accessCode` 清空。
+3. 建议顺手把 `maxConnections` 从 3 调回 64：浏览器对同一 origin 会开好几条 keep-alive 连接，
+   上限 3 会让手机端加载时好时坏（设置页里就能改，保存即热重载）。
+4. 可选：把第 2 节那段「用 DSH 自带运行时跑真解析器 A/B」的探针做成 `tools/check-resolution.mjs`，
    这样连 peer 是否真的生效都能在重启前验掉（本轮是手写临时探针跑的）。
-4. 可选：命令行工具（`E:\Applications\dsh-remote-access`）——按参数启动 DSH、已在跑则改参数（用户提过，但 GUI 优先）。
-5. 可选：客户端页面显示**当前生效的带票网址**（现在只能读文件）。需要 Host⇄Client 数据通道——
-   注意 module-loader 半区拿不到 `host.call`，可行路线是让 Host 半区把网址写进状态文件后由页面读文件、
+5. 可选：命令行工具（`E:\Applications\dsh-remote-access`）——按参数启动 DSH、已在跑则改参数（用户提过，但 GUI 优先）。
+6. 可选：客户端页面显示**当前生效的访问地址**（现在只能读状态文件）。需要 Host⇄Client 数据通道——
+   注意 module-loader 半区拿不到 `host.call`，可行路线是让 Host 半区把地址写进状态文件后由页面读文件、
    或按官方做法定义一个 `@Remote` 端点（要带 typert 生成的 codec）。

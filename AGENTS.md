@@ -1,15 +1,21 @@
 # dsh-remote-access — 项目约定与现状
 
 给 **DSH（DeepSeek Harness）桌面版**用的「限网段远程访问入口」插件：让手机 / 另一台设备在指定网段
-（默认 Tailscale `100.64.0.0/10`）通过一条带令牌的网址打开本机 DSH 的网页界面。
+（默认 Tailscale `100.64.0.0/10`）打开本机 DSH 的网页界面 —— 要么用带令牌的网址，要么（设了
+`accessCode` 时）开裸地址输一次 6 位密码。
 
 ## 硬约定
 
 - 中文注释、中文提交信息；变量名 / 函数名保持英文。
 - **不要把地址写死**：网段、监听地址、端口、上游端口一律走 `Config`（`cordis.patch.yml` 的 `config`）。
 - 零依赖：只用 `node:` 内置模块（装进 profile 不拉任何第三方包）。
-- **安全边界不许放松**：只监听 `allowCidrs` 内的本机地址（永不 `0.0.0.0`）；对端也必须在 `allowCidrs` 内；
-  不绕过 DSH 自己的令牌 / cookie。要改这些地方先说清理由。
+- **安全边界不许放松**（要动先说清理由）：只监听 `allowCidrs` 内的本机地址（永不 `0.0.0.0`）；
+  对端也必须在 `allowCidrs` 内；**没设 `accessCode` 时**不绕过 DSH 自己的令牌 / cookie。
+  **例外是用户 2026-10-01 明确选定的**：设了 `accessCode` 就走「网段 + 6 位密码」——解锁后由 Host 半区
+  在服务端补票（浏览器始终看不到 token），一次输错即把该地址拉黑。这条路径上 token 不再是第二道门，
+  不要以为它还挡着；也不要在这条路上再放松别的东西（比如给密码加"记住上次输入"之类的旁路）。
+- **密码 / 令牌不进仓库**：`accessCode` 只写在 profile 的 `cordis.patch.yml`（`Schema.string()`，YAML 里必须加引号，
+  否则会被解析成数字导致校验失败），状态文件里打码。
 - **失败必须可见**：任何提前退出都要写状态文件（`<DSH_HOME>/remote-access-url.txt`），不许"哑巴失败"。
 
 ## 常用命令
@@ -31,12 +37,18 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 
 **Host 半区已完成** ✅：只监听允许网段内的本机地址、网段外对端 403、HTTP/WS 透传、Host+Origin 改写、
 带 token 网址写入状态文件、上游自检重试 8×2 秒、失败必写状态文件、`ctx.effect` 关监听；
-独立测试 **10/10** 通过。手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
+**热重载**：设置页保存后 DSH 发 `app-boot/config-reload`，插件原地关旧监听、按新参数重开（不重启 DSH）；
+**解锁模式**：设 `accessCode` 时网段内开裸地址 → 解锁页 → 输一次 6 位密码 → 服务端补票进 DSH，
+**错一次即拉黑该 IP**（名单在 `banFile`，删行即解封）。
+独立测试 **25/25** 通过（含解锁/拉黑/热重载），Config 校验 **12/12**。
+手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
 
-**Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，设置左侧导航出现「远程访问」一页，
-参数读写走官方通道 `ctx.configForms.get('remote-access')`（`getSnapshot` 读、`mutate([{op:'set',path:[key],value}], revision)` 原子写）。
+**Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，只留 6 项（启用 / 允许的网段 /
+排除的网段 / 端口 / 并发上限 / 日志级别下拉）+ 保存；读写走官方通道
+`ctx.configForms.get('remote-access')`（`getSnapshot` 读、`mutate([{op:'set',path:[key],value}], revision)` 原子写）。
+页面上只说人话，内部状态（status/mode/revision…）只写开发者控制台。
 
-**设置页保存已修好** ✅（两道门的根因见下）。**待用户重启 DSH 后实测一次**（换 JS 必须重启）。
+**设置页保存已修好** ✅（两道门的根因见下）。**换 JS 仍需重启一次 DSH**；那之后改参数就是热重载了。
 
 **根因一（写不进去）**：Host 的设置文档只服务「`Config` 是原生 Schemastery schema、且含
 `.volatile()` 字段」的条目（`@deepseek-ai/dsh-settings` 的 `volatileForm` / `isVolatilePath`）。
@@ -56,8 +68,10 @@ peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么�
 **关键教训**：
 - 客户端 `inject` 必须写点号全名（`'remote.pluginManager'`、`'remote.settings'`），只写 `'remote'` 会报 `without inject`；
 - 这两个 `remote` 面孔现在已不需要：读写都走 `configForms`（它内部持有 `remote.settings`）；
-- 改 JS 后**必须重启 DSH**；
-- 提参数前先看 `Config.listConfigs` 里这一行的 `status`：不是 `schema` 就说明 Host 还不服务它。
+- 改 JS 后**必须重启 DSH**；改 `Config` 默认值也算改 JS；
+- 提参数前先看 `Config.listConfigs` 里这一行的 `status`：不是 `schema` 就说明 Host 还不服务它；
+- 手动改 `cordis.patch.yml` **不触发**热重载（实测：改 `maxConnections` 3→7 盯 16 秒无反应），
+  要么在设置页点一次保存（这会发 `app-boot/config-reload`，顺带把手工改动带进来），要么重启 DSH。
 
 ## 目录
 

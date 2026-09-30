@@ -29,23 +29,32 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 
 ## 配置
 
-**首选：设置 → 远程访问**（设置左侧导航里那一页）。保存会写进 profile 的 `cordis.patch.yml`，
-并按 Loader 的正常路径重新挂载插件 —— 端口可能变化，新网址以状态文件为准。
+**首选：设置 → 远程访问**（设置左侧导航里那一页），只有 6 项：启用、允许的网段、排除的网段、端口、
+并发上限、日志级别。保存写进 profile 的 `cordis.patch.yml`，插件随后**热重载**（原地关掉旧监听、
+按新参数重开），不用重启 DSH —— 端口会变，新网址以状态文件为准。
 
-也可以直接改 `cordis.patch.yml` 里那一行的 `config`（或在 profile/home patch 里覆盖同 `id` 的行）：
+其余参数只在 `cordis.patch.yml` 里配（也不建议常用）：
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `enabled` | `true` | 关掉它只需设 false，不必卸载 |
-| `allowCidrs` | `['100.64.0.0/10']` | 允许来访的网段；也是 `listen: auto` 挑选本机监听地址的依据 |
-| `listen` | `'auto'` | `auto` = 只监听上面网段里的本机地址；也可写 `['100.x.y.z']` |
-| `port` | `0` | 监听端口，`0` = 系统随机 |
-| `upstream` | `'http://127.0.0.1:19387'` | DSH 界面端口；写 `'auto'` 则依次探测 `ctx.webStartup` / `webServer` / `webRuntime` / `$DSH_WEB_PORT` |
-| `rewriteHost` | `true` | 改写 `Host`/`Origin` 为上游 authority |
-| `urlFile` | `''` → `<DSH_HOME>/remote-access-url.txt` | 带票网址写哪；`off` = 不写 |
-| `printUrl` | `true` | 同时打到 DSH 日志 |
+| 键 | 默认 | 说明 | 在设置页里 |
+|---|---|---|---|
+| `enabled` | `true` | 关掉它只需设 false，不必卸载 | ✅ |
+| `allowCidrs` | `['100.64.0.0/10']` | 允许来访的网段；也是 `listen: auto` 挑选本机监听地址的依据 | ✅ |
+| `denyCidrs` | `[]` | 白名单内的例外黑名单 | ✅ |
+| `port` | `0` | 监听端口，`0` = 系统随机 | ✅ |
+| `maxConnections` | `64` | 并发连接上限（浏览器会开好几条 keep-alive，别设太小） | ✅ |
+| `logLevel` | `'info'` | `silent` / `info` / `debug` | ✅ |
+| `listen` | `'auto'` | `auto` = 只监听上面网段里的本机地址；也可写 `['100.x.y.z']` | — |
+| `upstream` | `'auto'` | DSH 界面地址；`auto` 会读 `ctx.webServer.port`（拿不到再试 `webRuntime` / `$DSH_WEB_PORT`） | — |
+| `rewriteHost` | `true` | 改写 `Host`/`Origin` 为上游 authority | — |
+| `forwardClientHeaders` | `true` | 转发 `x-forwarded-for` / `x-forwarded-proto` | — |
+| `timeoutMs` | `0` | 上游请求超时（毫秒）；`0` = 不超时 | — |
+| `allowWebSocket` | `true` | 透传 WebSocket（界面实时推送靠它） | — |
+| `urlFile` | `''` → `<DSH_HOME>/remote-access-url.txt` | 带票网址写哪；`off` = 不写 | — |
+| `printUrl` | `true` | 同时打到 DSH 日志 | — |
+| `accessCode` | `''` | 网段内的解锁密码（4–12 位数字）。设了就**不用复制 token**：手机直接开裸地址，输一次即可；**输错一次就把该地址拉黑** | — |
+| `banFile` | `''` → 与状态文件同目录的 `remote-access-bans.txt` | 拉黑名单；删掉里面那一行即可解封（最多 1 秒生效） | — |
 
-**那个状态文件里有访问令牌，等于本机操作权限**，按 `0600` 写入，别外传。
+**那个状态文件里有访问令牌，等于本机操作权限**，按 `0600` 写入，别外传（`accessCode` 会在里面打码）。
 
 > 设置页能写盘的前提有两道门，缺一条保存就会失败：
 > 1. 这一行的 `Config` 是**原生 Schemastery schema**（`@deepseek-ai/schemastery`）且每个字段都标了
@@ -58,15 +67,28 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 
 ## 使用
 
-1. 重启 DSH 后打开 `<DSH_HOME>\remote-access-url.txt`，里面有一行 `远程访问网址: http://<地址>:<端口>/?token=...`。
-2. 在手机 / 另一台设备（需要在同一 tailnet）打开这条网址一次 —— 它会把 token 换成 DSH 的签名 cookie（默认 30 天）。
-3. 之后直接访问 `http://<地址>:<端口>/` 即可。
+**设了 `accessCode`（推荐，手机不用复制长串）：**
+
+1. 手机上直接打开 `http://<地址>:<端口>/`（地址见状态文件里那行 `手机访问:`）。
+2. 输一次访问密码 → 进入。之后 30 天免密（cookie）。
+3. 密码**输错一次**，该 IP 立刻进拉黑名单并一律 403；解封 = 删掉
+   `<DSH_HOME>\remote-access-bans.txt` 里那一行（最多 1 秒生效）。
+
+**没设 `accessCode`：** 打开状态文件里那条 `远程访问网址: http://…/?token=…` 一次，
+把 token 换成 DSH 的签名 cookie（默认 30 天），之后直接访问 `http://<地址>:<端口>/`。
+
+> 换端口 / 重启 DSH 之后，旧 cookie 不通用（DSH 的 cookie 绑 `hostname:port`，且每次重启换 token），
+> 用第 1 步重来一次即可。
 
 ## 安全边界
 
 - 只监听 `allowCidrs` 里的本机地址；**永远不会绑 `0.0.0.0`**。
-- 每个连进来的对端地址也必须在 `allowCidrs` 内，否则 `403`。
-- DSH 自身的令牌 / cookie 仍然生效（没票 `401`）；本插件不降低 DSH 的任何鉴权。
+- 每个连进来的对端地址也必须在 `allowCidrs` 内，否则 `403`；在拉黑名单里的一律 `403`。
+- **设了 `accessCode` 就不要再把它当"双因子"**：那时网段 + 6 位密码就是全部凭据。解锁成功后由本插件
+  在**服务端**替请求补上 DSH 的 token（浏览器始终看不到 token），所以 token 在这条路径上不再是第二道门。
+  想回到"必须带票"的严格模式，把 `accessCode` 清空即可（行为与以前完全一致：没票由 DSH 自己 401）。
+- 没设 `accessCode` 时：DSH 自身的令牌 / cookie 仍然生效（没票 `401`），本插件不降低 DSH 的任何鉴权。
+- 一次密码错误立即拉黑该地址（写进 `banFile`），这是**故意的**：可暴力猜的 6 位数字需要一道硬刹车。
 - 建议再在 Tailscale ACL 里限定设备；`tailscale funnel`（公网）不要开。
 - 本插件把来自网段的请求改写 `Host`/`Origin` 后转给回环上的 DSH，因此**它就是这个边界的守门人**：`allowCidrs` 写宽了，等于把本机命令执行权限放开。
 
