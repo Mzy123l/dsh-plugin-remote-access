@@ -858,19 +858,30 @@ export function apply(ctx, config) {
       return bans.has(peer);
     },
     ban,
-    /** 已授权：带票、DSH 自己的 cookie，或我们发过的放行 cookie */
+    /**
+     * 已授权：带票（**必须是本实例当前那张**）、DSH 自己的 cookie，或我们发过的放行 cookie。
+     * 为什么票要校验：每次启动/换实例都会换一张 token，从旧网址或别的实例抄来的票在 DSH 那里
+     * 只会换来 401（那句英文提示）。这里判成「没授权」，于是能落到解锁页、或者走 DSH 自己的 401。
+     */
     authorize(req) {
-      if (/(?:[?&])token=/.test(String(req.url ?? ''))) return true;
+      const found = /(?:[?&])token=([^&]*)/.exec(String(req.url ?? ''));
+      if (found) {
+        try {
+          if (decodeURIComponent(found[1]) === ticket) return true;
+        } catch { /* 票的编码坏了，就当没票 */ }
+      }
       const cookie = String(req.headers.cookie ?? '');
       if (/dsh-auth-/i.test(cookie)) return true;
       return Boolean(cfg.accessCode) && cookie.includes(`${UNLOCK_COOKIE}=${cookieValue}`);
     },
-    /** 给已授权但还没有 DSH cookie 的请求补票（浏览器始终看不到 token） */
+    /** 给已授权但还没有 DSH cookie 的请求补票；**顺手把旧票换成本实例当前这张** */
     withTicket(url, cookie) {
-      if (!ticket) return url;
       if (/dsh-auth-/i.test(String(cookie ?? ''))) return url;
-      if (/(?:[?&])token=/.test(url)) return url;
-      return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(ticket)}`;
+      if (!ticket) return url;
+      const stripped = String(url)
+        .replace(/([?&])token=[^&]*&?/i, (_, sep) => (sep === '?' ? '?' : ''))
+        .replace(/[?&]$/, '');
+      return `${stripped}${stripped.includes('?') ? '&' : '?'}token=${encodeURIComponent(ticket)}`;
     },
   };
 

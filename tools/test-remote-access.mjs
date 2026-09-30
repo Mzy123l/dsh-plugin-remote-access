@@ -203,6 +203,15 @@ check(
   `HTTP ${empty.status}`,
 );
 
+const stale = await call(port4, { path: '/?token=STALE-FROM-ANOTHER-INSTANCE', headers: { accept: 'text/html' } });
+check(
+  '旧票/别人的票不算已授权 → 给解锁页（而不是 DSH 那句英文 401）',
+  stale.status === 200 && stale.body.includes('/__remote_access__/unlock'),
+  `HTTP ${stale.status}`,
+);
+const fresh = await call(port4, { path: '/?token=TESTTOKEN' });
+check('本实例当前的票可用', fresh.status === 200 && fresh.body.includes('upstream host='), `HTTP ${fresh.status}`);
+
 const wrong = await unlockO(port4, 'code=000000');
 check('密码错误 → 403', wrong.status === 403, `HTTP ${wrong.status}`);
 await sleep(300); // 等它把「排除的网段」写完
@@ -230,6 +239,17 @@ const cookie = setCookie.split(';')[0];
 const unlocked = await call(port5, { headers: { cookie, accept: 'text/html' } });
 check('解锁后直达上游', unlocked.status === 200 && unlocked.body.includes('upstream host='), `HTTP ${unlocked.status}`);
 check('服务端补票：浏览器看不到 token', unlocked.body.includes('token=TESTTOKEN'), (unlocked.body.match(/token=\S*/) ?? [''])[0]);
+
+// 已授权但 URL 上带着旧票：转发前必须换成本实例当前这张，否则 DSH 会回它自己的 401
+const swapped = await call(port5, {
+  path: '/?token=STALE-FROM-ANOTHER-INSTANCE',
+  headers: { cookie, accept: 'text/html' },
+});
+check(
+  '已授权 + 旧票：转发前换成本实例当前的票',
+  swapped.status === 200 && swapped.body.includes('token=TESTTOKEN') && !swapped.body.includes('STALE'),
+  swapped.body,
+);
 
 // ---- 场景 5b：写配置失败时，仍然立刻拦住 + 暂存下来（失败必须可见）----
 const statusFile3 = path.join(os.tmpdir(), `ra-failban-${Date.now()}.txt`);

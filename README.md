@@ -40,8 +40,11 @@ dsh plugin --profile desktop add <本仓库目录的绝对路径>
 打开状态文件里的 `远程访问网址: http://…/?token=…` **一次**，DSH 会把 token 换成自己的签名
 cookie（默认 30 天）；之后直接访问 `http://<地址>:<端口>/` 即可。没票就是 `401`。
 
-> 换端口或重启 DSH 之后旧 cookie 不再通用（DSH 的 cookie 绑 `hostname:port`，且每次重启换 token），
-> 按上面的方式重来一次即可。
+> **每次启动 DSH 都会换一张 token**（用另一个 Windows 账户跑 DSH，也有它自己的一张），所以旧网址、
+> 别的账户/上一次运行留下的网址里那个 `?token=…` 已经作废 —— 拿它访问会看到 DSH 自己那句
+> `dsh web authentication required; …`。省事的做法：设了 `accessCode` 就直接打开**裸地址**
+> （`http://<地址>:<端口>/`）输一次密码；没设就复制状态文件里**当前**那条带票网址。
+> 旧 cookie 同理不通用（DSH 的 cookie 绑 `hostname:port`）。
 
 ### 状态文件
 
@@ -132,8 +135,10 @@ DSH 默认用 `directory-picker-auto`：它判定「回环绑定 + 非 SSH + 有
 
 ## 常见问题
 
-**手机上显示 `dsh web authentication required`** — 说明这次访问既没带令牌、也没走解锁页：用状态文件里
-带 `?token=` 的网址打开一次，或者设一个 `accessCode` 然后重新打开裸地址。
+**显示 `dsh web authentication required`（DSH 自己那句英文）** — 说明这次访问用的是**已经作废的票**：
+每次启动 DSH 都会换一张 token，别的账户/上一次运行留下的那条 `?token=…` 网址都不能再用了。
+换个做法：设了 `accessCode` 就直接打开**裸地址** `http://<地址>:<端口>/` 输一次密码；
+没设就复制状态文件里**当前**那条带票网址。
 
 **输错密码被挡在外面** — 该 IP 已被拉黑。到「设置 → 远程访问 → 排除的网段」里删掉对应那一项
 （形如 `100.x.y.z/32`）即可。如果状态文件里「待补写」不为空，说明当时写盘失败、它还没进配置，
