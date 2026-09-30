@@ -28,16 +28,28 @@ node tools/test-remote-access.mjs     # 独立功能测试（起假上游，无�
 
 ## 现状（2026-09-30）
 
-- 插件已装进共享 profile（`C:\Users\Assistant\.dsh\profiles\desktop`；本用户经 junction 指向它）。
-- 已在本机 tailnet 地址（100.64.0.0/10 内）上成功监听；**不带令牌的请求被 DSH 挡成 401**（边界成立）。
-- 已修两处：缺 `inject: ['connection']`（否则铸不出带票网址）、上游自检改为重试 8 次 × 2 秒（避免界面晚起误报）。
-- **待办**：重启一次 DSH 让新代码生效，确认状态文件里出现完整的 `?token=...` 网址；手机打开一次换 cookie。
+**Host 半区已完成** ✅：只监听允许网段内的本机地址、网段外对端 403、HTTP/WS 透传、Host+Origin 改写、
+带 token 网址写入状态文件、上游自检重试 8×2 秒、失败必写状态文件、`ctx.effect` 关监听；
+独立测试 **10/10** 通过。手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
+
+**Client 半区（`client.js`）已能渲染** ✅：注册进 `settings.section`，设置左侧导航出现「远程访问」一页。
+
+**唯一卡点** ❌：设置页点「保存」写不进配置（`configForms.set` 返回 false；`settings.mutate` 的 `ops` 形状被
+判非法；已改试 `settings.update(ns, patch, rev)`，**尚未验证**）。
+
+👉 **细节、报错原文、以及要给「创造模式」会话用的查询清单，见 `HANDOFF.md`**（那里还列了已确认的
+DSH 内部事实：槽位形状、`inject` 点号规则、settings Remote 签名等）。
+
+**关键教训**：客户端 `inject` 必须写点号全名（`'remote.pluginManager'`、`'remote.settings'`），
+只写 `'remote'` 会在访问时报 `without inject`；改 JS 后**必须重启 DSH**。
 
 ## 目录
 
 | 路径 | 说明 |
 |---|---|
 | `index.js` | 插件本体（Host 半区，零依赖） |
+| `client.js` | 浏览器半区（module-loader 形态）：设置页里的参数表单 |
+| `HANDOFF.md` | 交接文档：现状、卡点、给创造模式会话的查询清单 |
 | `cordis.patch.yml` | bundle 的 patch：插入 `remote-access` 一行 + 默认配置 |
 | `package.json` | 清单（`dsh.bundle.patch` / `exports` / `icon` / `meta`） |
 | `tools/` | `test-remote-access.mjs` 功能测试；`asar-extract.mjs` 从 `app.asar` 取文件 |
