@@ -4,7 +4,10 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-const { apply } = await import(new URL('../index.js', import.meta.url).href);
+import { AsyncLocalStorage } from 'node:async_hooks';
+const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs } = await import(
+  new URL('../index.js', import.meta.url).href
+);
 
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '   ' + extra : ''}`);
@@ -27,11 +30,38 @@ const upPort = upstream.address().port;
 
 const statusFile = path.join(os.tmpdir(), `ra-test-${Date.now()}.txt`);
 const logs = [];
-const makeCtx = () => ({
-  logger: { info: (m) => logs.push(m), warn: (m) => logs.push('WARN ' + m), error: (m) => logs.push('ERR ' + m) },
-  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-  effect: () => {},
-});
+const makeCtx = (extra = {}) => {
+  const { configEditor, ...rest } = extra;
+  return {
+    logger: { info: (m) => logs.push(m), warn: (m) => logs.push('WARN ' + m), error: (m) => logs.push('ERR ' + m) },
+    connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
+    effect: () => {},
+    // 插件是用 ctx.get('configEditor') 取服务的（cordis 的访问器），所以这里要装成 get()
+    get: (name) => (name === 'configEditor' ? configEditor : undefined),
+    ...rest,
+  };
+};
+
+/**
+ * 假 configEditor：记录 edit() 收到的整份配置，用来断言「拉黑写进了排除的网段」。
+ * fail=true 时模拟写盘失败（插件应退回暂存文件并继续拦住该地址）。
+ */
+const makeEditor = ({ denyCidrs = [], fail = false } = {}) => {
+  const entry = { options: { id: 'remote-access', name: '@local/dsh-remote-access', config: { denyCidrs } } };
+  const state = { calls: [] };
+  return {
+    state,
+    current: () => entry.options.config,
+    entries: () => [entry],
+    edit: async (row, change) => {
+      if (fail) throw new Error('（测试）模拟写盘失败');
+      const next = change(structuredClone(row.options.config), {});
+      row.options.config = next;
+      state.calls.push(next);
+      return next;
+    },
+  };
+};
 
 const readUrl = (file) => {
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
@@ -143,7 +173,7 @@ await new Promise((r) => setTimeout(r, 400));
 const s3 = readUrl(statusFile);
 check('无 authenticatedUrl 时也写出状态与地址', s3.url.startsWith('http://127.0.0.1:'), s3.url);
 
-// ---- 场景 5：解锁密码（网段内输一次即进；输错一次拉黑）----
+// ---- 场景 5：解锁密码（网段内输一次即进；输错一次写进「排除的网段」）----
 const statusFile2 = path.join(os.tmpdir(), `ra-unlock-${Date.now()}.txt`);
 const banFile = path.join(os.tmpdir(), `ra-ban-${Date.now()}.txt`);
 const unlockCfg = {
@@ -155,7 +185,8 @@ const unlockCfg = {
   banFile,
   accessCode: '126710',
 };
-const dispose4 = apply(makeCtx(), unlockCfg);
+const editor = makeEditor();
+const dispose4 = apply(makeCtx({ configEditor: editor }), unlockCfg);
 await sleep(400);
 const s4 = readUrl(statusFile2);
 const port4 = s4.url ? Number(new URL(s4.url).port) : 0;
@@ -166,17 +197,30 @@ const nav = await call(port4, { headers: { accept: 'text/html' } });
 check('裸地址拿到解锁页（不复制 token）', nav.status === 200 && nav.body.includes('/__remote_access__/unlock'), `HTTP ${nav.status}`);
 
 const empty = await unlockO(port4, 'code=');
-check('空密码不算一次尝试（不拉黑）', empty.status === 200 && !fs.existsSync(banFile), `HTTP ${empty.status}`);
+check(
+  '空密码不算一次尝试（不拉黑）',
+  empty.status === 200 && !fs.existsSync(banFile) && editor.state.calls.length === 0,
+  `HTTP ${empty.status}`,
+);
 
 const wrong = await unlockO(port4, 'code=000000');
 check('密码错误 → 403', wrong.status === 403, `HTTP ${wrong.status}`);
-check('错一次就写进拉黑名单', fs.existsSync(banFile) && fs.readFileSync(banFile, 'utf8').includes('127.0.0.1'));
+await sleep(300); // 等它把「排除的网段」写完
+check(
+  '错一次就写进「排除的网段」',
+  JSON.stringify(editor.state.calls).includes('127.0.0.1/32'),
+  JSON.stringify(editor.state.calls),
+);
+check(
+  '写进配置后就不再占着暂存文件',
+  !fs.existsSync(banFile),
+  fs.existsSync(banFile) ? fs.readFileSync(banFile, 'utf8').trim() : '(无文件)',
+);
 const banned = await call(port4, { headers: { accept: 'text/html' } });
 check('拉黑后一律 403', banned.status === 403, `HTTP ${banned.status}`);
 
-// 删掉名单 + 重来一个实例（模拟「解封后重新打开」）
-fs.rmSync(banFile, { force: true });
-const dispose5 = apply(makeCtx(), unlockCfg);
+// 解封 = 在设置页把「排除的网段」里那一项删掉（新实例的配置里已无它，暂存文件也是空的）
+const dispose5 = apply(makeCtx({ configEditor: makeEditor() }), unlockCfg);
 await sleep(400);
 const port5 = Number(new URL(readUrl(statusFile2).url).port);
 const ok = await unlockO(port5, 'code=126710');
@@ -186,6 +230,70 @@ const cookie = setCookie.split(';')[0];
 const unlocked = await call(port5, { headers: { cookie, accept: 'text/html' } });
 check('解锁后直达上游', unlocked.status === 200 && unlocked.body.includes('upstream host='), `HTTP ${unlocked.status}`);
 check('服务端补票：浏览器看不到 token', unlocked.body.includes('token=TESTTOKEN'), (unlocked.body.match(/token=\S*/) ?? [''])[0]);
+
+// ---- 场景 5b：写配置失败时，仍然立刻拦住 + 暂存下来（失败必须可见）----
+const statusFile3 = path.join(os.tmpdir(), `ra-failban-${Date.now()}.txt`);
+const banFile3 = path.join(os.tmpdir(), `ra-failban-ban-${Date.now()}.txt`);
+const failCfg = { ...unlockCfg, urlFile: statusFile3, banFile: banFile3 };
+const dispose5b = apply(makeCtx({ configEditor: makeEditor({ fail: true }) }), failCfg);
+await sleep(400);
+const port5b = Number(new URL(readUrl(statusFile3).url).port);
+const wrong5b = await unlockO(port5b, 'code=000000');
+await sleep(300);
+const failText = fs.existsSync(statusFile3) ? fs.readFileSync(statusFile3, 'utf8') : '';
+check('写盘失败：仍然 403', wrong5b.status === 403, `HTTP ${wrong5b.status}`);
+check(
+  '写盘失败：地址先暂存进拉黑文件',
+  fs.existsSync(banFile3) && fs.readFileSync(banFile3, 'utf8').includes('127.0.0.1'),
+  fs.existsSync(banFile3) ? '有文件' : '没有文件',
+);
+check('写盘失败：状态文件里写明原因', failText.includes('写进「排除的网段」失败'));
+const stillBanned = await call(port5b, { headers: { accept: 'text/html' } });
+check('写盘失败：暂存期间一样被拦', stillBanned.status === 403, `HTTP ${stillBanned.status}`);
+dispose5b(); // 顺手清掉它的重试定时器
+
+// ---- 场景 5c：拉黑写进配置后，热重载/重启都不会忘（配置才是权威，删项才解封）----
+const statusFile4 = path.join(os.tmpdir(), `ra-banreload-${Date.now()}.txt`);
+const banFile4 = path.join(os.tmpdir(), `ra-banreload-ban-${Date.now()}.txt`);
+let row4 = {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${upPort}`,
+  urlFile: statusFile4,
+  banFile: banFile4,
+  accessCode: '126710',
+};
+const listened4 = [];
+const editor4 = makeEditor();
+const ctx4 = {
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
+  effect: () => {},
+  on: (name, fn) => {
+    listened4.push({ name, fn });
+    return () => {};
+  },
+  get: (name) => {
+    if (name === 'configEditor') return editor4;
+    if (name === 'settings') return { describe: () => [{ ns: 'remote-access', base: {}, user: { ...row4 } }] };
+    return undefined;
+  },
+};
+const dispose5c = apply(ctx4, row4);
+await sleep(400);
+const port5c = Number(new URL(readUrl(statusFile4).url).port);
+const wrong5c = await unlockO(port5c, 'code=000000');
+await sleep(300);
+check('写进配置后：暂存文件已清空', !fs.existsSync(banFile4), fs.existsSync(banFile4) ? '还有文件' : '(无文件)');
+// 真实 DSH 里是 configEditor.edit 落盘 → settings 重新描述；这里手动反映到「生效配置」再触发重载
+row4 = { ...row4, denyCidrs: editor4.current().denyCidrs };
+for (const l of listened4.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
+await sleep(600);
+const port5cAfter = Number(new URL(readUrl(statusFile4).url).port);
+const afterReload = await call(port5cAfter, { headers: { accept: 'text/html' } });
+check('热重载后依旧被拦（配置才是权威，不会忘）', afterReload.status === 403, `HTTP ${afterReload.status}`);
+dispose5c();
 
 // ---- 场景 6：热重载（app-boot/config-reload → 原地重挂监听）----
 const hotFile = path.join(os.tmpdir(), `ra-hot-${Date.now()}.txt`);
@@ -286,9 +394,50 @@ for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6, dis
   }
 }
 upstream.close();
-for (const f of [statusFile, statusFile2, banFile, hotFile, rotFile, rotBan, path.join(os.tmpdir(), 'remote-access-secret')]) {
+for (const f of [
+  statusFile,
+  statusFile2,
+  statusFile3,
+  statusFile4,
+  banFile,
+  banFile3,
+  banFile4,
+  hotFile,
+  rotFile,
+  rotBan,
+  path.join(os.tmpdir(), 'remote-access-secret'),
+]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
 }
+
+// ---- 纯函数：拉黑地址 → CIDR、合并进「排除的网段」、以及逃出 HMR 的异步上下文 ----
+check('banCidrOf：IPv4 用 /32', banCidrOf('100.64.0.5') === '100.64.0.5/32', banCidrOf('100.64.0.5'));
+check('banCidrOf：IPv6 用 /128', banCidrOf('fe80::1') === 'fe80::1/128', banCidrOf('fe80::1'));
+const mergedCidrs = mergeDenyCidrs({ denyCidrs: ['10.0.0.0/8'] }, {}, '10.0.0.5/32');
+check(
+  'mergeDenyCidrs：追加在原有项后面',
+  mergedCidrs.denyCidrs.join(',') === '10.0.0.0/8,10.0.0.5/32',
+  mergedCidrs.denyCidrs.join(','),
+);
+check('mergeDenyCidrs：重复项不会写两遍', mergeDenyCidrs(mergedCidrs, {}, '10.0.0.5/32').denyCidrs.length === 2);
+check(
+  'mergeDenyCidrs：patch 里没有该字段时基于继承值',
+  mergeDenyCidrs({}, { denyCidrs: ['172.16.0.0/12'] }, '172.16.0.9/32').denyCidrs.join(',') ===
+    '172.16.0.0/12,172.16.0.9/32',
+);
+const singleHosts = bannedHostsOf(['10.0.0.0/8', '100.64.0.5/32', '::1/128', '1.2.3.4']);
+check(
+  'bannedHostsOf：只挑单主机项（网段不算）',
+  [...singleHosts].sort().join(',') === '1.2.3.4,100.64.0.5,::1',
+  [...singleHosts].join(','),
+);
+const als = new AsyncLocalStorage();
+const seenStore = als.run({ hmr: true }, () => runOutsideHmr(() => als.getStore() ?? null));
+check(
+  'runOutsideHmr：能逃出 HMR 的 AsyncLocalStorage（否则写配置必报嵌套）',
+  seenStore === null,
+  String(seenStore),
+);
 
 console.log(results.join('\n'));
 const failed = results.filter((r) => r.startsWith('FAIL')).length;

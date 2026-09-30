@@ -12,7 +12,7 @@
 - **安全边界不许放松**（要动先说清理由）：只监听 `allowCidrs` 内的本机地址（永不 `0.0.0.0`）；
   对端也必须在 `allowCidrs` 内；**没设 `accessCode` 时**不绕过 DSH 自己的令牌 / cookie。
   **例外是用户 2026-10-01 明确选定的**：设了 `accessCode` 就走「网段 + 6 位密码」——解锁后由 Host 半区
-  在服务端补票（浏览器始终看不到 token），一次输错即把该地址拉黑。这条路径上 token 不再是第二道门，
+  在服务端补票（浏览器始终看不到 token），一次输错即把该地址写进「排除的网段」。这条路径上 token 不再是第二道门，
   不要以为它还挡着；也不要在这条路上再放松别的东西（比如给密码加"记住上次输入"之类的旁路）。
 - **密码 / 令牌不进仓库**：`accessCode` 的**默认值不要写死**在代码里（写死等于提交密码）；它只在 profile 的
   `cordis.patch.yml` 或设置页里改。手写 YAML 时必须加引号（`accessCode: "126710"`），否则会被解析成数字、
@@ -40,8 +40,11 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **Host 半区已完成** ✅：只监听允许网段内的本机地址、网段外对端 403、HTTP/WS 透传、Host+Origin 改写、
 带 token 网址写入状态文件、上游自检重试 8×2 秒、失败必写状态文件、`ctx.effect` 关监听；
 **热重载**：设置页保存后 DSH 发 `app-boot/config-reload`，插件原地关旧监听、按新参数重开（不重启 DSH）；
-**解锁模式**：设 `accessCode` 时网段内开裸地址 → 解锁页 → 输一次密码 → 服务端补票进 DSH，
-**错一次即拉黑该 IP**（名单在 `banFile`，删行即解封）；
+**解锁模式**：设 `accessCode` 时网段内开裸地址 → 解锁页 → 输一次密码 → 服务端补票进 DSH；
+**错一次即拉黑该 IP**：靠 `configEditor.edit` 把 `100.x.y.z/32` **写进「排除的网段」`denyCidrs`**
+（在「设置 → 远程访问 → 排除的网段」里删掉该项即解封）。写盘必须在 `runOutsideHmr()` 的异步作用域里跑
+—— 请求回调那条链带着 HMR 的 AsyncLocalStorage，直接调必报嵌套；写失败则把地址暂存进 `banFile`
+（内存里**已经**拦住），随后定时/重载/重启继续补写，状态文件里写明「待补写」与原因；
 **远程改配置**：手机那一页直接调 `ctx.remote.settings.describe() / mutate()`（configForms 在非回环页面被
 客户端策略禁掉，但 Remote 通道是通的），写盘由 Host 网关跑，落盘位置与设置页相同。
 **别再自建 HTTP 端点去调 `configEditor.edit()`** —— 它会撞 HMR 事务（`HMR transactions cannot be nested`），
@@ -50,7 +53,7 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **手机端选目录（新建工作区）**：`directory-picker-auto` 判定「回环绑定 + 有显示会话」会挑 native 后端 ——
 那是在**宿主屏幕上**弹系统对话框，手机点下去只会一直等。bundle patch 因此关掉 auto、改挂
 `dsh-host-directory-picker-browse` + `dsh-client-ui-directory-picker-browse`（应用内浏览）。
-独立测试 **28/28** 通过（含解锁/拉黑/热重载/改密码不踢人），客户端冒烟 **22/22**，Config 校验 **12/12**。
+独立测试 **42/42** 通过（含解锁/拉黑写配置/写盘失败暂存/热重载后仍被拦/改密码不踢人），客户端冒烟 **22/22**，Config 校验 **12/12**。
 手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
 
 **Client 半区（`client.js`）已完成** ✅：注册进 `settings.section`，7 项（启用 / 允许的网段 / 排除的网段 /
@@ -84,7 +87,8 @@ peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么�
   **但手机端例外** —— 非回环页面 `configForms` 恒为 unavailable，必须直接用 `ctx.remote.settings`；
 - **别在插件里自己建 HTTP 端点去调 `configEditor.edit()`**：请求回调跑在我们监听创建出来的异步链里，
   而 `hmr.runExclusive` 用 AsyncLocalStorage 判嵌套，会报 `HMR transactions cannot be nested`；
-  真要在 Host 侧写盘，就走 Remote 通道让网关去跑（见 HANDOFF.md 第 4 节）；
+  真要写盘有两条路：走 Remote 通道让网关去跑，或者自己写、但把调用放进 `runOutsideHmr()`
+  （模块加载时创建的 AsyncResource 作用域）—— 拉黑写「排除的网段」用的就是后者，有单测兜着；
 - **`ctx.remote.*` 返回的是 RemoteResult 信封**（`{ ok:true, value }` / `{ ok:false, error }`），不是裸数据，
   必须拆开：官方镜像写的就是 `response.ok ? response.value : response.error.message`。当裸数据用会
   「找不到命名空间 → 页面全空/全 0」；忘了查 `ok` 则「写入被拒也当成功」。这条有客户端冒烟测试兜着；

@@ -104,7 +104,9 @@ $env:ELECTRON_RUN_AS_NODE = 1
   `ctx.get('settings').describe()` 的 `{...base, ...user}` 算出生效配置，有差异才重挂。
 - `index.js` 解锁门：`accessCode` 非空时，网段内的页面导航请求先给一张极简解锁页；
   POST 密码正确 → 发一枚随机的 `dsh-ra-ok` cookie（30 天）+ 303 回 `/`；
-  **错误一次** → 把该 IP 追加进 `banFile` 并 403。已授权（带票 / DSH cookie / 我们的 cookie）的请求，
+  **错误一次** → 把该 IP 以 `x/32` **写进「排除的网段」`denyCidrs`**（`configEditor.edit`，且必须在
+  `runOutsideHmr()` 的异步作用域里跑，见第 4 节）并 403；写盘失败则退回 `banFile` 暂存、内存里照样拦，
+  由定时/重载/重启继续补写。已授权（带票 / DSH cookie / 我们的 cookie）的请求，
   在没有 DSH cookie 时由代理在**服务端**补 `?token=`，所以浏览器地址栏里不出现 token。
   密码为空时整扇门透明，行为与以前一致（裸地址交给 DSH 自己 401）。
 - `client.js`：`inject: ['slots', 'configForms']`，只留 6 项（日志级别是下拉框）；
@@ -113,7 +115,8 @@ $env:ELECTRON_RUN_AS_NODE = 1
   保存成功的提示是「已按新参数重挂监听」。
 - 回归：`node tools/check-config-schema.mjs` 验**两道门**——peer 声明（含版本范围）+ 用安装包里的真
   Schemastery 验「原生 schema + 全字段 volatile + 表单字段/仅 patch 字段/类型对表」，**不需要重启 DSH**；
-  `node tools/test-remote-access.mjs` **25 项**（含解锁页、错一次拉黑、解封、服务端补票、热重载换端口）。
+  `node tools/test-remote-access.mjs` **42 项**（含解锁页、错一次自动写进「排除的网段」、写盘失败退回暂存、
+  在设置页删掉该项即解封、热重载后仍被拦、服务端补票、热重载换端口、以及 `runOutsideHmr` 确实逃出了 HMR 的 AsyncLocalStorage）。
 
 ### 为什么不走「Host 半区自己写盘 / host.call」
 
@@ -165,7 +168,9 @@ $env:ELECTRON_RUN_AS_NODE = 1
 | 读「生效配置」的正确姿势 | 服务名是 **`settings`**（`SettingsForms`，`super(ownerContext, "settings")`，`static inject = ["configEditor","profileContext"]`）。`ctx.get('settings').describe({redactSecrets:true})` 返回描述符数组，每项有 `ns / value / base / user / revision`。**`value` 是运行中 fiber 的旧值**（不可靠），`user` 是刚写进 patch 的那层、`base` 是它下面继承的层 —— 热重载要读 `{...base, ...user}` |
 | 远程页面为什么改不了配置 | DSH 的**客户端**策略写死：ui-settings 里 `persistence = ctx.remote.$host.isLoopback ? "host" : "memory"`，非回环页面连写都不发（`ConfigFormController` 直接 `unavailable`）。插件改不了这条策略 |
 | 远程改配置的正确做法 | 直接调 Remote 通道：客户端 `ctx.remote.settings.describe()` 读、`ctx.remote.settings.mutate(ns, [{op:'set',path:[key],value}], revision)` 写。写盘由 **Host 网关**去跑 `settings` 控制器 → `configEditor.edit`，与本插件的异步链无关；返回值是**写盘完成后**的命名空间视图，所以不会把旧值当成功回报 |
-| ⚠️ 反面教材（已删掉的实现） | 曾经在监听里自建 `POST /__remote_access__/config`，Host 半区直接 `ctx.get('configEditor').edit(...)`。两个坑：① 请求回调跑在「我们自己的监听」创建出来的异步链里，而 `hmr.runExclusive` 用 **AsyncLocalStorage** 判嵌套 → 一律 `HMR transactions cannot be nested`，写盘从没成功；② 为了绕开「落盘会重挂监听、掐断本连接」，我改成**先回执再落盘** → 页面拿到的是旧值，用户看到「显示已保存、实则回退」。**结论：Host 侧要写配置，走 Remote 通道让网关跑** |
+| ⚠️ 反面教材（已删掉的实现） | 曾经在监听里自建 `POST /__remote_access__/config`，Host 半区直接 `ctx.get('configEditor').edit(...)`。两个坑：① 请求回调跑在「我们自己的监听」创建出来的异步链里，而 `hmr.runExclusive` 用 **AsyncLocalStorage** 判嵌套 → 一律 `HMR transactions cannot be nested`，写盘从没成功；② 为了绕开「落盘会重挂监听、掐断本连接」，我改成**先回执再落盘** → 页面拿到的是旧值，用户看到「显示已保存、实则回退」。**结论：Host 侧要写配置，优先走 Remote 通道让网关跑；确实要在插件里写（拉黑就是这么干的），必须放进 `runOutsideHmr()`（见下一行）** |
+| 怎么逃出 HMR 的 AsyncLocalStorage | `hmr.runExclusive` 用 ALS 判嵌套。在**模块加载时**（那时没有 HMR 事务）建一个 `new AsyncResource('dsh-remote-access/config-write')`，之后把写盘放进 `resource.runInAsyncScope(fn)`：里面的 `getStore()` 就是 `undefined`，于是 `configEditor.edit` 不再报嵌套。本插件用它实现「拉黑写进『排除的网段』」（`runOutsideHmr()`），并有一条单测专门验「确实逃出去了」 |
+| 拉黑为什么要「内存 + 暂存」两层 | 写配置要走 `configEditor.edit`（几十毫秒，且可能失败），但**拦截必须立刻生效**：所以 `ban()` 先塞进内存 `bans`，再写 `denyCidrs`；失败退回 `banFile` 暂存并定时补写。另外 `refreshBans` **只有 `force` 时才按配置重建**（热重载 → 设置页删项即解封），平时只增量补齐 —— 否则「配置已写成功但重载还没到」的窗口会把刚拉黑的地址放过去 |
 | 放行 cookie 的密钥 | 独立文件 `remote-access-secret`（`0600`），**与 `accessCode` 解耦** —— 改密码、重启 DSH 都不踢人；删文件才强制所有设备重新输密码。cookie 值必须是固定密钥，用每次启动的随机数就做不到「改密码不影响登录」 |
 | 目录选择器的 seam | `ctx.directoryPicker` 只提供 `capability()`，两个后端：**native**（在宿主屏幕上弹系统对话框）/ **browse**（应用内列目录 + 建目录）。`dsh-host-directory-picker-auto` 在启动时判定「回环绑定 + 非 SSH + 有显示会话 → native，其余 → browse」，并把**后端 + 客户端表面两个包**用 `ctx.loader.create({name})` 挂成内存条目。所以手机端选目录要用 browse |
 | 怎么固定成 browse | 覆盖层里 `disabled: true` 关掉 `directory-picker`（auto）行，再 `insert` 两个行：`@deepseek-ai/dsh-host-directory-picker-browse` 与 `@deepseek-ai/dsh-client-ui-directory-picker-browse`。**不能只改 name** —— 非 insert 补丁的 `name` 是守卫（不一致会被静默跳过）；也不能只关不插或只插不关（重复 `ctx.directoryPicker` / single slot 重复占用 → 启动报错） |
@@ -211,8 +216,8 @@ $env:ELECTRON_RUN_AS_NODE = 1
    重启后状态文件应出现 `手机访问: http://…` 与 `解锁密码: 已设置`；若出现 `Config schema 没拿到（…）`，
    照第 2 节两道门查。
 2. **[安全]** 现在设了 `accessCode`（用户选定「网段 + 6 位密码」）：网段内开裸地址输一次即进，
-   解锁后由插件在服务端补票，**token 在这条路上不再是第二道门**；**错一次即把该 IP 拉黑**
-   （`%USERPROFILE%\.dsh\remote-access-bans.txt`，删掉那一行 1 秒内解封）。
+   解锁后由插件在服务端补票，**token 在这条路上不再是第二道门**；**错一次即把该 IP 写进「排除的网段」**
+   （`100.x.y.z/32`，在设置页删掉该项即解封；写盘失败才暂存在 `%USERPROFILE%\.dsh\remote-access-bans.txt`）。
    想回到严格模式：把 `cordis.patch.yml` 里的 `accessCode` 清空。
 3. 建议顺手把 `maxConnections` 从 3 调回 64：浏览器对同一 origin 会开好几条 keep-alive 连接，
    上限 3 会让手机端加载时好时坏（设置页里就能改，保存即热重载）。

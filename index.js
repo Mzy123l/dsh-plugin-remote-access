@@ -6,7 +6,9 @@
  *  1. 只监听「允许网段」里属于本机的地址（listen=auto），别的一律不绑，绝不含 0.0.0.0；
  *  2. 每个连进来的对端也必须落在允许网段内、且不在黑名单 / 拉黑名单里，否则 403；
  *  3. 默认仍走 DSH 自己的令牌/cookie（没票就是 401）；可选用 accessCode 开一个「网段内输一次 6 位密码」
- *     的解锁页，解锁后由本插件在服务端补票，浏览器始终看不到 token —— 一次输错就把该地址拉黑；
+ *     的解锁页，解锁后由本插件在服务端补票，浏览器始终看不到 token —— 一次输错就把该地址写进
+ *     「排除的网段」(denyCidrs)，在设置页里删掉该项即可解封；写盘失败时它仍立刻被拦，
+ *     只是先暂存在拉黑文件里，随后自动补写；
  *  4. 默认把 Host/Origin 改写成上游回环 authority，因此不必去改 client-connection 的配置；
  *  5. 无论成功失败都会写一份「自诊断文件」，把生效配置、上游探测、监听结果写清楚；
  *  6. 设置页保存后靠 `app-boot/config-reload` 原地重挂监听（热重载），不必重启 DSH。
@@ -20,6 +22,68 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { AsyncResource } from 'node:async_hooks';
+
+/**
+ * Host 侧写配置（`configEditor.edit`）本身跑在 HMR 事务里，而 HMR 用 AsyncLocalStorage 判嵌套：
+ * 从「我们监听的请求回调」这条异步链里直接调它，必报 “HMR transactions cannot be nested”。
+ * 下面这个异步资源在**模块加载时**创建（那时没有 HMR 事务），把写盘放进它的作用域即可绕开。
+ * 导出它是为了让独立测试能验证「确实逃出了那个 store」。
+ */
+const configWriteScope = new AsyncResource('dsh-remote-access/config-write');
+
+export function runOutsideHmr(fn) {
+  return configWriteScope.runInAsyncScope(fn);
+}
+
+/** 拉黑的对端地址 → CIDR 文本（IPv4 用 /32，IPv6 用 /128） */
+export function banCidrOf(peer) {
+  const ip = String(peer ?? '').trim();
+  return ip.includes(':') ? `${ip}/128` : `${ip}/32`;
+}
+
+/** 从 denyCidrs 里挑出「单主机」项（x/32、x/128，或无掩码的裸 IP）——用于展示与快速判断 */
+export function bannedHostsOf(denyCidrs = []) {
+  const hosts = new Set();
+  for (const raw of Array.isArray(denyCidrs) ? denyCidrs : []) {
+    const text = String(raw ?? '').trim();
+    if (!text) continue;
+    const single = /^([^/\s]+)\/(?:32|128)$/.exec(text);
+    if (single) {
+      hosts.add(single[1]);
+      continue;
+    }
+    if (!text.includes('/') && /^[0-9a-f:.]+$/i.test(text)) hosts.add(text);
+  }
+  return hosts;
+}
+
+/**
+ * 把某个地址合并进「排除的网段」：优先在现有 patch 值上追加，没有就基于继承值，
+ * 去重后返回**整份新配置**（`configEditor.edit` 要的就是整份，不是补丁）。
+ */
+export function mergeDenyCidrs(current, inherited, cidr) {
+  const pick = (value) =>
+    Array.isArray(value) ? value.map((v) => String(v ?? '').trim()).filter(Boolean) : [];
+  const base = pick(current?.denyCidrs);
+  const merged = [...new Set([...(base.length ? base : pick(inherited?.denyCidrs)), cidr])];
+  return { ...current, denyCidrs: merged };
+}
+
+/**
+ * 真正把拉黑写进配置：按 id 找到 loader 行 → 交给 `configEditor.edit`（在 runOutsideHmr 里跑）。
+ * @returns 写进去的 CIDR 文本；抛错表示这次没写成（调用方会退回暂存文件并稍后重试）。
+ */
+export async function persistBanToDenyCidrs(editor, peer) {
+  if (!editor) throw new Error('拿不到 configEditor 服务');
+  const entry = editor.entries().find((row) => row?.options?.id === ROW_ID);
+  if (!entry) throw new Error(`找不到配置行 ${ROW_ID}`);
+  const cidr = banCidrOf(peer);
+  await runOutsideHmr(() =>
+    editor.edit(entry, (current, inherited) => mergeDenyCidrs(current, inherited, cidr)),
+  );
+  return cidr;
+}
 
 // DSH 的 Config 协议就是 Schemastery（用 Symbol.for('schemastery') 认领原生 schema）。
 // 该包由 DSH 安装目录随运行时提供，但**借它要声明**：DSH 把 profile 里以 link: 安装的插件
@@ -57,7 +121,10 @@ export const Config = Schema
         Schema.array(Schema.string()).default(['100.64.0.0/10']),
         '允许来访的网段（唯一的安全边界）；listen 为 auto 时也用它挑选本机要监听的地址',
       ),
-      denyCidrs: field(Schema.array(Schema.string()).default([]), '白名单内的例外黑名单，例如排除某台机器'),
+      denyCidrs: field(
+        Schema.array(Schema.string()).default([]),
+        '白名单内的例外黑名单；输错访问密码的地址会自动加到这里（形如 100.x.y.z/32），删掉该项即解封',
+      ),
       listen: field(
         Schema.array(Schema.string()).default(['auto']),
         "要监听的本机地址；['auto'] = 只监听 allowCidrs 里属于本机的地址",
@@ -80,11 +147,11 @@ export const Config = Schema
       // 只在 patch（cordis.patch.yml）里配，不进设置页：6 位数字密码是凭据，不该躺在表单里被随手看见
       accessCode: field(
         Schema.string().default(''),
-        '网段内的解锁密码（6 位数字）；留空 = 关闭解锁页，必须用带票网址访问。设了它，手机直接打开裸地址输一次密码即可',
+        '网段内的解锁密码（6 位数字）；留空 = 关闭解锁页，必须用带票网址访问。设了它，手机直接打开裸地址输一次密码即可；输错一次就把该地址写进「排除的网段」',
       ),
       banFile: field(
         Schema.string().default(''),
-        '拉黑名单写到哪；留空 = 与状态文件同目录的 remote-access-bans.txt。删掉里面那行即可解封',
+        '拉黑暂存文件；只有「写进排除的网段」失败时才用得上（留空 = 与状态文件同目录的 remote-access-bans.txt）。平时不用碰它',
       ),
       logLevel: field(Schema.string().default('info'), '日志详细程度：silent / info / debug（默认 info）'),
     })
@@ -430,9 +497,9 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
           res.end();
           return;
         }
-        gate.ban(peer);
-        note('warn', `${peer} 密码错误，已加入拉黑名单（删掉 ${gate.banPath} 里那一行即可解封）`);
-        deny(res, 403, '403 forbidden: wrong code, this address is now blocked\n');
+        const blocked = () => deny(res, 403, '403 forbidden: wrong code, this address is now blocked\n');
+        // 拉黑会尝试写进「排除的网段」，所以等它落盘再回执（失败原因由 ban 自己写进状态文件）
+        gate.ban(peer).then(blocked, blocked);
       }).catch(() => deny(res, 400, '400 bad request\n'));
       return;
     }
@@ -624,7 +691,6 @@ export function apply(ctx, config) {
   let closed = false;
   let cookieValue = ''; // start() 里从持久化密钥读出来
   let bans = new Set();
-  let bansMtime = 0;
   let bansCheckedAt = 0;
 
   function render() {
@@ -635,7 +701,13 @@ export function apply(ctx, config) {
       urls.length ? `远程访问网址: ${urls.join('  ')}` : '远程访问网址: （尚未生成）',
       cfg.accessCode && urls.length ? `手机访问: ${urls[0].split('?')[0]} —— 直接打开，输一次访问密码即可` : '',
       `解锁密码: ${cfg.accessCode ? '已设置（网段内一次不过即拉黑）' : '未设置（必须用带票网址访问）'}`,
-      `拉黑名单: ${banPathOf(cfg)}（删掉里面那行即可解封，最长 1 秒生效）`,
+      `已拉黑: ${[...new Set([...bannedHostsOf(cfg.denyCidrs), ...readPendingBans()])].join(', ') || '(无)'}` +
+        '（在「设置 → 远程访问 → 排除的网段」里删掉对应项即可解封）',
+      `拉黑暂存: ${
+        readPendingBans().length
+          ? `${readPendingBans().join(', ')}（写盘失败才暂存，位置 ${banPathOf(cfg)}）`
+          : '(无)'
+      }`,
       `放行密钥: ${secretPathOf(cfg)}（改密码不会踢人；想让所有设备重新输密码就删掉它）`,
       '',
       '--- 生效配置 ---',
@@ -682,46 +754,96 @@ export function apply(ctx, config) {
     );
   }
 
-  // ---------------------------------------------------------------- 拉黑名单
-  // 一次密码输错就拉黑；名单落在文件里，删掉那一行即可解封（最多 1 秒后自动重读）
+  // ---------------------------------------------------------------- 拉黑
+  // 一次密码输错就把该地址写进「排除的网段」(denyCidrs) —— 于是在设置页里能直接看到、删掉即解封。
+  // 写盘必须走 configEditor.edit（Host 网关那条路），而它跑在 HMR 事务里：从监听的请求回调里直接调
+  // 会撞 "HMR transactions cannot be nested"，所以统一放进 runOutsideHmr 的异步作用域。
+  // 万一写不进去：地址**立刻**就被拦（内存里），并暂存到 banFile，随后定时/重载/重启时继续补写。
 
-  function refreshBans(force) {
-    const now = Date.now();
-    if (!force && now - bansCheckedAt < 1000) return;
-    bansCheckedAt = now;
-    let stat;
+  let pendingRetryTimer = null;
+
+  function readPendingBans() {
     try {
-      stat = fs.statSync(banPathOf(cfg));
+      return fs
+        .readFileSync(banPathOf(cfg), 'utf8')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#'));
     } catch {
-      if (force) {
-        bans = new Set();
-        bansMtime = 0;
-      }
-      return;
+      return [];
     }
-    if (!force && stat.mtimeMs === bansMtime) return;
-    bansMtime = stat.mtimeMs;
-    try {
-      bans = new Set(
-        fs
-          .readFileSync(banPathOf(cfg), 'utf8')
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter((line) => line && !line.startsWith('#')),
-      );
-    } catch { /* 读不到就维持现状 */ }
   }
 
-  function ban(peer) {
-    refreshBans(false);
-    if (bans.has(peer)) return;
-    bans.add(peer);
+  /** 暂存文件只记「还没写进配置」的地址；空了就删掉，免得留下误导 */
+  function writePendingBans(list) {
+    const file = banPathOf(cfg);
+    const unique = [...new Set(list)];
     try {
-      const file = banPathOf(cfg);
-      const head = fs.existsSync(file) ? '' : '# dsh-remote-access 拉黑名单：一行一个 IP；删掉那一行即可解封\n';
-      fs.appendFileSync(file, `${head}${peer}\n`, { mode: 0o600 });
-      bansMtime = 0; // 下次检查重新读一遍文件
+      if (unique.length === 0) {
+        fs.rmSync(file, { force: true });
+      } else {
+        const head =
+          '# dsh-remote-access 拉黑暂存：这些地址还没写进「排除的网段」，会自动补写；\n' +
+          '# 正常情况下不用碰这个文件 —— 拉黑请在「设置 → 远程访问 → 排除的网段」里管理。\n';
+        fs.writeFileSync(file, `${head}${unique.join('\n')}\n`, { mode: 0o600 });
+      }
+      bansCheckedAt = 0;
     } catch { /* 写不进去也不影响内存里的拉黑 */ }
+  }
+
+  /**
+   * 拉黑来源两处：配置里的单主机 denyCidrs（权威）+ 暂存文件（还没写进配置的）。
+   * force=true 才按配置**重建**（设置页删掉某项 → 热重载 → 到这儿生效）；
+   * 平时只做增量补齐 —— 否则「配置已写成功但重载还没到」的这一瞬间会把刚拉黑的地址放回去。
+   */
+  function refreshBans(force) {
+    const now = Date.now();
+    if (!force && now - bansCheckedAt < 1000) return; // 别每个请求都读盘
+    bansCheckedAt = now;
+    if (force) bans = new Set();
+    for (const host of bannedHostsOf(cfg.denyCidrs)) bans.add(host);
+    for (const peer of readPendingBans()) bans.add(peer);
+  }
+
+  async function ban(peer) {
+    refreshBans(false);
+    bans.add(peer); // 先拦下来，再谈落盘
+    bansCheckedAt = 0;
+    const pending = readPendingBans();
+    if (!pending.includes(peer)) writePendingBans([...pending, peer]);
+    try {
+      const cidr = await persistBanToDenyCidrs(ctx.get('configEditor'), peer);
+      note('warn', `${peer} 密码错误，已拉黑：写进「排除的网段」(${cidr})，在设置页删掉该项即可解封`);
+      writePendingBans(readPendingBans().filter((one) => one !== peer)); // 配置才是权威，暂存里撤掉
+    } catch (err) {
+      note(
+        'error',
+        `${peer} 密码错误，已拉黑（暂时只在内存 + ${banPathOf(cfg)}）：写进「排除的网段」失败 —— ${err?.message}`,
+      );
+      schedulePendingRetry();
+    }
+  }
+
+  /** 写配置失败时的兜底重试：只碰暂存文件与配置，不阻塞任何请求 */
+  function schedulePendingRetry() {
+    if (pendingRetryTimer) return;
+    pendingRetryTimer = setTimeout(async () => {
+      pendingRetryTimer = null;
+      if (closed) return;
+      let left = readPendingBans();
+      for (const peer of left) {
+        try {
+          await persistBanToDenyCidrs(ctx.get('configEditor'), peer);
+          left = left.filter((one) => one !== peer);
+        } catch { /* 留到下次 */ }
+      }
+      writePendingBans(left);
+      if (left.length) {
+        note('warn', `还有 ${left.length} 个拉黑地址没写进「排除的网段」，稍后继续重试：${left.join(', ')}`);
+        schedulePendingRetry();
+      }
+    }, 5000);
+    pendingRetryTimer.unref?.(); // 别拖住进程退出
   }
 
   // ---------------------------------------------------------------- 访问门
@@ -787,9 +909,10 @@ export function apply(ctx, config) {
     cookieValue = loadSecret(cfg);
     refreshBans(true);
     if (cfg.accessCode) {
-      note('info', `解锁密码已启用：网段内直接打开裸地址、输一次密码即可（输错一次即拉黑）`);
+      note('info', '解锁密码已启用：网段内直接打开裸地址、输一次密码即可（输错一次即写进「排除的网段」）');
     }
     if (bans.size) note('warn', `当前拉黑 ${bans.size} 个地址: ${[...bans].join(', ')}`);
+    if (readPendingBans().length) schedulePendingRetry(); // 上次没写进配置的，接着补写
 
     const addrs = cfg.listen === 'auto' ? localAddrsIn(cfg.allowCidrs) : cfg.listen;
     note('info', `本机候选地址(${JSON.stringify(cfg.allowCidrs)}) = ${JSON.stringify(addrs)}`);
@@ -817,6 +940,10 @@ export function apply(ctx, config) {
   function dispose() {
     if (closed) return;
     closed = true;
+    if (pendingRetryTimer) {
+      clearTimeout(pendingRetryTimer);
+      pendingRetryTimer = null;
+    }
     stopServers();
     note('info', '已停止监听');
   }
