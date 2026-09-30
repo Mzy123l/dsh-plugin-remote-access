@@ -19,13 +19,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 // DSH 的 Config 协议就是 Schemastery（用 Symbol.for('schemastery') 认领原生 schema）。
-// 该包由 DSH 安装目录随运行时提供：DSH 会拦截 Node 的模块解析，把安装作用域的包
-// 供给 profile 里的插件（@deepseek-ai/dsh-app-boot 的 installRuntimeInterception），
-// 所以这里可以按裸名 import——注意包名是 schemastery，不是 cordis。
+// 该包由 DSH 安装目录随运行时提供，但**借它要声明**：DSH 把 profile 里以 link: 安装的插件
+// 当作 "linked" 层，其 routeLinked() 只对「某个祖先目录的 package.json 在 peerDependencies
+// 里列过」的裸名放行（否则退回原生解析，必然找不到）。所以 package.json 里那一条 peer 是必需的。
 // 在纯 node 环境（tools/ 下的独立测试）解析不到，就降级成「无 schema」，插件照常工作，
-// 只是「设置 → 远程访问」写不进去。
-const schemastery = await import('@deepseek-ai/schemastery').catch(() => null);
-const Schema = schemastery?.default ?? schemastery?.Schema ?? null;
+// 只是「设置 → 远程访问」写不进去——所以解析结果会写进状态文件，失败必须看得见。
+let schemaSource = '未尝试';
+let Schema = null;
+try {
+  const schemastery = await import('@deepseek-ai/schemastery');
+  Schema = schemastery?.default ?? schemastery?.Schema ?? null;
+  schemaSource = Schema ? '@deepseek-ai/schemastery（裸名 import，DSH 从安装目录供给）' : '模块已加载，但没有默认导出';
+} catch (err) {
+  schemaSource = `${err?.code ?? 'IMPORT_FAILED'}: ${err?.message ?? err}`;
+}
 
 /**
  * 字段必须标 volatile，Host 才会把它放进「设置」的表单里：
@@ -488,6 +495,16 @@ export function apply(ctx, config) {
   };
 
   note('info', `apply 开始；DSH_HOME=${process.env.DSH_HOME ?? '(未设置)'} DSH_PROFILE=${process.env.DSH_PROFILE ?? '(未设置)'}`);
+  if (Schema) {
+    note('debug', `Config schema 已就绪（${schemaSource}）→「设置 → 远程访问」可写`);
+  } else {
+    note(
+      'error',
+      `Config schema 没拿到（${schemaSource}）→「设置 → 远程访问」点保存会失败。` +
+        'profile 里以 link: 安装的插件，必须在自己的 package.json 的 peerDependencies 里' +
+        '列出要从 DSH 安装目录借用的包（DSH 的 routeLinked 只对声明过的裸名放行）；改完需重启 DSH。',
+    );
+  }
 
   if (!cfg.enabled) {
     note('info', 'enabled=false，不启动');

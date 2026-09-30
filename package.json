@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Expose this machine's DSH web GUI to a chosen network range (e.g. Tailscale), token-gated.",
   "icon": "./icon.svg",
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -20,7 +23,7 @@
   ],
   "meta": {
     "title": "远程访问入口（限网段）",
-    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10），只允许带令牌的访问；参数可在插件页里直接改。"
+    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10），只允许带令牌的访问；参数可在设置页里直接改。"
   },
   "dsh": {
     "bundle": {
