@@ -167,6 +167,9 @@ $env:ELECTRON_RUN_AS_NODE = 1
 | 远程改配置的正确做法 | 直接调 Remote 通道：客户端 `ctx.remote.settings.describe()` 读、`ctx.remote.settings.mutate(ns, [{op:'set',path:[key],value}], revision)` 写。写盘由 **Host 网关**去跑 `settings` 控制器 → `configEditor.edit`，与本插件的异步链无关；返回值是**写盘完成后**的命名空间视图，所以不会把旧值当成功回报 |
 | ⚠️ 反面教材（已删掉的实现） | 曾经在监听里自建 `POST /__remote_access__/config`，Host 半区直接 `ctx.get('configEditor').edit(...)`。两个坑：① 请求回调跑在「我们自己的监听」创建出来的异步链里，而 `hmr.runExclusive` 用 **AsyncLocalStorage** 判嵌套 → 一律 `HMR transactions cannot be nested`，写盘从没成功；② 为了绕开「落盘会重挂监听、掐断本连接」，我改成**先回执再落盘** → 页面拿到的是旧值，用户看到「显示已保存、实则回退」。**结论：Host 侧要写配置，走 Remote 通道让网关跑** |
 | 放行 cookie 的密钥 | 独立文件 `remote-access-secret`（`0600`），**与 `accessCode` 解耦** —— 改密码、重启 DSH 都不踢人；删文件才强制所有设备重新输密码。cookie 值必须是固定密钥，用每次启动的随机数就做不到「改密码不影响登录」 |
+| 目录选择器的 seam | `ctx.directoryPicker` 只提供 `capability()`，两个后端：**native**（在宿主屏幕上弹系统对话框）/ **browse**（应用内列目录 + 建目录）。`dsh-host-directory-picker-auto` 在启动时判定「回环绑定 + 非 SSH + 有显示会话 → native，其余 → browse」，并把**后端 + 客户端表面两个包**用 `ctx.loader.create({name})` 挂成内存条目。所以手机端选目录要用 browse |
+| 怎么固定成 browse | 覆盖层里 `disabled: true` 关掉 `directory-picker`（auto）行，再 `insert` 两个行：`@deepseek-ai/dsh-host-directory-picker-browse` 与 `@deepseek-ai/dsh-client-ui-directory-picker-browse`。**不能只改 name** —— 非 insert 补丁的 `name` 是守卫（不一致会被静默跳过）；也不能只关不插或只插不关（重复 `ctx.directoryPicker` / single slot 重复占用 → 启动报错） |
+| 校验组合的办法 | 不用重启：用 DSH 自带运行时跑 `loadProfileDirectory('dsh', <profileDir>, <asar>/dsh/package.json)` + `composeEntries([...layers.map(l=>l.patches), patches])`，把 picker/remote-access 那几行打出来看 disabled 与 name |
 | 重启的副作用 | 每次重启换 **token**（带票网址失效）与**随机端口**（除非 `port` 固定）；DSH 的 cookie **绑定 hostname:port** → 改端口后手机上要重新做一次解锁/带票访问（我们自己的放行 cookie 不做限制） |
 | 创造模式 | preset id 是 **`cordis`**，显示名「创造模式」；它额外提供 `cordis_inspect_*` 与 `plugin_manager`。标准模式（`standard`）没有这两样 |
 | 模式是会话级 | 会话创建时钉住 preset；新会话解析 `selectedDefault`。**子智能体没有 preset 参数**，只能继承所处会话（实测：标准模式会话起的 subagent 也是标准模式） |

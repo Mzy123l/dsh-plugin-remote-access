@@ -1,8 +1,25 @@
-# dsh-remote-access —— 插入一行 Host 插件。
+# dsh-remote-access 的 bundle patch。
 #
-# 这里只写「部署默认值」；其余参数默认值由插件的 Config 声明提供，
-# 在「设置 → 远程访问」里就能改（保存会写进 profile 的 patch 层，也就是本文件所在的层）。
+# 1) 插入本插件的 Host 行（参数默认值由 Config 声明提供，「设置 → 远程访问」里可改）。
+# 2) 把目录选择器固定成「应用内浏览」：远程客户端（手机）用不了原生选目录器 ——
+#    dsh-host-directory-picker-native 是在**宿主屏幕上**弹系统对话框，手机那边只会一直等；
+#    dsh-host-directory-picker-auto 判定「回环绑定 + 有显示会话」就会挑中 native。
+#    所以这里关掉 auto，改挂 browse 后端 + 它的浏览器表面（自动选目录器在运行时是挂这两个条目）。
+#
+# 注意两件事，改这个文件时别踩：
+#   * 非 insert 补丁里的 `name` 是**守卫**不是赋值：与现有行不一致会被静默跳过
+#     （applyEntryPatches: `if (name && name !== target.name) { warn(...); continue }`）。
+#   * 关掉 auto 与 insert browse 必须成对：同时挂 auto 和某个后端会「重复注册
+#     ctx.directoryPicker / single slot 里重复 client 流程」而启动报错。
+#     想换回系统对话框：删掉下面 disabled 的那一段和 directory-picker-browse / ui-directory-picker-browse 两行。
+- id: directory-picker
+  name: '@deepseek-ai/dsh-host-directory-picker-auto'
+  disabled: true
 - insert:
+    - id: directory-picker-browse
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+    - id: ui-directory-picker-browse
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
     - id: remote-access
       name: '@local/dsh-remote-access'
       config:

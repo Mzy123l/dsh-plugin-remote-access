@@ -90,6 +90,21 @@ dsh plugin --profile desktop add C:\ProgramData\dsh-plugins\dsh-remote-access
 > 换端口 / 重启 DSH 之后，旧 cookie 不通用（DSH 的 cookie 绑 `hostname:port`，且每次重启换 token），
 > 用第 1 步重来一次即可。
 
+## 手机上的「新建工作区」选目录
+
+DSH 默认用 `directory-picker-auto` 选目录器：它判定「回环绑定 + 非 SSH + 有显示会话」就会挑
+**原生**后端，而原生后端是在**宿主屏幕上**弹系统对话框 —— 手机那边点下去只会一直等（「打不开文件管理器」
+就是这个）。
+
+本插件的 bundle patch 因此把选目录器固定成**应用内浏览**：关掉 auto，改挂
+`dsh-host-directory-picker-browse`（列目录 / 建目录的后端）+ `dsh-client-ui-directory-picker-browse`
+（「选择工作区目录」对话框）。手机上点新建工作区就会弹出这个应用内对话框，桌面上也一样。
+
+- 桌面端代价：系统原生对话框换成应用内对话框（功能等价）。
+- 安全说明：已授权的远程端因此可以**列目录、建目录**。它本来就能通过 DSH 跑命令，所以这不是新的权限等级，
+  但如果你不想让远程端看到文件系统，就把 `cordis.patch.yml` 里 `disabled` 那段和两行 `-browse` 删掉
+  （代价：手机端不再有选目录能力）。
+
 ## 安全边界
 
 - 只监听 `allowCidrs` 里的本机地址；**永远不会绑 `0.0.0.0`**。

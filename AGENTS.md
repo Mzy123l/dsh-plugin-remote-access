@@ -47,6 +47,9 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **别再自建 HTTP 端点去调 `configEditor.edit()`** —— 它会撞 HMR 事务（`HMR transactions cannot be nested`），
 而且「先回执再落盘」会把旧值当成功回报（用户看到的就是「显示已保存、实则回退」）。放行 cookie 的密钥独立存在
 `remote-access-secret`（与 `accessCode` 解耦，**改密码/重启都不踢人**，删文件才强制重新输）。
+**手机端选目录（新建工作区）**：`directory-picker-auto` 判定「回环绑定 + 有显示会话」会挑 native 后端 ——
+那是在**宿主屏幕上**弹系统对话框，手机点下去只会一直等。bundle patch 因此关掉 auto、改挂
+`dsh-host-directory-picker-browse` + `dsh-client-ui-directory-picker-browse`（应用内浏览）。
 独立测试 **28/28** 通过（含解锁/拉黑/热重载/改密码不踢人），客户端冒烟 **22/22**，Config 校验 **12/12**。
 手机侧已实测：带票网址 → 303 → cookie → 200；无票 401；网段外 403。
 
@@ -85,6 +88,10 @@ peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么�
 - **`ctx.remote.*` 返回的是 RemoteResult 信封**（`{ ok:true, value }` / `{ ok:false, error }`），不是裸数据，
   必须拆开：官方镜像写的就是 `response.ok ? response.value : response.error.message`。当裸数据用会
   「找不到命名空间 → 页面全空/全 0」；忘了查 `ok` 则「写入被拒也当成功」。这条有客户端冒烟测试兜着；
+- **补丁行里的 `name` 是守卫不是赋值**：`applyEntryPatches` 里 `if (name && name !== target.name) { warn(); continue }`
+  —— 写错名字整条补丁被**静默跳过**（日志里只有一条 warn）。要换掉一行插件（比如把 `directory-picker-auto`
+  换成 browse），只能：`disabled: true` 关掉旧行 + `insert` 新行，不能靠改 `name`；
+  而且关旧行与插新行**必须成对**，否则重复注册服务（`ctx.directoryPicker`）会直接启动报错；
 - 改 JS 后**必须重启 DSH**；改 `Config` 默认值也算改 JS；
 - 提参数前先看 `Config.listConfigs` 里这一行的 `status`：不是 `schema` 就说明 Host 还不服务它；
 - 手动改 `cordis.patch.yml` **不触发**热重载（实测：改 `maxConnections` 3→7 盯 16 秒无反应），
@@ -97,7 +104,7 @@ peer 不会被 pnpm 装进 profile（仍是零依赖，`dshmarket` 也是这么�
 | `index.js` | 插件本体（Host 半区，零依赖） |
 | `client.js` | 浏览器半区（module-loader 形态）：设置页里的参数表单 |
 | `HANDOFF.md` | 交接文档：现状、原卡点的根因判断链、已查明的 DSH 内部事实 |
-| `cordis.patch.yml` | bundle 的 patch：插入 `remote-access` 一行 + 默认配置 |
+| `cordis.patch.yml` | bundle 的 patch：插入 `remote-access` 一行 + 默认配置；并关掉 `directory-picker-auto`、改挂 browse 选目录器（手机端要用） |
 | `package.json` | 清单（`dsh.bundle.patch` / `exports` / `icon` / `meta`） |
 | `tools/` | `test-remote-access.mjs` Host 功能测试；`test-client.mjs` 客户端冒烟（React/宿主桩子）；`check-config-schema.mjs` Config 校验；`asar-extract.mjs` 从 `app.asar` 取文件 |
 | `docs/` | DSH 官方插件开发文档（本地参考，**已 gitignore，勿提交**） |
