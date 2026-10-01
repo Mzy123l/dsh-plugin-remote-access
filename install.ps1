@@ -9,10 +9,10 @@
   用法（任选一种）：
 
     # A. 直接跑（会下载到 %LOCALAPPDATA%\dsh-plugins\dsh-remote-access-cidr）
-    irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1 | iex
 
     # B. 带参数（需要代理 / 想换目录或仓库）
-    $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access/main/install.ps1
+    $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1
     & ([scriptblock]::Create($s)) -Proxy http://127.0.0.1:7890
 
   装完重启一次 DSH，然后「设置 → 远程访问」里改参数。
@@ -20,7 +20,7 @@
 [CmdletBinding()]
 param(
   # GitHub 仓库（改名后写新名字即可，GitHub 会自动重定向旧地址）
-  [string]$Repo = 'Mzy123l/dsh-remote-access',
+  [string]$Repo = 'Mzy123l/dsh-remote-access-cidr',
   # 分支或 tag
   [string]$Ref = 'main',
   # 装到哪（默认用户级，不需要管理员）

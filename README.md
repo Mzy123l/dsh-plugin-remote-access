@@ -18,7 +18,7 @@
 | 填什么 | 从哪里装 |
 |---|---|
 | `dsh-remote-access-cidr` | npm（发布后可用） |
-| `github:Mzy123l/dsh-remote-access` | 直接从 GitHub |
+| `github:Mzy123l/dsh-remote-access-cidr` | 直接从 GitHub |
 | 本机某个目录的绝对路径 | 自己 clone / 下载下来时 |
 
 **② 命令行**（等价于插件页那一步；DSH 正在运行时 profile 写锁会占住）：
@@ -30,14 +30,14 @@ dsh plugin --profile desktop add dsh-remote-access-cidr
 **③ GitHub 一键取代码** —— 想把源码放到本机再装：
 
 ```powershell
-irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1 | iex
 ```
 
 脚本只负责**把代码取到一个固定目录**（默认 `%LOCALAPPDATA%\dsh-plugins\dsh-remote-access-cidr`），
 装的动作仍然交给 DSH 自己（插件页填那个目录）。需要代理时：
 
 ```powershell
-$s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access/main/install.ps1
+$s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1
 & ([scriptblock]::Create($s)) -Proxy http://127.0.0.1:7890
 ```
 

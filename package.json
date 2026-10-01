@@ -7,11 +7,11 @@
   "icon": "./icon.svg",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mzy123l/dsh-remote-access.git"
+    "url": "git+https://github.com/Mzy123l/dsh-remote-access-cidr.git"
   },
-  "homepage": "https://github.com/Mzy123l/dsh-remote-access#readme",
+  "homepage": "https://github.com/Mzy123l/dsh-remote-access-cidr#readme",
   "bugs": {
-    "url": "https://github.com/Mzy123l/dsh-remote-access/issues"
+    "url": "https://github.com/Mzy123l/dsh-remote-access-cidr/issues"
   },
   "keywords": [
     "dsh",
