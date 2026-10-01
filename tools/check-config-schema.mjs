@@ -21,15 +21,32 @@ const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'}  $
 const SCHEMA_PKG = 'dsh/node_modules/@deepseek-ai/schemastery';
 const COSMO_PKG = 'dsh/node_modules/@deepseek-ai/cosmokit';
 
-function findAsar() {
+/**
+ * 找 DSH 的包：老安装是 `resources/app.asar`（一个文件），新安装把它解包成 `resources/app`（目录），
+ * 两种都支持；`DSH_ASAR` 可以覆盖成 asar 文件或解包目录。
+ */
+function findHarness() {
+  const harness = [
+    process.env.DSH_HARNESS,
+    'E:\\Applications\\DeepSeek Harness',
+    'C:\\Program Files\\DeepSeek Harness',
+  ].filter(Boolean);
   const candidates = [
     process.env.DSH_ASAR,
-    'E:\\Applications\\DeepSeek Harness\\resources\\app.asar',
-    'C:\\Program Files\\DeepSeek Harness\\resources\\app.asar',
+    ...harness.map((h) => path.join(h, 'resources', 'app.asar')),
+    ...harness.map((h) => path.join(h, 'resources', 'app.asar.off')), // 升级后留下的旧包，内容一样
+    ...harness.map((h) => path.join(h, 'resources', 'app')), // 新布局：dsh/ 直接解包在这里
   ].filter(Boolean);
-  return candidates.find((p) => {
-    try { return fs.statSync(p).isFile(); } catch { return false; }
-  });
+  for (const p of candidates) {
+    try {
+      const st = fs.statSync(p);
+      if (st.isFile()) return { target: p, kind: 'asar' };
+      if (st.isDirectory() && fs.existsSync(path.join(p, 'dsh', 'node_modules'))) {
+        return { target: p, kind: 'dir' };
+      }
+    } catch { /* 试下一个 */ }
+  }
+  return null;
 }
 
 /** DSH 的 volatileForm/isVolatilePath 判据：路径上最近的 volatile 祖先即视为可写 */
@@ -66,11 +83,17 @@ function caretSatisfies(range, version) {
   return v[1] > minor || (v[1] === minor && v[2] >= patch);
 }
 
-const asarPath = findAsar();
-if (!asarPath) {
-  console.log('SKIP  找不到 DSH 安装包（app.asar）——设 DSH_ASAR 环境变量后可校验 Config');
+const harness = findHarness();
+if (!harness) {
+  console.log('SKIP  找不到 DSH 安装包（app.asar / resources\\app）——设 DSH_ASAR 环境变量后可校验 Config');
   process.exit(0);
 }
+
+/** 从安装包里读一个内部文件：asar 用 asar-extract，解包目录直接读盘 */
+const readInner = (inner) =>
+  harness.kind === 'asar'
+    ? readAsarBuffer(harness.target, inner)
+    : fs.readFileSync(path.join(harness.target, inner));
 
 // 这一条与 schema 无关，但同属「装进 DSH 才发现」的坑，而且是本项目真实踩过的：
 // DSH 把 profile 里以 link: 装的插件当作 linked 层，routeLinked() 只对
@@ -85,7 +108,7 @@ if (!asarPath) {
     typeof range === 'string' ? range : 'link: 装的插件不声明 peer，DSH 就不会把安装目录里的这个包借给它',
   );
   if (typeof range === 'string') {
-    const installed = JSON.parse(readAsarBuffer(asarPath, `${SCHEMA_PKG}/package.json`).toString('utf8')).version;
+    const installed = JSON.parse(readInner(`${SCHEMA_PKG}/package.json`).toString('utf8')).version;
     const ok = caretSatisfies(range, installed);
     if (ok !== null) check('peer 范围容得下安装包里的版本', ok, `声明的 ${range} ↔ 装着的 ${installed}`);
   }
@@ -96,7 +119,7 @@ try {
   const put = (inner, rel) => {
     const target = path.join(root, rel);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, readAsarBuffer(asarPath, inner));
+    fs.writeFileSync(target, readInner(inner));
   };
   put(`${SCHEMA_PKG}/package.json`, 'node_modules/@deepseek-ai/schemastery/package.json');
   put(`${SCHEMA_PKG}/lib/index.mjs`, 'node_modules/@deepseek-ai/schemastery/lib/index.mjs');

@@ -103,7 +103,7 @@ let hostConfig = {
   port: 19388,
   maxConnections: 66,
   logLevel: 'silent',
-  accessCode: '126710',
+  accessCode: '864209',
 };
 let revision = 3;
 const mutateCalls = [];
@@ -161,7 +161,7 @@ check('手机页面：端口读到 19388', valueOf('port') === '19388', `实际 
 check('手机页面：并发上限读到 66', valueOf('maxConnections') === '66', `实际 ${JSON.stringify(valueOf('maxConnections'))}`);
 check('手机页面：允许的网段读到', String(valueOf('allowCidrs')).includes('100.64.0.0/10'), JSON.stringify(valueOf('allowCidrs')));
 check('手机页面：日志级别下拉读到位', byKey(tree, 'logLevel-i')?.props?.value === 'silent', String(byKey(tree, 'logLevel-i')?.props?.value));
-check('手机页面：访问密码读到', valueOf('accessCode') === '126710', JSON.stringify(valueOf('accessCode')));
+check('手机页面：访问密码读到', valueOf('accessCode') === '864209', JSON.stringify(valueOf('accessCode')));
 check('手机页面：0 值显示成空（好让占位符露出）',
   byKey(tree, 'port-i')?.props?.placeholder === '0=随机' && byKey(tree, 'maxConnections-i')?.props?.placeholder === '0=不限制',
   `${byKey(tree, 'port-i')?.props?.placeholder} / ${byKey(tree, 'maxConnections-i')?.props?.placeholder}`);

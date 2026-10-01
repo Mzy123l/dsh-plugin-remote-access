@@ -1,4 +1,4 @@
-# dsh-remote-access
+# dsh-remote-access-cidr
 
 给 **DeepSeek Harness（DSH）桌面版**用的插件：把本机 DSH 的网页界面**只开放给你指定的网段**
 （默认 Tailscale 的 `100.64.0.0/10`），于是手机或另一台电脑也能用上它。
@@ -11,19 +11,40 @@
 
 ## 安装
 
-用 DSH 插件页（推荐，GUI 会把依赖和「启用」一起写好）：
+三种方式，选一种即可；**装完重启一次 DSH**。
 
-```
-设置 → 插件 → 添加插件 → 填本仓库目录的绝对路径 → 安装
-```
+**① 插件页（推荐）** —— 打开 DSH →「设置 → 插件 → 添加插件」，填下面任一：
 
-也可以用 CLI（DSH 正在运行时 profile 写锁会占住，CLI 可能一直等；两种方式二选一即可）：
+| 填什么 | 从哪里装 |
+|---|---|
+| `dsh-remote-access-cidr` | npm（发布后可用） |
+| `github:Mzy123l/dsh-remote-access` | 直接从 GitHub |
+| 本机某个目录的绝对路径 | 自己 clone / 下载下来时 |
+
+**② 命令行**（等价于插件页那一步；DSH 正在运行时 profile 写锁会占住）：
 
 ```powershell
-dsh plugin --profile desktop add <本仓库目录的绝对路径>
+dsh plugin --profile desktop add dsh-remote-access-cidr
 ```
 
-装完**重启一次 DSH**。之后改参数都是热重载；但换了 `index.js` / `client.js` 的代码仍需重启一次才会加载。
+**③ GitHub 一键取代码** —— 想把源码放到本机再装：
+
+```powershell
+irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access/main/install.ps1 | iex
+```
+
+脚本只负责**把代码取到一个固定目录**（默认 `%LOCALAPPDATA%\dsh-plugins\dsh-remote-access-cidr`），
+装的动作仍然交给 DSH 自己（插件页填那个目录）。需要代理时：
+
+```powershell
+$s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access/main/install.ps1
+& ([scriptblock]::Create($s)) -Proxy http://127.0.0.1:7890
+```
+
+> 为什么不一步装完：DSH 的插件安装（写 profile 的 `package.json` / `cordis.patch.yml`、跑包管理器）
+> 只能由 DSH 自己做（插件页，或让 agent 用 `plugin_manager` 工具），手工改 profile 容易把它弄坏。
+
+之后改参数都是热重载；但换了 `index.js` / `client.js` 的代码仍需重启一次才会加载。
 
 ## 使用
 
@@ -184,7 +205,8 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 | `package.json` | 清单（`dsh.bundle.patch` / `exports` / `icon` / `meta`） |
 | `locale/{zh,en}.json` | 插件页显示用的标题与说明 |
 | `icon.svg` | 插件页图标 |
-| `tools/` | 测试与从 `app.asar` 取文件的工具 |
+| `tools/` | 测试（Host / 客户端 / Config 校验）与从 DSH 安装包里取文件的工具 |
+| `install.ps1` | GitHub 一键取代码（放到本机固定目录，安装仍由 DSH 自己做） |
 | `LICENSE` | MIT |
 
 ## 许可

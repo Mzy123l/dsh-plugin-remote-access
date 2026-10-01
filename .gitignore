@@ -8,3 +8,9 @@ docs/dsh-plugin-refs/
 # 运行期产物
 remote-access-url.txt
 *.tmp
+
+# npm 打包产物
+*.tgz
+
+# 编辑工具留下的临时目录（里面是源码副本，别误提交）
+.*.tmpdir/

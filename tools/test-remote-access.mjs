@@ -59,7 +59,7 @@ const makeCtx = (extra = {}) => {
  * fail=true 时模拟写盘失败（插件应退回暂存文件并继续拦住该地址）。
  */
 const makeEditor = ({ denyCidrs = [], fail = false } = {}) => {
-  const entry = { options: { id: 'remote-access', name: '@local/dsh-remote-access', config: { denyCidrs } } };
+  const entry = { options: { id: 'remote-access', name: 'dsh-remote-access-cidr', config: { denyCidrs } } };
   const state = { calls: [] };
   return {
     state,
@@ -195,7 +195,7 @@ const unlockCfg = {
   upstream: `http://127.0.0.1:${upPort}`,
   urlFile: statusFile2,
   banFile,
-  accessCode: '126710',
+  accessCode: '864209',
 };
 const editor = makeEditor();
 const dispose4 = apply(makeCtx({ configEditor: editor }), unlockCfg);
@@ -203,7 +203,7 @@ await sleep(400);
 const s4 = readUrl(statusFile2);
 const port4 = s4.url ? Number(new URL(s4.url).port) : 0;
 check('解锁模式：状态文件给出裸地址与密码状态', /手机访问: http:\/\/127\.0\.0\.1:\d+\//.test(s4.text) && s4.text.includes('未设置') === false);
-check('解锁模式：密码不进状态文件', !s4.text.includes('126710'));
+check('解锁模式：密码不进状态文件', !s4.text.includes('864209'));
 
 const nav = await call(port4, { headers: { accept: 'text/html' } });
 check('裸地址拿到解锁页（不复制 token）', nav.status === 200 && nav.body.includes('/__remote_access__/unlock'), `HTTP ${nav.status}`);
@@ -244,7 +244,7 @@ check('拉黑后一律 403', banned.status === 403, `HTTP ${banned.status}`);
 const dispose5 = apply(makeCtx({ configEditor: makeEditor() }), unlockCfg);
 await sleep(400);
 const port5 = Number(new URL(readUrl(statusFile2).url).port);
-const ok = await unlockO(port5, 'code=126710');
+const ok = await unlockO(port5, 'code=864209');
 const setCookie = String(ok.headers['set-cookie'] ?? '');
 check('密码正确 → 303 + 放行 cookie', ok.status === 303 && setCookie.includes('dsh-ra-ok='), `HTTP ${ok.status}`);
 const cookie = setCookie.split(';')[0];
@@ -314,7 +314,7 @@ let row4 = {
   upstream: `http://127.0.0.1:${upPort}`,
   urlFile: statusFile4,
   banFile: banFile4,
-  accessCode: '126710',
+  accessCode: '864209',
 };
 const listened4 = [];
 const editor4 = makeEditor();
@@ -402,7 +402,7 @@ let rotRow = {
   upstream: `http://127.0.0.1:${upPort}`,
   urlFile: rotFile,
   banFile: rotBan,
-  accessCode: '126710',
+  accessCode: '864209',
 };
 const rotCtx = {
   logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -421,7 +421,7 @@ const dispose7 = apply(rotCtx, rotRow);
 await sleep(400);
 const port7 = Number(new URL(readUrl(rotFile).url).port);
 
-const firstUnlock = await unlockO(port7, 'code=126710');
+const firstUnlock = await unlockO(port7, 'code=864209');
 const cookie7 = String(firstUnlock.headers['set-cookie'] ?? '').split(';')[0];
 const beforeRotate = await call(port7, { headers: { cookie: cookie7, accept: 'text/html' } });
 check('改密码前：放行 cookie 可用', beforeRotate.status === 200 && beforeRotate.body.includes('upstream host='), `HTTP ${beforeRotate.status}`);
@@ -435,7 +435,7 @@ const afterRotate = await call(port7b, { headers: { cookie: cookie7, accept: 'te
 check('改密码后：同一个 cookie 仍然可用（不踢人）',
   afterRotate.status === 200 && afterRotate.body.includes('upstream host='), `HTTP ${afterRotate.status}`);
 
-const staleCode = await unlockO(port7b, 'code=126710');
+const staleCode = await unlockO(port7b, 'code=864209');
 check('改密码后：旧密码不再放行', staleCode.status === 403, `HTTP ${staleCode.status}`);
 
 for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6, dispose7]) {

@@ -1,5 +1,5 @@
 /**
- * dsh-remote-access —— 把本机 DSH 的网页界面开放给指定网段（例如 Tailscale），
+ * dsh-remote-access-cidr —— 把本机 DSH 的网页界面开放给指定网段（例如 Tailscale），
  * 供手机 / 另一台电脑通过一条「带票的网址」访问。
  *
  * 设计要点：
@@ -30,7 +30,7 @@ import { AsyncResource } from 'node:async_hooks';
  * 下面这个异步资源在**模块加载时**创建（那时没有 HMR 事务），把写盘放进它的作用域即可绕开。
  * 导出它是为了让独立测试能验证「确实逃出了那个 store」。
  */
-const configWriteScope = new AsyncResource('dsh-remote-access/config-write');
+const configWriteScope = new AsyncResource('dsh-remote-access-cidr/config-write');
 
 export function runOutsideHmr(fn) {
   return configWriteScope.runInAsyncScope(fn);
@@ -719,7 +719,7 @@ export function apply(ctx, config) {
 
   function render() {
     return [
-      '# dsh-remote-access 状态（本文件含访问令牌，等于本机操作权限，别外传）',
+      '# dsh-remote-access-cidr 状态（本文件含访问令牌，等于本机操作权限，别外传）',
       `# 更新时间: ${new Date().toISOString()}`,
       '',
       urls.length ? `远程访问网址: ${urls.join('  ')}` : '远程访问网址: （尚未生成）',
@@ -807,7 +807,7 @@ export function apply(ctx, config) {
         fs.rmSync(file, { force: true });
       } else {
         const head =
-          '# dsh-remote-access 拉黑暂存：这些地址还没写进「排除的网段」，会自动补写；\n' +
+          '# dsh-remote-access-cidr 拉黑暂存：这些地址还没写进「排除的网段」，会自动补写；\n' +
           '# 正常情况下不用碰这个文件 —— 拉黑请在「设置 → 远程访问 → 排除的网段」里管理。\n';
         fs.writeFileSync(file, `${head}${unique.join('\n')}\n`, { mode: 0o600 });
       }
