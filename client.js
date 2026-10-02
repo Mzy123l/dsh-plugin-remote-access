@@ -442,6 +442,27 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         window.setTimeout(() => { mutualBusy = false; }, 300);
       }
 
+      /**
+       * 主动踢一次重绘。
+       *
+       * 真机上出现过：手机布局生效后 DOM 与计算样式全对，画面却停在旧帧，
+       * **手动拖一下宽度才显示**。这是引擎侧的失效/合成没跟上，CSS 层保证不了；
+       * 所以布局应用后主动做一次「改样式 → 强制同步重排 → 还原」，逼合成器重新栅格化。
+       *
+       * 用 opacity 而不是自定义属性：自定义属性变化不一定触发绘制，opacity 一定会。
+       * 值取 0.999 而不是 1，且下一帧就还原，肉眼不可见。
+       */
+      function nudgeRepaint() {
+        try {
+          const html = document.documentElement;
+          window.requestAnimationFrame(() => {
+            html.style.opacity = '0.999';
+            void html.offsetHeight; // 读布局属性 → 强制同步重排，把新样式推进渲染管线
+            window.requestAnimationFrame(() => { html.style.removeProperty('opacity'); });
+          });
+        } catch { /* 忽略：这只是兜底，失败也不该影响布局 */ }
+      }
+
       /** 把「画成什么样」这件事交给 CSS：这里只负责打标记与开关 data-ra-drawer */
       function syncDom() {
         if (stopped) return;
@@ -474,12 +495,14 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         hideUselessRightControls();
         // 侧栏展开（没有 data-sidebar-collapsed）→ 抽屉模式：正文占满宽度，侧栏浮在上面
         const drawer = !frame.hasAttribute('data-sidebar-collapsed');
-        if (drawer !== wasDrawer) {
+        const drawerChanged = drawer !== wasDrawer;
+        if (drawerChanged) {
           wasDrawer = drawer;
           drawerOpenedAt = drawer ? Date.now() : 0;
         }
         const rightOpen = rightPanelOpen();
-        if (rightOpen !== wasRightOpen) {
+        const rightChanged = rightOpen !== wasRightOpen;
+        if (rightChanged) {
           wasRightOpen = rightOpen;
           rightOpenedAt = rightOpen ? Date.now() : 0;
         }
@@ -489,6 +512,8 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         if (drawer) scrim.setAttribute('data-open', '');
         else scrim.removeAttribute('data-open');
         enforceOverlayExclusive(drawer);
+        // 抽屉/右栏状态变化时也踢一次：这两个整屏浮层的出现/消失最容易留下旧帧
+        if (drawerChanged || rightChanged) nudgeRepaint();
       }
       let wasDrawer = false;
       let wasRightOpen = false;
@@ -515,6 +540,8 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         document.documentElement.setAttribute('data-ra-layout', layout);
         if (layout === 'phone') injectStyle();
         syncDom();
+        // 首次进入手机布局后踢一次重绘：这一步正好是「打开页面就是空白」的现场
+        if (layout === 'phone') nudgeRepaint();
         emitLayout();
       }
 
