@@ -426,19 +426,26 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         // 只允许在设置覆盖层内部往上找。**绝不能爬出去**：frame 的直接子元素里就有左侧栏，
         // 而它本身是个 <nav> —— 一旦爬到 frame，就会把「左侧栏」认成设置页导航、把 overlay 层认成内容区，
         // 于是整页被设置样式接管（左侧栏消失、正文空白）。
-        const overlay = document.querySelector('[data-slot="shell.overlay"]');
-        if (!overlay || !overlay.contains(closeBtn)) return;
+        // 只允许「在设置面板内部」往上找。**绝不能爬到应用主框架那一层**：frame 的直接子元素里就有左侧栏，
+        // 而它本身是个 <nav> —— 一旦命中，就会把「左侧栏」认成设置页导航、把 overlay 层认成内容区，
+        // 于是整页被设置样式接管（真机现象：左侧栏消失、正文空白）。
+        //
+        // 注意：不能用「必须位于 [data-slot="shell.overlay"] 内」来收窄 —— 实测设置面板并不在那个槽位里
+        // （它在自己的 wCInkW_panel 里），那样写会让这个函数**永远提前返回**，手机上设置页就一直是电脑版式。
+        const frame = document.querySelector('[data-ra-frame]');
         let content = closeBtn;
         while (content && content.parentElement) {
           const parent = content.parentElement;
+          if (frame && parent === frame) return;
+          if (parent === document.body || parent === document.documentElement) return;
           const nav = [...parent.children].find((child) => child.tagName === 'NAV');
           if (nav) {
             parent.setAttribute('data-ra-settings-panel', '');
             content.setAttribute('data-ra-settings-content', '');
             nav.setAttribute('data-ra-settings-nav', '');
             return;
+            return;
           }
-          if (parent === overlay) return; // 到头了，说明这次没有可标记的面板
           content = parent;
         }
       }
