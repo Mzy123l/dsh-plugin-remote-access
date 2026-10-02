@@ -128,6 +128,17 @@ window.__ModuleLoader__.load({
      * 拿不到这个属性、也就永远匹配不上任何一条规则（这就是「不动本地」的实现方式）。
      */
     const PHONE_CSS = `
+/* 手机上「展开后的工作区抽屉」必须不透明。
+   透明来自壁纸引擎的「侧栏液态玻璃」——它自己的旋钮是 --we-sidebar-tint / --we-sidebar-alpha
+   （设置项：侧栏玻璃颜色权重 / 侧栏透明度），面板底色由
+   color-mix(… var(--we-sidebar-color) var(--we-sidebar-tint, 20%), transparent …) 算出来。
+   而手机上展开的抽屉整块盖在正文上，半透明会让两层文字糊在一起。
+   这里只在本页把这两个变量拉满：**只作用于手机档，本机一个像素都不动**，也不去覆盖元素表面
+   （之前那条 background !important 覆盖 DSH 玻璃表面，会让左侧栏整列不再绘制，已删）。 */
+html[data-ra-layout="phone"] {
+  --we-sidebar-tint: 100%;
+  --we-sidebar-alpha: 1;
+}
 html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { /*strong*/ display: none !important; }
 html[data-ra-layout="phone"] [data-ra-center],
 html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
