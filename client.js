@@ -142,12 +142,29 @@ html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-col
 html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
   position: fixed !important;
   top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
-  width: min(86vw, 320px) !important;
+  /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 88vw 但右边仍留出可见的正文 */
+  width: min(88vw, 340px) !important;
   z-index: 70 !important;
   border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3)) !important;
   box-shadow: 0 18px 48px rgba(0,0,0,0.45) !important;
   padding-left: env(safe-area-inset-left, 0px) !important;
+  /* 抽屉里滑到底不要带动后面的正文一起滚 */
+  overscroll-behavior: contain;
 }
+
+/* 右栏：DSH 自己在 viewportWidth < 768 时就选了 autoFullscreen（无轨道 + 全屏浮层），
+   所以这里不去抢它的布局，只做收尾 —— 安全区、不横向溢出、以及把手机上没意义的控件藏掉。 */
+html[data-ra-layout="phone"] [data-sidebar-right-panel] {
+  max-width: 100vw !important;
+  overflow-x: hidden !important;
+  padding-left: env(safe-area-inset-left, 0px) !important;
+  padding-right: env(safe-area-inset-right, 0px) !important;
+  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+  overscroll-behavior: contain;
+}
+/* 「分栏」在 390px 上没有意义，「退出全屏」更是不可能（宽度决定它必须全屏）。
+   由脚本按 aria-label 精确打上这个标记再隐藏，避免拿类名去猜。 */
+html[data-ra-layout="phone"] [data-ra-phone-hidden] { display: none !important; }
 
 #dsh-ra-scrim { display: none; }
 html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] {
@@ -305,20 +322,93 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         }
       }
 
+      /**
+       * 这个元素「真的能点」吗：可见、有尺寸、且落在视口里。
+       *
+       * 为什么要专门判一次：DSH 的 DOM 里长期留着**隐藏的同名副本**（dock 把不活跃的 tab
+       * 用 `[hidden]` + `transform: translateX(504px)` 停在屏幕右边）。直接 `querySelector`
+       * 拿到的往往是那一份 —— 点了按钮却什么也没发生，日志里也看不出异常。
+       * 我调这一项时就先被它骗过一次：右栏明明在屏幕上，我却一直在点屏外那份。
+       */
+      function isClickable(el) {
+        if (!el || el.disabled) return false;
+        if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+        const box = el.getBoundingClientRect();
+        if (box.width <= 0 || box.height <= 0) return false;
+        const vw = window.innerWidth || 0;
+        const vh = window.innerHeight || 0;
+        return box.right > 0 && box.left < vw && box.bottom > 0 && box.top < vh;
+      }
+
+      /**
+       * 按 aria-label 精确点一个**可见的**按钮，返回是否点到。
+       *
+       * 这是整个手机布局与 DSH 交互的**唯一**方式：手势也好、遮罩也好，都只是替用户去点它自己
+       * 那个按钮，而不是我们去改它的 store / 布局状态。好处是行为永远与「用户自己点」一致，
+       * 也不会因为猜错内部状态而让界面进入自相矛盾的形态。
+       */
+      function clickLabel(label) {
+        const candidates = [...document.querySelectorAll('button')].filter(
+          (b) => (b.getAttribute('aria-label') ?? '') === label,
+        );
+        const btn = candidates.find(isClickable);
+        if (!btn) return false;
+        btn.click();
+        return true;
+      }
+
+      /** 屏幕上那个正在显示的右栏面板（排除 dock 留在 DOM 里的隐藏副本） */
+      const visibleRightPanel = () =>
+        [...document.querySelectorAll('[data-sidebar-right-panel]')].find(isClickable) ?? null;
+
+      /** 右侧栏是不是正以可见形态开着（手机上它是「无轨道 + 全屏浮层」） */
+      const rightPanelOpen = () => visibleRightPanel() !== null;
+
       /** 抽屉遮罩：点它等于点「收起侧边栏」，行为与用户自己收起完全一致（不自己改状态） */
       function ensureScrim() {
         let scrim = document.getElementById(SCRIM_ID);
         if (scrim) return scrim;
         scrim = document.createElement('div');
         scrim.id = SCRIM_ID;
-        scrim.addEventListener('click', () => {
-          const btn = [...document.querySelectorAll('button')].find(
-            (b) => (b.getAttribute('aria-label') ?? '') === '收起侧边栏',
-          );
-          if (btn) btn.click();
-        });
+        scrim.addEventListener('click', () => { clickLabel('收起侧边栏'); });
         document.body.appendChild(scrim);
         return scrim;
+      }
+
+      /**
+       * 手机上没意义的右栏控件：「分栏」在 390px 上分不出两栏，「退出全屏」更是不可能
+       * （宽度决定它必须全屏，点了也只会留一个空轨道）。按 aria-label 精确隐藏，
+       * 不碰别的按钮 —— 尤其是「收起右侧边栏」，那是手机上唯一该留的出口。
+       */
+      const PHONE_HIDDEN_LABELS = ['分栏', '退出全屏', 'Split', 'Exit fullscreen'];
+      function hideUselessRightControls() {
+        const panel = document.querySelector('[data-sidebar-right-panel]');
+        if (!panel) return;
+        for (const btn of panel.querySelectorAll('button')) {
+          const label = (btn.getAttribute('aria-label') ?? '').trim();
+          if (PHONE_HIDDEN_LABELS.includes(label)) btn.setAttribute('data-ra-phone-hidden', '');
+        }
+      }
+
+      // 两个浮层的「谁后开」时间戳：手机上它俩都是覆盖整屏的，同时开着只会互相盖。
+      // 后开的那个留下，先开的那个替用户收掉（收的方式仍然是点它自己的收起按钮）。
+      let drawerOpenedAt = 0;
+      let rightOpenedAt = 0;
+      let mutualBusy = false;
+
+      /** 手机上两个浮层互斥：谁后开谁留下 */
+      function enforceOverlayExclusive(drawer) {
+        if (mutualBusy) return;
+        const rightOpen = rightPanelOpen();
+        if (!drawer || !rightOpen) return;
+        const closeDrawer = drawerOpenedAt < rightOpenedAt;
+        mutualBusy = true;
+        const ok = closeDrawer ? clickLabel('收起侧边栏') : clickLabel('收起右侧边栏');
+        if (ok) {
+          const what = closeDrawer ? '左抽屉' : '右栏';
+          try { console.info(`[remote-access] 手机上两个浮层互斥：收掉先开的${what}`); } catch { /* 忽略 */ }
+        }
+        window.setTimeout(() => { mutualBusy = false; }, 300);
       }
 
       /** 把「画成什么样」这件事交给 CSS：这里只负责打标记与开关 data-ra-drawer */
@@ -344,14 +434,27 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           if (column) column.setAttribute(`data-ra-${attr}`, '');
         }
         tagSettings();
+        hideUselessRightControls();
         // 侧栏展开（没有 data-sidebar-collapsed）→ 抽屉模式：正文占满宽度，侧栏浮在上面
         const drawer = !frame.hasAttribute('data-sidebar-collapsed');
+        if (drawer !== wasDrawer) {
+          wasDrawer = drawer;
+          drawerOpenedAt = drawer ? Date.now() : 0;
+        }
+        const rightOpen = rightPanelOpen();
+        if (rightOpen !== wasRightOpen) {
+          wasRightOpen = rightOpen;
+          rightOpenedAt = rightOpen ? Date.now() : 0;
+        }
         if (drawer) document.documentElement.setAttribute('data-ra-drawer', '');
         else document.documentElement.removeAttribute('data-ra-drawer');
         const scrim = ensureScrim();
         if (drawer) scrim.setAttribute('data-open', '');
         else scrim.removeAttribute('data-open');
+        enforceOverlayExclusive(drawer);
       }
+      let wasDrawer = false;
+      let wasRightOpen = false;
 
       /** DOM 变动很密（聊天流式输出），所以合并到 200ms 一次，且只在手机布局下干活 */
       function scheduleSync() {
@@ -434,6 +537,73 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         });
       } catch { /* 观察不了就退化成「只在进页面时算一次」 */ }
 
+      // ---------------------------------------------------------------- 边缘滑动手势
+      //
+      // 手机上左抽屉与右栏都是覆盖整屏的浮层，给它们配一对边缘滑动（与系统「侧滑返回」同一套直觉）：
+      //   左边缘向右滑 → 开左抽屉；抽屉开着时向左滑 → 收左抽屉
+      //   右边缘向左滑 → 开右栏；  右栏开着时向右滑 → 收右栏
+      //
+      // 两条自制规则，都是为了不跟正文的纵向滚动打架：
+      //   1. 只有「明显横向」的手势才接管（|dx| > |dy| * 1.25，且起手位移 > 10px）；
+      //   2. 只有判定为横向之后才 preventDefault —— 纵向手势完全放给浏览器。
+      const EDGE_ZONE = 28;
+      const MIN_SWIPE = 56;
+      let swipe = null;
+      const phoneNow = () => document.documentElement.getAttribute('data-ra-layout') === 'phone';
+
+      function onTouchStart(e) {
+        if (!phoneNow() || e.touches.length !== 1) { swipe = null; return; }
+        const point = e.touches[0];
+        const width = window.innerWidth || 0;
+        swipe = {
+          x: point.clientX,
+          y: point.clientY,
+          fromLeft: point.clientX <= EDGE_ZONE,
+          fromRight: point.clientX >= width - EDGE_ZONE,
+          horizontal: false,
+        };
+      }
+
+      function onTouchMove(e) {
+        if (!swipe || e.touches.length !== 1) return;
+        const point = e.touches[0];
+        const dx = point.clientX - swipe.x;
+        const dy = point.clientY - swipe.y;
+        if (!swipe.horizontal) {
+          if (Math.abs(dx) < 10) return;
+          if (Math.abs(dx) <= Math.abs(dy) * 1.25) { swipe = null; return; } // 纵向：交还给页面滚动
+          swipe.horizontal = true;
+        }
+        if (e.cancelable) e.preventDefault(); // 已确认横向：别让浏览器同时翻页/前进后退
+      }
+
+      function onTouchEnd(e) {
+        const started = swipe;
+        swipe = null;
+        if (!started || !started.horizontal) return;
+        const point = e.changedTouches?.[0];
+        if (!point) return;
+        const dx = point.clientX - started.x;
+        if (Math.abs(dx) < MIN_SWIPE) return;
+        const drawer = document.documentElement.hasAttribute('data-ra-drawer');
+        const rightOpen = rightPanelOpen();
+        if (dx > 0) {
+          // 向右滑：收起右栏优先（它盖在最上面），否则从左边缘打开抽屉
+          if (rightOpen) { clickLabel('收起右侧边栏'); return; }
+          if (!drawer && started.fromLeft) clickLabel('打开侧边栏');
+          return;
+        }
+        // 向左滑：收起抽屉优先，否则从右边缘打开右栏
+        if (drawer) { clickLabel('收起侧边栏'); return; }
+        if (!rightOpen && started.fromRight) clickLabel('打开右侧边栏');
+      }
+
+      try {
+        window.addEventListener('touchstart', onTouchStart, { passive: true });
+        window.addEventListener('touchmove', onTouchMove, { passive: false });
+        window.addEventListener('touchend', onTouchEnd, { passive: true });
+      } catch { /* 没有触摸 API 就算了 */ }
+
       // 配置被改（本机设置页保存 / 另一台设备改了）→ 立刻生效，不必刷新
       const offs = [];
       try { offs.push(ctx.on('connection/reset', () => { attempt = 0; loadMode(); })); } catch { /* 忽略 */ }
@@ -451,6 +621,11 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         for (const off of mediaSources) {
           try { off(); } catch { /* 忽略 */ }
         }
+        try {
+          window.removeEventListener('touchstart', onTouchStart);
+          window.removeEventListener('touchmove', onTouchMove);
+          window.removeEventListener('touchend', onTouchEnd);
+        } catch { /* 忽略 */ }
         try { observer?.disconnect(); } catch { /* 忽略 */ }
       };
     }
