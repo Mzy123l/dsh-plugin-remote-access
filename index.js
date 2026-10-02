@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { AsyncResource } from 'node:async_hooks';
+import { pipeline } from 'node:stream';
 
 /**
  * Host 侧写配置（`configEditor.edit`）本身跑在 HMR 事务里，而 HMR 用 AsyncLocalStorage 判嵌套：
@@ -144,10 +145,14 @@ export const Config = Schema
         '带票网址写到哪；留空 = <DSH_HOME>/remote-access-url.txt，填 off = 不写',
       ),
       printUrl: field(Schema.boolean().default(true), '把监听结果与网址同时打到 DSH 日志'),
-      // 只在 patch（cordis.patch.yml）里配，不进设置页：6 位数字密码是凭据，不该躺在表单里被随手看见
+      // 密码是凭据，但设置页也收（手机端改完就能用）；非法值不会静默生效，见 normalizeConfig 与 apply 的告警
       accessCode: field(
         Schema.string().default(''),
-        '网段内的解锁密码（6 位数字）；留空 = 关闭解锁页，必须用带票网址访问。设了它，手机直接打开裸地址输一次密码即可；输错一次就把该地址写进「排除的网段」',
+        '网段内的解锁密码（4–12 位数字或字母）；留空 = 关闭解锁页，必须用带票网址访问。设了它，手机直接打开裸地址输一次密码即可；输错一次就把该地址写进「排除的网段」',
+      ),
+      remoteLayout: field(
+        Schema.string().default('auto'),
+        '远程页面的界面布局：auto = 按视口自动判断，phone = 强制手机布局（横竖屏自适应），desktop = 与桌面一致。只作用于远程页面，本机界面不受影响',
       ),
       banFile: field(
         Schema.string().default(''),
@@ -172,6 +177,7 @@ const DEFAULTS = {
   urlFile: '',
   printUrl: true,
   accessCode: '',
+  remoteLayout: 'auto',
   banFile: '',
   logLevel: 'info',
 };
@@ -207,6 +213,18 @@ function pickConfig(raw) {
   return out;
 }
 
+/**
+ * 解锁密码的规范化：只认 4–12 位字母或数字。
+ * 为什么要「拒绝」而不是原样收下：这个值一旦生效就是网段内的唯一凭据，
+ * 打错一个符号（比如带空格、或写成 `12-34`）如果静默变成「没设密码」，
+ * 用户会以为设好了、然后在手机上撞见 DSH 自己那句英文 401 —— 那是最难查的一种失效。
+ * 所以这里返回空串，由 apply() 用一条 warn 把「你写的值没生效」说清楚。
+ */
+export function normalizeAccessCode(raw) {
+  const text = String(raw ?? '').trim();
+  return /^[A-Za-z0-9]{4,12}$/.test(text) ? text : '';
+}
+
 function normalizeConfig(rawIn) {
   const c = { ...DEFAULTS, ...pickConfig(rawIn) };
   c.allowCidrs = asArray(unwrap(c.allowCidrs)).map((s) => String(s).trim()).filter(Boolean);
@@ -222,8 +240,12 @@ function normalizeConfig(rawIn) {
   c.forwardClientHeaders = c.forwardClientHeaders !== false;
   c.allowWebSocket = c.allowWebSocket !== false;
   c.printUrl = c.printUrl !== false;
-  // 解锁密码只收「纯数字」，长度不限（用 6 位）；带空格或别的字符一律视为没设，避免误开
-  c.accessCode = /^\d{4,12}$/.test(String(unwrap(c.accessCode) ?? '')) ? String(c.accessCode) : '';
+  // 解锁密码收 4–12 位字母或数字（大小写敏感）。带空格、符号或长度不对一律视为没设，
+  // 避免「随手打了一串，以为设上了」——这类被丢掉的值会在 apply 里明确告警。
+  c.accessCode = normalizeAccessCode(unwrap(c.accessCode));
+  c.remoteLayout = ['auto', 'phone', 'desktop'].includes(String(unwrap(c.remoteLayout)))
+    ? String(unwrap(c.remoteLayout))
+    : 'auto';
   c.banFile = String(unwrap(c.banFile) ?? '').trim();
   c.logLevel = ['silent', 'info', 'debug'].includes(String(c.logLevel)) ? String(c.logLevel) : 'info';
   return c;
@@ -417,9 +439,58 @@ button{margin-top:12px;width:100%;padding:12px;font:inherit;font-weight:600;bord
 </style></head><body><main>
 <h1>远程访问</h1><p>请输入访问密码</p>
 <form method="post" action="${UNLOCK_PATH}" autocomplete="off">
-<input name="code" type="password" inputmode="numeric" maxlength="12" autofocus required>
+<input name="code" type="password" inputmode="text" maxlength="12" autofocus required>
 <button type="submit">进入</button></form>
 <div class="err">${hint}</div>
+</main></body></html>`;
+}
+
+/**
+ * 「这次访问没有可用凭据」时的页面：替换 DSH 自己那句
+ * `dsh web authentication required; reopen the URL printed by dsh web.`
+ *
+ * 为什么必须换掉：那句话对手机用户等于零信息 —— 它不会说「这张票是旧的」，
+ * 也不会说「去哪儿拿当前那张」。而这里是**唯一**知道全部来龙去脉的地方：
+ * 我们知道页面导航拿的是哪张票、知道本次实例当前有没有解锁密码。
+ *
+ * 两条不能违反的约束：
+ *   1. 绝不把当前 token 写进这个页面 —— 它发给的是**尚未通过校验**的对端，
+ *      写上去等于把本机操作权限送人。所以只说「去哪拿」。
+ *   2. 不降低任何鉴权：这里只是把「没凭据」讲清楚，不代替 DSH 放行。
+ */
+function noCredentialPageHtml({ hadToken, hasAccessCode, statusPath }) {
+  const reason = hadToken
+    ? '这次带的 <code>?token=…</code> 已经作废了 —— 每次启动 DSH 都会换一张新票，旧网址、别的账户留下的网址都不能再用。'
+    : '这次访问没有带凭据（没有 <code>?token=…</code>，浏览器里也没有 DSH 的登录 cookie）。';
+  const how = hasAccessCode
+    ? '本实例设了「访问密码」：稍后重试一次会看到输入密码的页面。'
+    : '去本机 DSH 的「设置 → 远程访问」里复制**当前**那条「远程访问网址」（带票），或在那里设一个「访问密码」，之后就能直接打开裸地址输密码。';
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>远程访问 · 需要重新取票</title><style>
+:root{color-scheme:light dark}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#e8eaed;
+font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:min(94vw,420px);padding:22px 22px 18px;border-radius:14px;background:#171a21;box-shadow:0 8px 32px #0006}
+h1{margin:0 0 10px;font-size:17px;font-weight:600}
+p{margin:0 0 12px}
+code{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0f1115;padding:1px 5px;border-radius:4px}
+ol{margin:0;padding-left:1.25em}
+li{margin:0 0 6px}
+.hint{margin-top:14px;font-size:12.5px;opacity:.65;word-break:break-all}
+a{color:#60a5fa}
+</style></head><body><main>
+<h1>这次没能通过校验</h1>
+<p>${reason}</p>
+<p>接下来这样做：</p>
+<ol>
+  <li>${how}</li>
+  <li>旧标签页里的网址别再用；用刚复制的那条打开。</li>
+</ol>
+<p class="hint">状态文件（本机）：<code>${statusPath || '&lt;DSH_HOME&gt;/remote-access-url.txt'}</code><br>
+本页由 dsh-remote-access-cidr 生成，只在这里解释原因，不放行任何请求。</p>
+<p><a href="/">重试一次</a></p>
 </main></body></html>`;
 }
 
@@ -522,15 +593,26 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
       method: req.method,
       path: authorized ? gate.withTicket(req.url, req.headers.cookie) : req.url,
       headers: upstreamHeaders(req.headers, up, cfg, peer),
+      // 这个属性必须**显式**写出来，哪怕是 0：
+      // Node ≥19 的 http.globalAgent 自带 `{ keepAlive: true, timeout: 5000 }`，
+      // 不传 options.timeout 就会继承那个 5 秒的 socket 空闲超时 —— 上游只要 5 秒没吐字节，
+      // 正在传输的响应就被下面的 upReq.destroy() 掐断（大文件、视频、流式帧最先中招），
+      // 而日志里打印的是 cfg.timeoutMs（0），看起来像是「没设超时却超时了」。
+      timeout: cfg.timeoutMs > 0 ? cfg.timeoutMs : 0,
     };
-    if (cfg.timeoutMs > 0) options.timeout = cfg.timeoutMs;
 
     const failUpstream = (err) => {
       note('debug', `上游请求失败: ${err?.message}`);
+      // 响应头已经发出去时 writeHead 会抛错（以前被吞掉），而 res 既不 end 也不 destroy，
+      // 手机端就一直挂着等 —— 这里明确收尾：要么回 502，要么把这条残缺响应掐掉让浏览器自己重试。
+      if (res.headersSent) {
+        try { res.destroy(); } catch { /* 已经断了 */ }
+        return;
+      }
       try {
         res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
         res.end('502 bad gateway: upstream unreachable\n');
-      } catch { /* 已发出 */ }
+      } catch { /* 已经断了 */ }
     };
 
     // 只有幂等方法才敢「带票重放」（重放时请求体已经流走了）
@@ -538,6 +620,10 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
     let repaired = false;
 
     const onUpstream = (upRes) => {
+      // 响应头到了：从现在起不再按「空闲」掐这条连接（timeoutMs 的语义就是「等响应头」）。
+      // 否则显式设了 30s 超时的用户，照样会在下大文件 / 看长流的时候被中途掐断。
+      try { upRes.socket?.setTimeout?.(0); } catch { /* 没有 socket 就算了 */ }
+
       // 上游说没票，可我们明明判过已授权 → 多半是浏览器那张 DSH cookie 失效了（每次重启 DSH 都换）。
       // 用本实例当前的票再试一次：DSH 会 303 + 发一张新 cookie，用户不用手动清 cookie、换网址。
       if (upRes.statusCode === 401 && canRepair && !repaired) {
@@ -552,13 +638,29 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
         retry.end();
         return;
       }
+
+      // 补过票还是 401，而且这是个「地址栏导航」→ 说明这个人真的进不来。
+      // 别把 DSH 那句英文（dsh web authentication required; …）甩给他：换我们自己的说明页。
+      if (upRes.statusCode === 401 && req.method === 'GET' && isNavigation(req)) {
+        upRes.resume();
+        respondUnauthorizedNavigation(res, req, gate, peer, note);
+        return;
+      }
+
       res.writeHead(upRes.statusCode || 502, upRes.headers);
-      upRes.pipe(res);
+      // 用 pipeline 而不是 pipe：上游半路断掉时它会**同时收掉下游**。
+      // 只 pipe 的话，上游 socket 被 destroy 只会让 upRes 发个 error，而 res 既不 end 也不 destroy，
+      // 手机端就一直挂在那个残缺响应上等（这正是「壁纸卡着不动」的一种收尾形态）。
+      pipeline(upRes, res, (err) => {
+        if (!err) return;
+        note('debug', `转发中断（下游一起收掉，别让手机挂着）: ${err?.message}`);
+      });
     };
 
     const upReq = http.request(options, onUpstream);
     upReq.on('timeout', () => {
-      note('debug', `上游响应超时（${cfg.timeoutMs}ms）`);
+      // 打真实来源：options.timeout 是本次请求真正生效的那个值（以后不会再有「0ms 却超时」的鬼话）
+      note('debug', `等上游响应头超时（${options.timeout || 'agent 默认'}ms）`);
       upReq.destroy(new Error('upstream timeout'));
     });
     upReq.on('error', failUpstream);
@@ -617,6 +719,34 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
     onListening(addr, port);
   });
   return server;
+}
+
+/**
+ * 「页面导航被 DSH 拒了（401）」时的收尾。
+ *
+ * 分两种情况，都不降低鉴权：
+ *   * 设了解锁密码 → 回解锁页（凭据过期就重新输一次；密码错一次仍然拉黑）；
+ *   * 没设密码 → 回我们自己的中文说明页，讲清「票是旧的 / 根本没带票」和去哪儿拿当前那张。
+ *
+ * 只接管「地址栏导航」：子资源与 RPC 的 401 保持原样（前端按 JSON/文本自己处理），
+ * 免得把机器可读的错误语义换成一张 HTML。
+ */
+function respondUnauthorizedNavigation(res, req, gate, peer, note) {
+  const hadToken = /(?:[?&])token=/.test(String(req.url ?? ''));
+  if (gate.accessCode) {
+    note('info', `${peer} 的凭据已被 DSH 拒绝 → 回到解锁页重新输密码`);
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(unlockPageHtml('上次的登录凭据已失效，请重新输入访问密码'));
+    return;
+  }
+  note(
+    'info',
+    `${peer} 没有可用凭据（${hadToken ? '带的是已作废的票' : '完全没带票'}）→ 回了中文说明页（不再暴露 DSH 那句英文）`,
+  );
+  res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(
+    noCredentialPageHtml({ hadToken, hasAccessCode: false, statusPath: gate.statusPath }),
+  );
 }
 
 /** 是不是「浏览器地址栏打开的页面」——只有这种请求才值得回解锁页 */
@@ -767,6 +897,18 @@ export function apply(ctx, config) {
   };
 
   note('info', `apply 开始；DSH_HOME=${process.env.DSH_HOME ?? '(未设置)'} DSH_PROFILE=${process.env.DSH_PROFILE ?? '(未设置)'}`);
+  // 写进配置的密码如果没通过校验，**必须**看得见：静默失效会让人以为「设过了」，
+  // 然后在手机上撞见 DSH 那句英文 401（以前就是这么坑的）。这里只说长度/字符要求，不回显密码本身。
+  {
+    const rawCode = String(unwrap(config?.accessCode) ?? '').trim();
+    if (rawCode && !cfg.accessCode) {
+      note(
+        'warn',
+        '「访问密码」没生效：只接受 4–12 位数字或字母，当前写的值里有不接受的字符。' +
+          '到「设置 → 远程访问 → 访问密码」改掉它，或清空并改用带票网址。',
+      );
+    }
+  }
   if (Schema) {
     note('debug', `Config schema 已就绪（${schemaSource}）→「设置 → 远程访问」可写`);
   } else {
@@ -876,6 +1018,7 @@ export function apply(ctx, config) {
   const gate = {
     get accessCode() { return cfg.accessCode; },
     get banPath() { return banPathOf(cfg); },
+    get statusPath() { return statusPathOf(cfg); },
     get cookieValue() { return cookieValue; },
     banned(peer) {
       refreshBans(false);
@@ -1019,18 +1162,8 @@ export function apply(ctx, config) {
   }
 
   // ---------------------------------------------------------------- 首次启动 + 收尾
-
-  note('info', `apply 开始；DSH_HOME=${process.env.DSH_HOME ?? '(未设置)'} DSH_PROFILE=${process.env.DSH_PROFILE ?? '(未设置)'}`);
-  if (Schema) {
-    note('debug', `Config schema 已就绪（${schemaSource}）→「设置 → 远程访问」可写`);
-  } else {
-    note(
-      'error',
-      `Config schema 没拿到（${schemaSource}）→「设置 → 远程访问」点保存会失败。` +
-        'profile 里以 link: 安装的插件，必须在自己的 package.json 的 peerDependencies 里' +
-        '列出要从 DSH 安装目录借用的包（DSH 的 routeLinked 只对声明过的裸名放行）；改完需重启 DSH。',
-    );
-  }
+  // 注意：这里**不再**重复打一遍「apply 开始」与 schema 结论 —— 那两句在上面已经写过一次，
+  // 每次加载都在状态文件里留两份只会让人以为插件被加载了两次。
 
   start();
 

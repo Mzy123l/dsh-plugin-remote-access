@@ -41,7 +41,17 @@ window.__ModuleLoader__.load({
           { value: 'debug', label: '详细' },
         ],
       },
-      { key: 'accessCode', type: 'password', label: '访问密码', placeholder: '6位数字' },
+      { key: 'accessCode', type: 'password', label: '访问密码', placeholder: '4-12位数字或字母' },
+      {
+        key: 'remoteLayout',
+        type: 'select',
+        label: '远程UI布局',
+        options: [
+          { value: 'phone', label: '手机（横竖屏自适应）' },
+          { value: 'desktop', label: '电脑' },
+          { value: 'auto', label: '自动' },
+        ],
+      },
     ];
 
     const DEFAULTS = {
@@ -52,7 +62,11 @@ window.__ModuleLoader__.load({
       maxConnections: 0,
       logLevel: 'info',
       accessCode: '',
+      remoteLayout: 'auto',
     };
+
+    /** 访问密码的规则，必须与 index.js 的 normalizeAccessCode 一致（check-config-schema 之外的人工约定） */
+    const ACCESS_CODE_RE = /^[A-Za-z0-9]{4,12}$/;
 
     const listToText = (v) => (Array.isArray(v) ? v.join('\n') : v === undefined || v === null ? '' : String(v));
     const textToList = (t) =>
@@ -94,6 +108,353 @@ window.__ModuleLoader__.load({
 
     const namespaceOf = (view) => (view?.namespaces ?? []).find((row) => row?.ns === NS);
 
+    // ---------------------------------------------------------------- 远程 UI 布局
+    //
+    // 只做一件事：**在远程页面**上，按「远程UI布局」这一项，把桌面那套三栏界面改造成手机上能用的样子。
+    // 四条硬约束，改这里之前先读一遍：
+    //   1. 本机（回环）页面一个像素都不动。判据是 ctx.remote.$host.isLoopback（页面生命周期内固定），
+    //      不是窗口宽度 —— 本机窗口拖窄了也不该变成手机布局。
+    //   2. 不碰别人的渲染树：只给自己加的 <style> 与 data-ra-* 标记负责；
+    //      唯一挂在框架树之外的东西是抽屉遮罩（body 下、有固定 id），不参与任何组件渲染。
+    //   3. 不认 DSH 的 CSS-module 哈希名（BynINW_xxx 这种前缀会随版本变）：优先用 data-slot
+    //      （槽位是稳定契约）定位，再用 [class*="_xxx"] 这种「只认后缀」的写法兜住可变哈希。
+    //   4. 没有 DOM 的环境（tools/test-client.mjs 的桩子）必须安静地什么都不做。
+    const LAYOUT_PHONE_WIDTH = 720;
+    const LAYOUT_STYLE_ID = 'dsh-remote-access/layout.css';
+    const SCRIM_ID = 'dsh-ra-scrim';
+
+    /**
+     * 手机布局的全部样式。挂在 html[data-ra-layout="phone"] 之下，所以本机页面
+     * 拿不到这个属性、也就永远匹配不上任何一条规则（这就是「不动本地」的实现方式）。
+     */
+    const PHONE_CSS = `
+html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { display: none !important; }
+html[data-ra-layout="phone"] [data-ra-center],
+html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* 侧栏：收起时保持 56px 图标栏；展开时改成「抽屉」压在正文上 —— 而不是把正文挤成 110px 一条 */
+/* 三列显式钉住列号：抽屉模式把侧栏改成 position:fixed 后就脱离网格了，
+   自动排位会把「正文」顶到第 1 条轨道（0px）上，正文会直接消失。 */
+html[data-ra-layout="phone"] [data-ra-sidebar] { grid-column: 1 !important; }
+html[data-ra-layout="phone"] [data-ra-center] { grid-column: 2 !important; }
+html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; }
+html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; }
+html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
+  position: fixed !important;
+  top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
+  width: min(86vw, 320px) !important;
+  z-index: 70 !important;
+  border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3)) !important;
+  box-shadow: 0 18px 48px rgba(0,0,0,0.45) !important;
+  padding-left: env(safe-area-inset-left, 0px) !important;
+}
+
+#dsh-ra-scrim { display: none; }
+html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] {
+  display: block; position: fixed; inset: 0; z-index: 60;
+  background: rgba(0,0,0,0.42); -webkit-tap-highlight-color: transparent;
+}
+
+/* 设置面板：手机上是「上下两段」。左右两栏时右侧内容只剩一百来像素，中文会一个字一行 */
+html[data-ra-layout="phone"] [data-ra-settings-panel] {
+  /* 面板本身是 .overlay（fixed 全屏 flex 居中）里的 position:relative flex 子项：
+     这里千万别写 inset —— 相对定位下它只会把面板推歪 8px、并让内容把高度撑出视口。
+     直接要满屏，内部各区块自己滚。 */
+  width: 100% !important; height: 100% !important;
+  max-width: none !important; max-height: none !important;
+  margin: 0 !important; border-radius: 0 !important;
+  flex-direction: column !important;
+  padding-top: env(safe-area-inset-top, 0px) !important;
+  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+}
+html[data-ra-layout="phone"] [data-ra-settings-nav] {
+  flex: 0 0 auto !important; width: auto !important; max-width: none !important;
+  border-right: 0 !important;
+  border-bottom: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.25)) !important;
+  padding: 10px 12px 8px !important;
+}
+html[data-ra-layout="phone"] [data-ra-settings-nav] [class*="_navList"] {
+  flex-direction: row !important; overflow-x: auto !important; overflow-y: hidden !important;
+  gap: 6px !important; scrollbar-width: none;
+}
+html[data-ra-layout="phone"] [data-ra-settings-nav] [class*="_navList"]::-webkit-scrollbar { display: none; }
+html[data-ra-layout="phone"] [data-ra-settings-nav] [class*="_navCell"] {
+  flex: 0 0 auto !important; width: auto !important; min-height: 40px !important; white-space: nowrap !important;
+}
+html[data-ra-layout="phone"] [data-ra-settings-nav] [class*="_navLabel"] { white-space: nowrap !important; }
+html[data-ra-layout="phone"] [data-ra-settings-content] {
+  /* min-height: 0 不能省：纵向 flex 子项的默认 min-height 是 auto（就按内容高），
+     不写它内容区会被撑到 1185px、把「选项」挤出视口底下。 */
+  flex: 1 1 auto !important; width: auto !important;
+  min-width: 0 !important; min-height: 0 !important; max-width: none !important;
+}
+html[data-ra-layout="phone"] [data-ra-settings-content] [class*="_options"] {
+  flex: 1 1 auto !important; min-height: 0 !important;
+}
+html[data-ra-layout="phone"] [data-ra-settings-content] [class*="_row"],
+html[data-ra-layout="phone"] [data-ra-settings-content] [class*="_setting"] {
+  flex-wrap: wrap !important; min-width: 0 !important;
+}
+/* iOS 上输入框字号 <16px 会在聚焦时自动放大整页 */
+html[data-ra-layout="phone"] [data-ra-settings-content] input,
+html[data-ra-layout="phone"] [data-ra-settings-content] textarea,
+html[data-ra-layout="phone"] [data-ra-settings-content] select { font-size: 16px !important; }
+
+/* 输入区：工具条允许换行，别把模型名截成「DeepSeek-V4…」 */
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"] {
+  padding-left: 10px !important; padding-right: 10px !important;
+}
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_row"] {
+  flex-wrap: wrap !important; row-gap: 6px !important;
+}
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_trailing"] {
+  flex: 1 1 auto !important; min-width: 0 !important;
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  /* 横屏手机里垂直方向更金贵：导航那条压薄一点 */
+  html[data-ra-layout="phone"] [data-ra-settings-nav] { padding: 6px 12px 4px !important; }
+}
+`;
+
+    /** 布局变化（手机 ↔ 电脑、横屏 ↔ 竖屏）的订阅者，设置页组件靠它跟着重渲染 */
+    const layoutListeners = new Set();
+    const subscribeLayout = (fn) => {
+      layoutListeners.add(fn);
+      return () => layoutListeners.delete(fn);
+    };
+    const emitLayout = () => {
+      for (const fn of [...layoutListeners]) {
+        try { fn(); } catch { /* 订阅方自己的问题，不牵连布局 */ }
+      }
+    };
+
+    /** 当前页面的「生效布局」——设置页组件用它决定表单是两列还是一列 */
+    const phoneLayoutNow = () =>
+      typeof document !== 'undefined' && document.documentElement.getAttribute('data-ra-layout') === 'phone';
+
+    /**
+     * 启动布局控制器。返回清理函数；**回环页面直接返回空清理**（这就是「只动远程」的开关）。
+     */
+    function startLayoutController(ctx) {
+      const noop = () => {};
+      if (typeof document === 'undefined') return noop; // 测试桩子 / 无 DOM
+      let remote = false;
+      try { remote = ctx?.remote?.$host?.isLoopback === false; } catch { remote = false; }
+      if (!remote) return noop; // 本机页面：整段不启用
+
+      let mode = 'auto';
+      let applied = null;
+      let stopped = false;
+      let attempt = 0;
+      let retryTimer = null;
+      let raScheduled = false;
+
+      const matches = (query) => {
+        try {
+          return typeof window.matchMedia === 'function' ? window.matchMedia(query).matches === true : false;
+        } catch {
+          return false;
+        }
+      };
+
+      /** auto 的判据：够窄 或 有触摸指针（后者能兜住「宽屏但确实是手机/平板」） */
+      function effectiveOf(nextMode) {
+        if (nextMode === 'phone') return 'phone';
+        if (nextMode === 'desktop') return 'desktop';
+        return matches(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`) || matches('(pointer: coarse)')
+          ? 'phone'
+          : 'desktop';
+      }
+
+      function injectStyle() {
+        if (document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`)) return;
+        const tag = document.createElement('style');
+        tag.dataset.raLayoutCss = LAYOUT_STYLE_ID;
+        tag.textContent = PHONE_CSS;
+        document.head.appendChild(tag);
+      }
+
+      /** 从某个槽位元素往上找到「frame 的直接子元素」（也就是那一列），与类名无关 */
+      function columnOf(frame, slot) {
+        const slotEl = document.querySelector(`[data-slot="${slot}"]`);
+        if (!slotEl) return null;
+        let node = slotEl;
+        while (node && node.parentElement !== frame) node = node.parentElement;
+        return node && node.parentElement === frame ? node : null;
+      }
+
+      /**
+       * 设置面板的分区标记。这里刻意用「结构」而不是类名：
+       * 面板 = 同时含 <nav> 与内容区的那一层，内容区 = 从「关闭」按钮往上、父节点里能看见那个 nav 的一层。
+       */
+      function tagSettings() {
+        const closeBtn = document.querySelector('[data-slot="settings.close"]');
+        if (!closeBtn) return;
+        let content = closeBtn;
+        while (content && content.parentElement) {
+          const parent = content.parentElement;
+          const nav = [...parent.children].find((child) => child.tagName === 'NAV');
+          if (nav) {
+            parent.setAttribute('data-ra-settings-panel', '');
+            content.setAttribute('data-ra-settings-content', '');
+            nav.setAttribute('data-ra-settings-nav', '');
+            return;
+          }
+          content = parent;
+        }
+      }
+
+      /** 抽屉遮罩：点它等于点「收起侧边栏」，行为与用户自己收起完全一致（不自己改状态） */
+      function ensureScrim() {
+        let scrim = document.getElementById(SCRIM_ID);
+        if (scrim) return scrim;
+        scrim = document.createElement('div');
+        scrim.id = SCRIM_ID;
+        scrim.addEventListener('click', () => {
+          const btn = [...document.querySelectorAll('button')].find(
+            (b) => (b.getAttribute('aria-label') ?? '') === '收起侧边栏',
+          );
+          if (btn) btn.click();
+        });
+        document.body.appendChild(scrim);
+        return scrim;
+      }
+
+      /** 把「画成什么样」这件事交给 CSS：这里只负责打标记与开关 data-ra-drawer */
+      function syncDom() {
+        if (stopped) return;
+        const phone = document.documentElement.getAttribute('data-ra-layout') === 'phone';
+        if (!phone) {
+          document.documentElement.removeAttribute('data-ra-drawer');
+          const scrimOff = document.getElementById(SCRIM_ID);
+          if (scrimOff) scrimOff.removeAttribute('data-open');
+          return;
+        }
+        const frame = document.querySelector('[data-slot="root"] > *');
+        if (!frame) return;
+        frame.setAttribute('data-ra-frame', '');
+        for (const [slot, attr] of [
+          ['sidebar', 'sidebar'],
+          ['main', 'center'],
+          ['rightbar', 'right'],
+          ['shell.overlay', 'overlay'],
+        ]) {
+          const column = columnOf(frame, slot);
+          if (column) column.setAttribute(`data-ra-${attr}`, '');
+        }
+        tagSettings();
+        // 侧栏展开（没有 data-sidebar-collapsed）→ 抽屉模式：正文占满宽度，侧栏浮在上面
+        const drawer = !frame.hasAttribute('data-sidebar-collapsed');
+        if (drawer) document.documentElement.setAttribute('data-ra-drawer', '');
+        else document.documentElement.removeAttribute('data-ra-drawer');
+        const scrim = ensureScrim();
+        if (drawer) scrim.setAttribute('data-open', '');
+        else scrim.removeAttribute('data-open');
+      }
+
+      /** DOM 变动很密（聊天流式输出），所以合并到 200ms 一次，且只在手机布局下干活 */
+      function scheduleSync() {
+        if (stopped || raScheduled) return;
+        if (document.documentElement.getAttribute('data-ra-layout') !== 'phone') return;
+        raScheduled = true;
+        window.setTimeout(() => {
+          raScheduled = false;
+          syncDom();
+        }, 200);
+      }
+
+      function applyLayout() {
+        if (stopped) return;
+        const layout = effectiveOf(mode);
+        if (layout === applied) {
+          syncDom();
+          return;
+        }
+        applied = layout;
+        document.documentElement.setAttribute('data-ra-layout', layout);
+        if (layout === 'phone') injectStyle();
+        syncDom();
+        emitLayout();
+      }
+
+      /** 读一次「远程UI布局」配置；失败就退到 auto（并重试几次，刚进页面时 Remote 可能还没就绪） */
+      function loadMode() {
+        Promise.resolve()
+          .then(() => ctx.remote.settings.describe())
+          .then((response) => {
+            if (stopped) return;
+            if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
+            const next = String(namespaceOf(response.value)?.value?.remoteLayout ?? 'auto');
+            attempt = 0;
+            mode = ['auto', 'phone', 'desktop'].includes(next) ? next : 'auto';
+            applyLayout();
+          })
+          .catch((err) => {
+            if (stopped) return;
+            try { console.warn('[remote-access] 读「远程UI布局」失败，先按自动处理', err); } catch { /* 忽略 */ }
+            attempt += 1;
+            if (attempt < 5) retryTimer = window.setTimeout(loadMode, 300 * attempt);
+          });
+      }
+
+      injectStyle();
+      applyLayout();
+      loadMode();
+
+      // 视口/指针变化（横竖屏切换、外接屏）→ 重算；只在 auto 下有意义
+      const mediaSources = [];
+      const bindMedia = (query, handler) => {
+        try {
+          if (typeof window.matchMedia !== 'function') return;
+          const mql = window.matchMedia(query);
+          const fn = () => handler();
+          mql.addEventListener?.('change', fn);
+          mediaSources.push(() => mql.removeEventListener?.('change', fn));
+        } catch { /* 忽略 */ }
+      };
+      bindMedia(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`, () => { if (mode === 'auto') applyLayout(); });
+      bindMedia('(pointer: coarse)', () => { if (mode === 'auto') applyLayout(); });
+
+      // DOM 与侧栏开合：侧栏那个属性变化要立刻反映（不然抽屉会慢半拍）
+      let observer = null;
+      try {
+        observer = new MutationObserver((records) => {
+          if (stopped) return;
+          for (const record of records) {
+            if (record.type === 'attributes') { syncDom(); return; }
+          }
+          scheduleSync();
+        });
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['data-sidebar-collapsed'],
+        });
+      } catch { /* 观察不了就退化成「只在进页面时算一次」 */ }
+
+      // 配置被改（本机设置页保存 / 另一台设备改了）→ 立刻生效，不必刷新
+      const offs = [];
+      try { offs.push(ctx.on('connection/reset', () => { attempt = 0; loadMode(); })); } catch { /* 忽略 */ }
+      try {
+        const off = ctx.remote.$on?.('settings/document-updated', () => { attempt = 0; loadMode(); });
+        if (typeof off === 'function') offs.push(off);
+      } catch { /* 忽略 */ }
+
+      return () => {
+        stopped = true;
+        if (retryTimer) window.clearTimeout(retryTimer);
+        for (const off of offs) {
+          try { off?.(); } catch { /* 忽略 */ }
+        }
+        for (const off of mediaSources) {
+          try { off(); } catch { /* 忽略 */ }
+        }
+        try { observer?.disconnect(); } catch { /* 忽略 */ }
+      };
+    }
+
     return {
       // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
       inject: ['slots', 'configForms', 'remote', 'remote.settings'],
@@ -103,6 +464,12 @@ window.__ModuleLoader__.load({
         const form = ctx.configForms.get(NS);
         const describe = ctx.configForms.describe();
         const settings = ctx.remote.settings;
+
+        // 远程页面才有布局改造；本机页面这里直接是个空清理函数（「不动本地」的开关就在这一行）
+        const stopLayout = startLayoutController(ctx);
+        try {
+          if (typeof ctx.effect === 'function') ctx.effect(() => stopLayout);
+        } catch { /* 忽略 */ }
 
         /**
          * 远程页面（手机）读：Remote 通道。
@@ -139,6 +506,10 @@ window.__ModuleLoader__.load({
           const source = viaForms ? snap.value : remote?.config;
 
           React.useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), []);
+
+          // 布局在「手机 ↔ 电脑」之间切换时（改了这一项、或横竖屏转了）让表单跟着重排
+          const [, bumpLayout] = React.useState(0);
+          React.useEffect(() => subscribeLayout(() => bumpLayout((n) => n + 1)), []);
 
           React.useEffect(() => {
             if (revisionRef.current === snap.revision) return;
@@ -196,14 +567,26 @@ window.__ModuleLoader__.load({
           const setField = (key, value) => setDraft({ ...current, [key]: value });
 
           const onSave = async () => {
+            // 先本地校验访问密码：Host 只认 4–12 位字母数字，不合规的值会被它丢掉。
+            // 以前这里直接写盘 → 值被静默丢弃 → 用户以为设好了密码，手机上却撞见 DSH 那句英文 401。
+            // 现在不合规就地拦下、说清规则，绝不写盘。
+            const code = String(current.accessCode ?? '').trim();
+            if (code && !ACCESS_CODE_RE.test(code)) {
+              setStatus('访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。');
+              return;
+            }
             setBusy(true);
             setStatus('保存中…');
             try {
               const base = source ?? {};
+              // 两侧都过一遍「decode → encode」再比：Host 的配置里可能压根没有某个键
+              // （老配置 + 新字段），直接拿裸值比会把它当成「用户改过」而多写一次默认值。
+              const baseView = draftFrom(base);
               const changed = {};
               for (const field of FIELDS) {
                 const next = encode(field, current[field.key]);
-                if (JSON.stringify(next) !== JSON.stringify(base[field.key])) changed[field.key] = next;
+                const before = encode(field, baseView[field.key]);
+                if (JSON.stringify(next) !== JSON.stringify(before)) changed[field.key] = next;
               }
               const count = Object.keys(changed).length;
               if (count === 0) {
@@ -243,22 +626,40 @@ window.__ModuleLoader__.load({
               .catch(() => setRemote({ config: {}, revision: undefined }));
           };
 
-          const rowStyle = {
-            display: 'grid',
-            gridTemplateColumns: 'minmax(84px, max-content) minmax(180px, 1fr)',
-            gap: '8px 12px',
-            alignItems: 'center',
-          };
+          // 手机上一列排（标签在上、控件在下）：300px 宽的设置页塞不下「标签 + 输入框」两列。
+          // 其余场合保持原来的两列，和 DSH 设置页其它条目一致。phoneLayoutNow() 读的是控制器
+          // 打在 <html> 上的标记，所以判定与本插件真正施加的布局永远同一份。
+          const phone = phoneLayoutNow();
+          const rowStyle = phone
+            ? {
+                display: 'grid',
+                gridTemplateColumns: 'minmax(0, 1fr)',
+                gap: '4px',
+                alignItems: 'stretch',
+              }
+            : {
+                display: 'grid',
+                gridTemplateColumns: 'minmax(84px, max-content) minmax(180px, 1fr)',
+                gap: '8px 12px',
+                alignItems: 'center',
+              };
           const inputStyle = {
             width: '100%',
             boxSizing: 'border-box',
-            padding: '4px 6px',
+            padding: phone ? '9px 10px' : '4px 6px',
             font: 'inherit',
+            // 手机上不写死字号：iOS 在 <16px 的输入框聚焦时会自动放大整页
+            // （对象键顺序有意义：font 简写在先，fontSize 在后才能盖住它）
+            fontSize: phone ? 16 : undefined,
             color: 'inherit',
             background: 'rgba(127,127,127,0.08)',
             border: '1px solid rgba(127,127,127,0.35)',
-            borderRadius: 4,
+            borderRadius: phone ? 8 : 4,
           };
+          const labelStyle = phone ? { fontSize: 13, opacity: 0.85 } : undefined;
+          const buttonStyle = phone ? { minHeight: 40, padding: '8px 16px', borderRadius: 8 } : undefined;
+          // 复选框在手机上是行首一个 44px 的方块，单指才好点
+          const checkStyle = phone ? { width: 22, height: 22 } : undefined;
 
           const rows = FIELDS.flatMap((field) => {
             const value = displayValue(field, current[field.key]);
@@ -275,6 +676,7 @@ window.__ModuleLoader__.load({
                 type: 'checkbox',
                 checked: value === true,
                 disabled: busy,
+                style: checkStyle,
                 onChange: (e) => setField(field.key, e.target.checked),
               });
             } else if (field.type === 'list') {
@@ -307,18 +709,22 @@ window.__ModuleLoader__.load({
                 placeholder: field.placeholder,
               });
             }
-            return [h('div', { key: `${field.key}-l` }, field.label), input];
+            return [h('div', { key: `${field.key}-l`, style: labelStyle }, field.label), input];
           });
 
           return h(
             'div',
-            { style: { padding: '2px 0' } },
+            { style: { padding: phone ? '4px 2px' : '2px 0' } },
             h('div', { style: rowStyle }, rows),
             h(
               'div',
-              { style: { marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' } },
-              h('button', { type: 'button', onClick: onSave, disabled: busy }, busy ? '保存中…' : '保存'),
-              h('button', { type: 'button', disabled: busy, onClick: onReload }, '重新读取'),
+              {
+                style: phone
+                  ? { marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }
+                  : { marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' },
+              },
+              h('button', { type: 'button', style: buttonStyle, onClick: onSave, disabled: busy }, busy ? '保存中…' : '保存'),
+              h('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: onReload }, '重新读取'),
               status ? h('span', { style: { opacity: 0.9 } }, status) : null,
             ),
           );

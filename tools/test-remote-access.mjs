@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs } = await import(
+const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode } = await import(
   new URL('../index.js', import.meta.url).href
 );
 
@@ -490,6 +490,275 @@ check(
   seenStore === null,
   String(seenStore),
 );
+
+// ---- 场景 8：访问密码的规则（曾经静默丢弃非法值 → 用户以为设好了，手机却撞见英文 401）----
+//
+// 注意：主上游在场景 7 结束时已经 close 了，这里自己起一个「像 DSH 那样鉴权」的假上游：
+// 只认本进程当前那张 TESTTOKEN，认了就 303 + 发新 cookie，否则一律回那句英文 401。
+const authUpstream = http.createServer((req, res) => {
+  const token = new URL(req.url, 'http://x').searchParams.get('token');
+  if (token !== 'TESTTOKEN') {
+    res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('dsh web authentication required; reopen the URL printed by dsh web.\n');
+    return;
+  }
+  res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-fresh; Path=/; HttpOnly' });
+  res.end();
+});
+await new Promise((r) => authUpstream.listen(0, '127.0.0.1', r));
+const authPort = authUpstream.address().port;
+
+check('normalizeAccessCode：接受 4–12 位纯数字', normalizeAccessCode('864209') === '864209');
+check('normalizeAccessCode：接受字母数字混排', normalizeAccessCode('1433223m') === '1433223m');
+check('normalizeAccessCode：去掉首尾空白后仍然接受', normalizeAccessCode('  ab12cd  ') === 'ab12cd');
+check('normalizeAccessCode：内有空格 → 不收', normalizeAccessCode('12 34 56') === '', JSON.stringify(normalizeAccessCode('12 34 56')));
+check('normalizeAccessCode：含符号 → 不收', normalizeAccessCode('12-34-56') === '');
+check('normalizeAccessCode：太短 → 不收', normalizeAccessCode('123') === '');
+check('normalizeAccessCode：太长 → 不收', normalizeAccessCode('1234567890123') === '');
+
+const illegalFile = path.join(os.tmpdir(), `ra-illegal-${Date.now()}.txt`);
+const dispose8 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: illegalFile,
+  accessCode: '12-34-56', // 非法：含符号
+});
+await new Promise((r) => setTimeout(r, 400));
+const illegalText = fs.readFileSync(illegalFile, 'utf8');
+check(
+  '非法密码不再静默失效：日志/状态文件里明确写出来',
+  illegalText.includes('「访问密码」没生效'),
+  (illegalText.match(/「访问密码」没生效[^\n]*/) ?? ['(没有告警)'])[0].slice(0, 60),
+);
+check('非法密码不会回显进状态文件', !illegalText.includes('12-34-56'));
+const illegalPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(illegalText)?.[1] ?? 0);
+check('非法密码时仍然照常监听（不带解锁页）', illegalPort > 0, String(illegalPort));
+dispose8();
+
+// ---- 场景 9：字母密码真的能用（解锁 → 放行）----
+const alphaFile = path.join(os.tmpdir(), `ra-alpha-${Date.now()}.txt`);
+const dispose9 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: alphaFile,
+  accessCode: '1433223m',
+});
+await new Promise((r) => setTimeout(r, 400));
+const alphaPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(alphaFile, 'utf8'))?.[1] ?? 0);
+check('字母密码：状态文件认作已设置', /解锁密码: 已设置/.test(fs.readFileSync(alphaFile, 'utf8')));
+const alphaNav = await call(alphaPort, { headers: { accept: 'text/html' } });
+check('字母密码：裸地址给解锁页', alphaNav.status === 200 && alphaNav.body.includes('/__remote_access__/unlock'), `HTTP ${alphaNav.status}`);
+const alphaOk = await unlockO(alphaPort, 'code=1433223m');
+check('字母密码：输对 → 303 + 放行 cookie', alphaOk.status === 303 && String(alphaOk.headers['set-cookie']).includes('dsh-ra-ok='), `HTTP ${alphaOk.status}`);
+dispose9();
+
+// ---- 场景 10：没凭据时的 401 页面（原来直接把 DSH 那句英文甩给用户）----
+const noCredFile = path.join(os.tmpdir(), `ra-nocred-${Date.now()}.txt`);
+const dispose10 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: noCredFile,
+  // 上游只有在带票时才放行：这里模拟「浏览器带了 DSH 认不出的 cookie」
+});
+await new Promise((r) => setTimeout(r, 400));
+const noCredPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(noCredFile, 'utf8'))?.[1] ?? 0);
+
+// 一张作废的票、浏览器里也没有任何 DSH cookie → 判不出身份 → 原样透传 → 上游 401
+// （带 dsh-auth- cookie 的情况属于「已授权但 cookie 失效」，那条路是自动补票，见场景 5d）
+const staleTicket = await call(noCredPort, {
+  path: '/?token=STALE',
+  headers: { accept: 'text/html' },
+});
+check(
+  '作废的票：页面导航不再出现 DSH 那句英文',
+  !staleTicket.body.includes('dsh web authentication required'),
+  staleTicket.body.slice(0, 60),
+);
+check('作废的票：给出中文说明页', staleTicket.body.includes('这次没能通过校验'));
+check(
+  '作废的票：说明页里绝不带 token',
+  !/token=[A-Za-z0-9]/.test(staleTicket.body),
+  (staleTicket.body.match(/token=\S*/) ?? ['(无)'])[0],
+);
+check('作废的票：状态码仍然是 401（不假装通过）', staleTicket.status === 401, `HTTP ${staleTicket.status}`);
+check('作废的票：说的是「票已作废」而不是「没带票」', staleTicket.body.includes('已经作废'));
+
+// 完全没带票
+const noCredTicket = await call(noCredPort, { headers: { accept: 'text/html' } });
+check('完全没带票：也回中文说明页', noCredTicket.status === 401 && noCredTicket.body.includes('这次没能通过校验'));
+
+// 子资源（非导航）的 401 必须保持原样，别把机器可读的错误换成 HTML
+const subResource = await call(noCredPort, {
+  path: '/api/thing?token=STALE',
+  headers: { accept: 'application/json' },
+});
+check(
+  '非导航请求的 401 原样透传（不动 RPC/子资源的语义）',
+  subResource.status === 401 && subResource.body.includes('dsh web authentication required'),
+  `HTTP ${subResource.status} ${subResource.body.slice(0, 40)}`,
+);
+dispose10();
+
+// ××× 设了解锁密码但凭据失效 → 回解锁页重新输，而不是英文 401
+const reUnlockFile = path.join(os.tmpdir(), `ra-reunlock-${Date.now()}.txt`);
+const dispose11 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: reUnlockFile,
+  accessCode: '864209',
+});
+await new Promise((r) => setTimeout(r, 400));
+const reUnlockPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(reUnlockFile, 'utf8'))?.[1] ?? 0);
+// 浏览器里有一张「本插件发过的」放行 cookie（值为过期的那张）→ authorize 认它，
+// 于是直接进上游；上游照着「cookie + 没票」回 401 → 插件必须回到解锁页。
+const staleUnlock = await call(reUnlockPort, {
+  headers: { accept: 'text/html', cookie: 'dsh-ra-ok=expired-value' },
+});
+check(
+  '解锁 cookie 过期：回解锁页重新输密码（不是英文 401）',
+  staleUnlock.status === 200 && staleUnlock.body.includes('/__remote_access__/unlock'),
+  `HTTP ${staleUnlock.status}`,
+);
+dispose11();
+
+// ---- 场景 11：上游「慢」不再被默认 5 秒空闲超时掐断（视频/大文件/壁纸都栽在这上面）----
+//
+// 这个用例故意要 5 秒多：Node ≥19 的 http.globalAgent 自带 { keepAlive: true, timeout: 5000 }，
+// 只有真的等过 5 秒才能证明「我们没继承那个超时」。Node 18 上它恒过（没有那个默认值）。
+const slowPath = `/${Date.now()}-slow`;
+
+const slowUpstream = http.createServer((req, res) => {
+  if (req.url === slowPath) {
+    // 5.3 秒后才给响应头：默认 5s 空闲超时会在第 5 秒把请求 destroy 掉
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('slow-ok');
+    }, 5300);
+    return;
+  }
+  res.writeHead(404).end();
+});
+await new Promise((r) => slowUpstream.listen(0, '127.0.0.1', r));
+const slowPort = slowUpstream.address().port;
+const slowFile = path.join(os.tmpdir(), `ra-slow-${Date.now()}.txt`);
+const dispose12 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${slowPort}`,
+  urlFile: slowFile,
+  timeoutMs: 0,
+});
+await new Promise((r) => setTimeout(r, 400));
+const slowProxyPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(slowFile, 'utf8'))?.[1] ?? 0);
+const slowStart = Date.now();
+const slow = await call(slowProxyPort, { path: slowPath });
+const slowMs = Date.now() - slowStart;
+check(
+  'timeoutMs=0 时不会继承 agent 的 5 秒空闲超时（慢上游照常拿到完整响应）',
+  slow.status === 200 && slow.body === 'slow-ok',
+  `HTTP ${slow.status} body=${JSON.stringify(slow.body)} 用时 ${slowMs}ms`,
+);
+dispose12();
+slowUpstream.close();
+
+// 显式设了超时也只是「等响应头」：头一到就交棒，正文慢慢来也不许掐
+const headPath = `/${Date.now()}-head`;
+const headUpstream = http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'text/plain' });
+  res.write('head-');
+  setTimeout(() => res.end('tail'), 1200);
+});
+await new Promise((r) => headUpstream.listen(0, '127.0.0.1', r));
+const headPort = headUpstream.address().port;
+const headFile = path.join(os.tmpdir(), `ra-head-${Date.now()}.txt`);
+const dispose13 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${headPort}`,
+  urlFile: headFile,
+  timeoutMs: 500, // 头立刻就到；正文 1.2 秒后才完 —— 超时必须只作用于「等头」
+});
+await new Promise((r) => setTimeout(r, 400));
+const headProxyPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(headFile, 'utf8'))?.[1] ?? 0);
+const headRes = await call(headProxyPort, { path: '/anything' });
+check(
+  'timeoutMs 只作用于「等响应头」：正文慢于超时也不会被掐断',
+  headRes.status === 200 && headRes.body === 'head-tail',
+  `HTTP ${headRes.status} body=${JSON.stringify(headRes.body)}`,
+);
+dispose13();
+headUpstream.close();
+
+// ---- 场景 12：上游半路断掉时，下游不能一直挂着 ----
+/**
+ * 「只求有结果」的调用：像真浏览器一样把 end / aborted / close / error 都当成结束。
+ * 用来证明「代理端没有悬挂」：真正的问题是 res 既不 end 也不 destroy，
+ * 那时这个函数会一直不 resolve（外层 Promise.race 判它悬挂）。
+ */
+const callUntilClose = (port, { path: p = '/', headers = {} } = {}) =>
+  new Promise((resolve) => {
+    let done = false;
+    const finish = (why, status, body) => {
+      if (done) return;
+      done = true;
+      resolve({ why, status, body });
+    };
+    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: p, headers }, (res) => {
+      let d = '';
+      res.on('data', (c) => (d += c));
+      res.on('end', () => finish('end', res.statusCode, d));
+      res.on('aborted', () => finish('aborted', res.statusCode, d));
+      res.on('close', () => finish('close', res.statusCode, d));
+      res.on('error', (e) => finish('res-error:' + e.code, res.statusCode, d));
+    });
+    req.on('error', (e) => finish('req-error:' + e.code, 0, ''));
+    req.end();
+  });
+
+const brokenUpstream = http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '100' });
+  res.write('partial');
+  setTimeout(() => res.socket?.destroy(), 60);
+});
+await new Promise((r) => brokenUpstream.listen(0, '127.0.0.1', r));
+const brokenPort = brokenUpstream.address().port;
+const brokenFile = path.join(os.tmpdir(), `ra-broken-${Date.now()}.txt`);
+const dispose14 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${brokenPort}`,
+  urlFile: brokenFile,
+});
+await new Promise((r) => setTimeout(r, 400));
+const brokenProxyPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(brokenFile, 'utf8'))?.[1] ?? 0);
+const brokenRes = await Promise.race([
+  callUntilClose(brokenProxyPort, { path: '/x' }).then((r) => ({ ...r, hung: false })),
+  new Promise((r) => setTimeout(() => r({ why: 'timeout', status: 0, body: '', hung: true }), 3000)),
+]);
+check(
+  '上游半路断掉：代理端不悬挂（下游被一起收掉，3 秒内结束）',
+  brokenRes.hung !== true,
+  brokenRes.hung ? '客户端还在等（悬挂）' : `结束方式=${brokenRes.why} status=${brokenRes.status} body=${JSON.stringify(brokenRes.body)}`,
+);
+dispose14();
+brokenUpstream.close();
+
+authUpstream.close();
+
+for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile]) {
+  try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
+}
 
 console.log(results.join('\n'));
 const failed = results.filter((r) => r.startsWith('FAIL')).length;
