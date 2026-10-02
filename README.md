@@ -51,6 +51,20 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/i
 之后改参数都是热重载。改代码分两种：`client.js`（浏览器半区）**刷新页面**就会重新拉取；
 `index.js`（宿主半区，含**新增配置字段**）要**重启一次 DSH** 才会加载。
 
+## 安卓 App（APK，可选）
+
+不想在手机浏览器里手打地址的话，可以用配套的外壳 App：
+
+**[下载 dsh-remote-1.0.0.apk](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/download/v1.0.0-android/dsh-remote-1.0.0.apk)**
+（[Release 页](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/tag/v1.0.0-android) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+
+- **首屏就是地址页**：只填 `IP或域名:端口`（**不用写协议**，例 `100.64.0.3:19388`），HTTPS 一个勾决定；
+- 连不上 / 填错 / 电脑没开时**自动退回地址页**，顶栏也永远有「设置」——**断网也改得回来**；
+- 网页仍是电脑上那份 DSH：手机布局、`远程UI布局`、`UI 设置` 全由本插件的配置决定；
+- 只申请 `INTERNET` / `ACCESS_NETWORK_STATE`，自签（`CN=DSH Remote`），同签名的后续版本可直接覆盖安装。
+
+装的时候要允许「安装未知应用」。电脑那端仍然是本插件在监听（默认 `19388`），App 只是把网页装进壳里。
+
 ## 使用
 
 ### 方式一：设访问密码（推荐，手机不用复制长串）
