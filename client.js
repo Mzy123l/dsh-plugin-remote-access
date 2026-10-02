@@ -575,10 +575,12 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         // 「左侧栏覆盖」是壁纸引擎自己的开关：它做的就是给 body 挂这个属性，让原生侧栏跟着玻璃配方走
         // （不那么透出壁纸）。手机端直接借用它 —— 只打在**远程页面**上，所以本机观感不受影响；
         // 没装壁纸插件时这行什么也不做，上面 CSS 里那份实底兜底仍然生效。
-        // 这里**曾经**强行把壁纸引擎的「侧栏液态玻璃」(body[data-we-sidebar-glass]) 打开 —— 那正是「左侧透明」的来源：
-        // 插件的语义是「开了才透明」（它自己的 settings-schema 写明：该开关关闭后侧栏恢复原生外观，不透明/不模糊）。
-        // 现在改为**完全不碰**：让它跟随插件自己的设置（那个设置本来就会同步过来；插件没装时属性也不存在），
-        // 于是本机与远程看到的是同一套侧栏外观；而 DSH 原生侧栏本身就是不透明的（实测 rgb(249,250,251)）。
+        // 手机上把壁纸引擎的「侧栏液态玻璃」总开关**摘掉**（只摘属性、不动任何元素样式）。
+        // 那个开关的语义是「开了才透明」（插件 settings-schema 原话：关闭后侧栏恢复原生外观，不透明/不模糊），
+        // 而展开后的工作区抽屉在手机上整块盖在正文上，透明会让两层文字糊在一起。
+        // 为什么不用 background 兜底：给 [data-ra-sidebar] 加 !important 实底正是「左侧栏整条不绘制」的原因（已删）。
+        // 本机不受影响 —— 这段只在远程页面跑；插件若在别处又设回来，syncDom 下一次会再摘掉。
+        try { document.body.removeAttribute('data-we-sidebar-glass'); } catch { /* 忽略 */ }
         const frame = document.querySelector('[data-slot="root"] > *');
         if (!frame) return;
         frame.setAttribute('data-ra-frame', '');
