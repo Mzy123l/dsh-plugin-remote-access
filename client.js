@@ -151,11 +151,14 @@ html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
   /*strong*/
   position: absolute !important;
   top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
-  /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 88vw 但右边仍留出可见的正文 */
-  width: min(88vw, 340px) !important;
+  /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 340px（约 88vw）但右边仍留出可见的正文。
+     这里刻意用普通 px 而不是 min(88vw, 340px)：真机上抽屉这一层只要带上「大模糊阴影 + min() 宽度 + 独立层叠」
+     的组合，整块视图就会停止呈现（DOM 全对、画面不更新，拖一下视图宽度才恢复）——
+     已用声明级开关逐条验证：单独去掉 box-shadow / 宽度里的 min() / z-index 任一条都能恢复。
+     所以这一层保持「便宜」：普通宽度 + 1px 描边，不要大模糊阴影。 */
+  width: 340px !important;
   z-index: 70 !important;
   border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3)) !important;
-  box-shadow: 0 18px 48px rgba(0,0,0,0.45) !important;
   padding-left: env(safe-area-inset-left, 0px) !important;
   /* 抽屉里滑到底不要带动后面的正文一起滚 */
   overscroll-behavior: contain;
@@ -325,9 +328,23 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        * 真机上出现过「DOM 与计算样式全对、画面却不更新，拖一下宽度才显示」——视图/合成层面的问题，
        * 而关掉这些增强块页面就正常呈现。所以默认只注入保守块，增强由配置或 URL 显式开启。
        */
-      function phoneCss(strong, skip) {
+      /** 把某块里「包含关键字的那条声明」删掉（声明级二分用，不动选择器与其余声明） */
+      function cutDeclarations(block, cuts) {
+        const brace = block.indexOf('{');
+        if (brace < 0) return block;
+        const head = block.slice(0, brace + 1);
+        const body = block
+          .slice(brace + 1)
+          .split(';')
+          .filter((piece) => piece.trim().length > 0 && !cuts.some((word) => word && piece.includes(word)))
+          .join(';');
+        return body.trim().length > 0 ? head + body : head;
+      }
+
+      function phoneCss(strong, skip, cut) {
         const skips = skip || [];
-        if (strong && skips.length === 0) return PHONE_CSS.replace(/\/\*strong\*\//g, '');
+        const cuts = cut || [];
+        if (strong && skips.length === 0 && cuts.length === 0) return PHONE_CSS.replace(/\/\*strong\*\//g, '');
         return PHONE_CSS.split('}')
           .map((block) => block.trim())
           .filter((block) => {
@@ -335,6 +352,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
             if (!strong && block.includes('/*strong*/')) return false;
             return !skips.some((word) => word && block.includes(word));
           })
+          .map((block) => (cuts.length === 0 ? block : cutDeclarations(block, cuts)))
           .map((block) => block + '}')
           .join('\n');
       }
@@ -348,10 +366,10 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         }
       }
 
-      /** 排障用：?skip=z-index,grid-template 可在增强模式里按关键字丢掉对应规则块 */
-      function raSkip() {
+      /** 排障用：从 URL 取一个逗号分隔的关键字列表 */
+      function raWords(name) {
         try {
-          return (new URLSearchParams(window.location.search).get('skip') || '')
+          return (new URLSearchParams(window.location.search).get(name) || '')
             .split(',')
             .map((word) => word.trim())
             .filter(Boolean);
@@ -360,14 +378,22 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         }
       }
 
-      function injectStyle(strong, skip) {
+      /** ?skip=z-index,grid-template 丢掉整个规则块；?cut=box-shadow,inset 只删块内那几条声明 */
+      function raSkip() {
+        return raWords('skip');
+      }
+      function raCut() {
+        return raWords('cut');
+      }
+
+      function injectStyle(strong, skip, cut) {
         let tag = document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`);
         if (!tag) {
           tag = document.createElement('style');
           tag.dataset.raLayoutCss = LAYOUT_STYLE_ID;
           document.head.appendChild(tag);
         }
-        tag.textContent = phoneCss(strong, skip);
+        tag.textContent = phoneCss(strong, skip, cut);
       }
 
       /** 从某个槽位元素往上找到「frame 的直接子元素」（也就是那一列），与类名无关 */
@@ -586,7 +612,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const strong =
           layout === 'phone' && (override === 'strong' || (override !== 'safe' && mode === 'phone-strong'));
         const skip = layout === 'phone' ? raSkip() : [];
-        const signature = `${strong ? `${layout}:strong` : layout}${skip.length ? `|${skip.join(',')}` : ''}`;
+        const cut = layout === 'phone' ? raCut() : [];
+        const suffix = `${skip.length ? `|${skip.join(',')}` : ''}${cut.length ? `|cut:${cut.join(',')}` : ''}`;
+        const signature = `${strong ? `${layout}:strong` : layout}${suffix}`;
         if (signature === applied) {
           syncDom();
           return;
@@ -595,7 +623,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         document.documentElement.setAttribute('data-ra-layout', layout);
         if (strong) document.documentElement.setAttribute('data-ra-strong', '');
         else document.documentElement.removeAttribute('data-ra-strong');
-        if (layout === 'phone') injectStyle(strong, skip);
+        if (layout === 'phone') injectStyle(strong, skip, cut);
         syncDom();
         // 首次进入手机布局后踢一次重绘：这一步正好是「打开页面就是空白」的现场
         if (layout === 'phone') nudgeRepaint();
