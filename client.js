@@ -173,6 +173,10 @@ html[data-ra-layout="phone"] [data-ra-right] {
   z-index: 64 !important; /*strong*/
 }
 html[data-ra-layout="phone"] [data-sidebar-right-panel] {
+  /*strong*/
+  /* 这一组（max-width / overflow-x / 安全区内边距 / overscroll）会参与右栏全屏浮层的宽度计算：
+     框架自己的全屏做法是 inline width:0 + left/right 负值 + width:auto，我这些 !important 一叠上去
+     就可能把它压成 0 宽 —— 正文空白、只看得见输入框与底栏。保守档里先完全不动右栏。 */
   max-width: 100vw !important;
   overflow-x: hidden !important;
   padding-left: env(safe-area-inset-left, 0px) !important;
