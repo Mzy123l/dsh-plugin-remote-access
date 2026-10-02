@@ -463,24 +463,52 @@ const UNLOCK_COOKIE = 'dsh-ra-ok';
 function unlockPageHtml(hint) {
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>远程访问</title><style>
-:root{color-scheme:light dark}
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#e8eaed;
-font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{width:min(92vw,320px);padding:24px;border-radius:14px;background:#171a21;box-shadow:0 8px 32px #0006;text-align:center}
-h1{margin:0 0 6px;font-size:18px;font-weight:600}
-p{margin:0 0 16px;font-size:13px;opacity:.7}
-input{width:100%;box-sizing:border-box;padding:12px;font:inherit;font-size:22px;letter-spacing:.3em;text-align:center;
-border-radius:10px;border:1px solid #2c313c;background:#0f1115;color:inherit}
-button{margin-top:12px;width:100%;padding:12px;font:inherit;font-weight:600;border:0;border-radius:10px;background:#3b82f6;color:#fff}
-.err{margin-top:12px;font-size:13px;color:#f87171;min-height:1.2em}
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>DSH 远程访问</title><style>
+:root{color-scheme:light dark;--bg:#f2f5fb;--card:#fff;--fg:#0f172a;--muted:#64748b;--line:#e2e8f0;--field:#f8fafc;
+--accent:#2563eb;--accent-fg:#fff;--err:#dc2626;--shadow:0 18px 48px rgba(15,23,42,.14)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0d12;--card:#141821;--fg:#e8eaed;--muted:#9aa4b2;--line:#242a36;
+--field:#0f131a;--accent:#3b82f6;--err:#f87171;--shadow:0 18px 48px rgba(0,0,0,.45)}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px 20px calc(24px + env(safe-area-inset-bottom));
+background:radial-gradient(1100px 520px at 50% -12%,rgba(59,130,246,.20),transparent 62%),var(--bg);color:var(--fg);
+font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-text-size-adjust:100%}
+main{width:min(100%,380px)}
+.brand{display:flex;align-items:center;gap:10px;justify-content:center;margin:0 0 16px}
+.mark{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;
+background:linear-gradient(140deg,#60a5fa,#1d4ed8);box-shadow:0 8px 20px rgba(37,99,235,.35)}
+.brand b{font-size:15px;font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:var(--shadow)}
+h1{margin:0 0 4px;font-size:19px;font-weight:650;letter-spacing:.01em}
+p.sub{margin:0 0 18px;font-size:13px;color:var(--muted)}
+label{display:block;margin:0 0 6px;font-size:12px;color:var(--muted)}
+input{width:100%;padding:13px 14px;font:inherit;font-size:20px;letter-spacing:.22em;text-align:center;color:inherit;
+border:1px solid var(--line);border-radius:12px;background:var(--field);outline:none;transition:border-color .15s,box-shadow .15s}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+button{margin:14px 0 0;width:100%;padding:13px;font:inherit;font-weight:600;color:var(--accent-fg);background:var(--accent);
+border:0;border-radius:12px;cursor:pointer;transition:filter .15s,transform .05s}
+button:hover{filter:brightness(1.06)}
+button:active{transform:translateY(1px)}
+button[disabled]{opacity:.7;cursor:default}
+.err{margin:12px 0 0;min-height:1.2em;font-size:13px;color:var(--err)}
+.foot{margin:14px 0 0;font-size:12px;line-height:1.6;color:var(--muted);text-align:center}
 </style></head><body><main>
-<h1>远程访问</h1><p>请输入访问密码</p>
+<div class="brand"><span class="mark">DSH</span><b>远程访问</b></div>
+<div class="card">
+<h1>输入访问密码</h1>
+<p class="sub">这台设备需要解锁一次，之后 30 天内免密。</p>
 <form method="post" action="${UNLOCK_PATH}" autocomplete="off">
-<input name="code" type="password" inputmode="text" maxlength="12" autofocus required>
-<button type="submit">进入</button></form>
+<label for="code">访问密码</label>
+<input id="code" name="code" type="password" inputmode="text" maxlength="12" autofocus required
+ autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+<button type="submit" id="go">进入</button>
+</form>
 <div class="err">${hint}</div>
+</div>
+<div class="foot">密码在电脑上「设置 → 远程访问 → 访问密码」里；输错一次这台设备会被临时挡住</div>
+<script>var f=document.querySelector('form');f.addEventListener('submit',function(){var b=document.getElementById('go');
+b.disabled=true;b.textContent='验证中…';});document.getElementById('code').focus();</script>
 </main></body></html>`;
 }
 
