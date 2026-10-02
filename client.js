@@ -154,6 +154,12 @@ html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
 
 /* 右栏：DSH 自己在 viewportWidth < 768 时就选了 autoFullscreen（无轨道 + 全屏浮层），
    所以这里不去抢它的布局，只做收尾 —— 安全区、不横向溢出、以及把手机上没意义的控件藏掉。 */
+html[data-ra-layout="phone"] [data-ra-right] {
+  /* 抬到正文之上：底部统计、输入框、对话/轨迹页签各自都有层叠上下文，
+     不抬的话它们会画在右栏这个浮层上面（真机截图里就是「这一页冒出了输入框和底部 info」）。 */
+  position: relative !important;
+  z-index: 64 !important;
+}
 html[data-ra-layout="phone"] [data-sidebar-right-panel] {
   max-width: 100vw !important;
   overflow-x: hidden !important;
@@ -161,6 +167,23 @@ html[data-ra-layout="phone"] [data-sidebar-right-panel] {
   padding-right: env(safe-area-inset-right, 0px) !important;
   padding-bottom: env(safe-area-inset-bottom, 0px) !important;
   overscroll-behavior: contain;
+  z-index: 65 !important;
+}
+
+/* 手机上这两个浮层必须是**不透明**的。
+   DSH 的默认表面是「玻璃」—— 有意让壁纸透出来；桌面三栏时很好看，但手机上它俩整个盖在正文上，
+   于是两层文字糊在一起（左抽屉看起来像没画背景，右栏把底下的输入框/底部统计也透出来）。
+   这里给兜底的实底 + 强雾化；装了壁纸插件时脚本还会借用它自己的「左侧栏覆盖」玻璃配方。 */
+html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar],
+html[data-ra-layout="phone"] [data-sidebar-right-panel] {
+  background: var(--dsw-alias-bg-base, #101a36) !important;
+  -webkit-backdrop-filter: blur(22px) saturate(1.35) !important;
+  backdrop-filter: blur(22px) saturate(1.35) !important;
+}
+
+/* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
+html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] {
+  grid-template-columns: 48px minmax(0px, 1fr) 0px !important;
 }
 /* 「分栏」在 390px 上没有意义，「退出全屏」更是不可能（宽度决定它必须全屏）。
    由脚本按 aria-label 精确打上这个标记再隐藏，避免拿类名去猜。 */
@@ -417,10 +440,16 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const phone = document.documentElement.getAttribute('data-ra-layout') === 'phone';
         if (!phone) {
           document.documentElement.removeAttribute('data-ra-drawer');
+          // 退出手机布局时把借来的玻璃属性还回去，别把本机的原生侧栏观感改了
+          try { document.body.removeAttribute('data-we-sidebar-glass'); } catch { /* 忽略 */ }
           const scrimOff = document.getElementById(SCRIM_ID);
           if (scrimOff) scrimOff.removeAttribute('data-open');
           return;
         }
+        // 「左侧栏覆盖」是壁纸引擎自己的开关：它做的就是给 body 挂这个属性，让原生侧栏跟着玻璃配方走
+        // （不那么透出壁纸）。手机端直接借用它 —— 只打在**远程页面**上，所以本机观感不受影响；
+        // 没装壁纸插件时这行什么也不做，上面 CSS 里那份实底兜底仍然生效。
+        try { document.body.setAttribute('data-we-sidebar-glass', 'on'); } catch { /* 忽略 */ }
         const frame = document.querySelector('[data-slot="root"] > *');
         if (!frame) return;
         frame.setAttribute('data-ra-frame', '');
@@ -539,15 +568,21 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       // ---------------------------------------------------------------- 边缘滑动手势
       //
-      // 手机上左抽屉与右栏都是覆盖整屏的浮层，给它们配一对边缘滑动（与系统「侧滑返回」同一套直觉）：
-      //   左边缘向右滑 → 开左抽屉；抽屉开着时向左滑 → 收左抽屉
-      //   右边缘向左滑 → 开右栏；  右栏开着时向右滑 → 收右栏
+      // 手机上左抽屉与右栏都是覆盖整屏的浮层，给它们配一对滑动（与系统「侧滑返回」同一套直觉）：
+      //   向左滑 → 开右栏；  右栏开着时向右滑 → 收右栏
+      //   向右滑 → 开左抽屉；抽屉开着时向左滑 → 收左抽屉
       //
-      // 两条自制规则，都是为了不跟正文的纵向滚动打架：
-      //   1. 只有「明显横向」的手势才接管（|dx| > |dy| * 1.25，且起手位移 > 10px）；
-      //   2. 只有判定为横向之后才 preventDefault —— 纵向手势完全放给浏览器。
+      // 起手位置只影响「门槛」：贴边起手（≤28px）算明确意图，56px 就够了；
+      // 从正文中间起手要更严格（72px + 更陡的横向比例），免得把正文里的横向滚动/选择手势吃掉。
+      // 三条自制规则都是为了不跟正文打架：
+      //   1. 只有「明显横向」才接管（|dx| > |dy| * 1.25，贴边起手只需 10px 位移即可判定）；
+      //   2. 只有判定为横向之后才 preventDefault —— 纵向手势完全放给浏览器；
+      //   3. 正文中间起手时横向比例放到 1.8 倍，宁可少触发也不误伤。
       const EDGE_ZONE = 28;
       const MIN_SWIPE = 56;
+      const MIN_SWIPE_MID = 72;
+      const RATIO_EDGE = 1.25;
+      const RATIO_MID = 1.8;
       let swipe = null;
       const phoneNow = () => document.documentElement.getAttribute('data-ra-layout') === 'phone';
 
@@ -569,9 +604,12 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const point = e.touches[0];
         const dx = point.clientX - swipe.x;
         const dy = point.clientY - swipe.y;
+        const fromEdge = swipe.fromLeft || swipe.fromRight;
         if (!swipe.horizontal) {
-          if (Math.abs(dx) < 10) return;
-          if (Math.abs(dx) <= Math.abs(dy) * 1.25) { swipe = null; return; } // 纵向：交还给页面滚动
+          const need = fromEdge ? 10 : 16;
+          if (Math.abs(dx) < need) return;
+          const ratio = fromEdge ? RATIO_EDGE : RATIO_MID;
+          if (Math.abs(dx) <= Math.abs(dy) * ratio) { swipe = null; return; } // 纵向/斜向：交还给页面
           swipe.horizontal = true;
         }
         if (e.cancelable) e.preventDefault(); // 已确认横向：别让浏览器同时翻页/前进后退
@@ -584,18 +622,20 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const point = e.changedTouches?.[0];
         if (!point) return;
         const dx = point.clientX - started.x;
-        if (Math.abs(dx) < MIN_SWIPE) return;
+        const fromEdge = started.fromLeft || started.fromRight;
+        const need = fromEdge ? MIN_SWIPE : MIN_SWIPE_MID;
+        if (Math.abs(dx) < need) return;
         const drawer = document.documentElement.hasAttribute('data-ra-drawer');
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
-          // 向右滑：收起右栏优先（它盖在最上面），否则从左边缘打开抽屉
+          // 向右滑：收起右栏优先（它盖在最上面），否则打开左抽屉
           if (rightOpen) { clickLabel('收起右侧边栏'); return; }
-          if (!drawer && started.fromLeft) clickLabel('打开侧边栏');
+          if (!drawer) clickLabel('打开侧边栏');
           return;
         }
-        // 向左滑：收起抽屉优先，否则从右边缘打开右栏
+        // 向左滑：收起抽屉优先，否则打开右栏
         if (drawer) { clickLabel('收起侧边栏'); return; }
-        if (!rightOpen && started.fromRight) clickLabel('打开右侧边栏');
+        if (!rightOpen) clickLabel('打开右侧边栏');
       }
 
       try {
