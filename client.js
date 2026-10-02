@@ -52,6 +52,59 @@ window.__ModuleLoader__.load({
           { value: 'auto', label: '自动' },
         ],
       },
+      // 「UI 设置」一组（group: 'ui'）：官方「通用设置」里的五项界面偏好，只作用于远程页面。
+      // 为什么要有这一份副本：官方设置页在远程页面上是内存态（读写都到不了宿主），手机端改了刷新就还原；
+      // 这里存的是同一批值，由 startUiSettingsController 在每次打开远程页面时重新套到页面上。
+      // 'default' 一律 = 出厂值（跟着官方默认走），所以默认状态下这一组不做任何事。
+      {
+        key: 'remoteTheme',
+        type: 'select',
+        group: 'ui',
+        label: '外观',
+        options: [
+          { value: 'default', label: '出厂值' },
+          // 顺序照官方那行来（THEME_PREFERENCES = light / dark / system），我们不要自作主张换个先后
+          { value: 'light', label: '浅色' },
+          { value: 'dark', label: '深色' },
+          { value: 'system', label: '跟随系统' },
+        ],
+      },
+      { key: 'remoteFontSize', type: 'number', group: 'ui', label: '字号大小', placeholder: '10-22，0=出厂值' },
+      {
+        key: 'remoteTranscriptView',
+        type: 'select',
+        group: 'ui',
+        label: '工作步骤展示',
+        options: [
+          { value: 'default', label: '出厂值' },
+          { value: 'compact', label: '简洁' },
+          { value: 'standard', label: '标准' },
+          { value: 'detailed', label: '详细' },
+          { value: 'verbose', label: '完全展开' },
+        ],
+      },
+      {
+        key: 'remoteDeveloperTools',
+        type: 'select',
+        group: 'ui',
+        label: '显示代码工作视图',
+        options: [
+          { value: 'default', label: '出厂值' },
+          { value: 'on', label: '开启' },
+          { value: 'off', label: '关闭' },
+        ],
+      },
+      {
+        key: 'remotePerformanceUsage',
+        type: 'select',
+        group: 'ui',
+        label: '性能与用量',
+        options: [
+          { value: 'default', label: '出厂值' },
+          { value: 'compact', label: '简洁' },
+          { value: 'detailed', label: '详细' },
+        ],
+      },
     ];
 
     const DEFAULTS = {
@@ -63,6 +116,12 @@ window.__ModuleLoader__.load({
       logLevel: 'info',
       accessCode: '',
       remoteLayout: 'auto',
+
+      remoteTheme: 'default',
+      remoteFontSize: 0,
+      remoteTranscriptView: 'default',
+      remoteDeveloperTools: 'default',
+      remotePerformanceUsage: 'default',
     };
 
     /** 访问密码的规则，必须与 index.js 的 normalizeAccessCode 一致（check-config-schema 之外的人工约定） */
@@ -128,30 +187,93 @@ window.__ModuleLoader__.load({
      * 拿不到这个属性、也就永远匹配不上任何一条规则（这就是「不动本地」的实现方式）。
      */
     const PHONE_CSS = `
-html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { display: none !important; }
+/* 手机上「展开后的工作区抽屉」必须不透明。
+   透明来自壁纸引擎的「侧栏液态玻璃」——它自己的旋钮是 --we-sidebar-tint / --we-sidebar-alpha
+   （设置项：侧栏玻璃颜色权重 / 侧栏透明度），面板底色由
+   color-mix(… var(--we-sidebar-color) var(--we-sidebar-tint, 20%), transparent …) 算出来。
+   而手机上展开的抽屉整块盖在正文上，半透明会让两层文字糊在一起。
+   这里只在本页把这两个变量拉满：**只作用于手机档，本机一个像素都不动**，也不去覆盖元素表面
+   （之前那条 background !important 覆盖 DSH 玻璃表面，会让左侧栏整列不再绘制，已删）。 */
+html[data-ra-layout="phone"] {
+  --we-sidebar-tint: 100%;
+  --we-sidebar-alpha: 1;
+}
+html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { /*strong*/ display: none !important; }
 html[data-ra-layout="phone"] [data-ra-center],
 html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* 关键：手机布局下**关掉框架自己的列宽过渡**。
+   框架带着 .BynINW_frame[data-animating] 上的 transition: grid-template-columns …，而 grid-template-columns
+   是可动画的布局属性；我用 !important 改写轨道值（48px / 0px）时又挂着这条过渡，真机上出现过
+   「DOM 与计算值都对、画面却不重绘，直到手动拖一下宽度才刷新」的卡顿 —— 关掉它就没有这个组合了。
+   反正手机端的轨道值由我定，过渡本身也没有意义。 */
+html[data-ra-layout="phone"] [data-ra-frame] { transition: none !important; }
 
 /* 侧栏：收起时保持 56px 图标栏；展开时改成「抽屉」压在正文上 —— 而不是把正文挤成 110px 一条 */
 /* 三列显式钉住列号：抽屉模式把侧栏改成 position:fixed 后就脱离网格了，
    自动排位会把「正文」顶到第 1 条轨道（0px）上，正文会直接消失。 */
-html[data-ra-layout="phone"] [data-ra-sidebar] { grid-column: 1 !important; }
-html[data-ra-layout="phone"] [data-ra-center] { grid-column: 2 !important; }
-html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; }
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; }
+html[data-ra-layout="phone"] [data-ra-sidebar] { grid-column: 1 !important; /*strong*/ }
+html[data-ra-layout="phone"] [data-ra-center] { grid-column: 2 !important; /*strong*/ }
+html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; /*strong*/ }
+html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; /*strong*/ }
 html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
-  position: fixed !important;
+  /*strong*/
+  position: absolute !important;
   top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
-  width: min(86vw, 320px) !important;
+  /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 340px（约 88vw）但右边仍留出可见的正文。
+     这里刻意用普通 px 而不是 min(88vw, 340px)：真机上抽屉这一层只要带上「大模糊阴影 + min() 宽度 + 独立层叠」
+     的组合，整块视图就会停止呈现（DOM 全对、画面不更新，拖一下视图宽度才恢复）——
+     已用声明级开关逐条验证：单独去掉 box-shadow / 宽度里的 min() / z-index 任一条都能恢复。
+     所以这一层保持「便宜」：普通宽度 + 1px 描边，不要大模糊阴影。 */
+  width: 340px !important;
   z-index: 70 !important;
   border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3)) !important;
-  box-shadow: 0 18px 48px rgba(0,0,0,0.45) !important;
   padding-left: env(safe-area-inset-left, 0px) !important;
+  /* 抽屉里滑到底不要带动后面的正文一起滚 */
+  overscroll-behavior: contain;
 }
 
+/* 右栏：DSH 自己在 viewportWidth < 768 时就选了 autoFullscreen（无轨道 + 全屏浮层），
+   所以这里不去抢它的布局，只做收尾 —— 安全区、不横向溢出、以及把手机上没意义的控件藏掉。 */
+html[data-ra-layout="phone"] [data-ra-right] {
+  /* 抬到正文之上：底部统计、输入框、对话/轨迹页签各自都有层叠上下文，
+     不抬的话它们会画在右栏这个浮层上面（真机截图里就是「这一页冒出了输入框和底部 info」）。 */
+  position: relative !important; /*strong*/
+  z-index: 64 !important; /*strong*/
+}
+html[data-ra-layout="phone"] [data-sidebar-right-panel] {
+  /*strong*/
+  /* 这一组（max-width / overflow-x / 安全区内边距 / overscroll）会参与右栏全屏浮层的宽度计算：
+     框架自己的全屏做法是 inline width:0 + left/right 负值 + width:auto，我这些 !important 一叠上去
+     就可能把它压成 0 宽 —— 正文空白、只看得见输入框与底栏。保守档里先完全不动右栏。 */
+  max-width: 100vw !important;
+  overflow-x: hidden !important;
+  padding-left: env(safe-area-inset-left, 0px) !important;
+  padding-right: env(safe-area-inset-right, 0px) !important;
+  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+  overscroll-behavior: contain;
+}
+/* 单独一条：只把「抬到正文之上」这件事放进增强模式，实底那条留在保守模式 */
+html[data-ra-layout="phone"] [data-sidebar-right-panel] { z-index: 65 !important; /*strong*/ }
+
+/* 这里曾经给这两个浮层加「不透明实底 + 强雾化」来治「太透」。
+   **已删除**：真机上复现到，这条 background（!important 覆盖 DSH 的玻璃表面）会让左侧栏整条不再绘制 ——
+   DOM 里它在（0,0 56x950），像素没有；只要摘掉这一条就恢复。排查协议：清本地标记 → 重载（弹窗出现）→
+   点掉弹窗 → 截图；摘别的规则都不解决，只有摘这条解决。
+   观感那件事现在不再由我插手：不碰壁纸引擎的任何外观开关 —— 原先我强行打开它的「侧栏液态玻璃」正是「左侧透明」的来源，
+   壁纸插件不在时就用 DSH 的默认表面 —— 宁可少一点好看，也不能让页面画不出来。 */
+
+/* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
+html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
+  grid-template-columns: 48px minmax(0px, 1fr) 0px !important;
+}
+/* 「分栏」在 390px 上没有意义，「退出全屏」更是不可能（宽度决定它必须全屏）。
+   由脚本按 aria-label 精确打上这个标记再隐藏，避免拿类名去猜。 */
+html[data-ra-layout="phone"] [data-ra-phone-hidden] { display: none !important; }
+
 #dsh-ra-scrim { display: none; }
-html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] {
-  display: block; position: fixed; inset: 0; z-index: 60;
+html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] { /*strong*/
+  display: block; position: absolute; inset: 0; z-index: 60;
   background: rgba(0,0,0,0.42); -webkit-tap-highlight-color: transparent;
 }
 
@@ -215,6 +337,20 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
   /* 横屏手机里垂直方向更金贵：导航那条压薄一点 */
   html[data-ra-layout="phone"] [data-ra-settings-nav] { padding: 6px 12px 4px !important; }
 }
+
+/* 抽屉的实底：**不覆盖 DSH 的表面元素**（那条 background !important 覆盖表面会让左侧栏整列不再绘制，
+   已在 d92a572 删除并验证），改为在抽屉背后垫一层自己的底色 —— 伪元素 + z-index:-1，
+   正好夹在父层背景与内容之间。这样即使内层面板仍带着壁纸引擎调出来的半透明底色，合成结果也不透明。
+   只在手机档的抽屉上生效、且只在壁纸激活时（透明正是那时才发生）；本机与电脑档不注入。 */
+html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-sidebar]::before {
+  content: "" !important;
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: -1 !important;
+  /* 用壁纸引擎自己的「可读性底色」：那是当前主题下真正不透明的表面色（实测 #151849）。
+     绝不能用 --dsw-alias-bg-base —— 它被壁纸插件改成了 transparent，垫了等于没垫（已实测）。 */
+  background: var(--we-readability-base, #151517) !important; /*strong*/
+}
 `;
 
     /** 布局变化（手机 ↔ 电脑、横屏 ↔ 竖屏）的订阅者，设置页组件靠它跟着重渲染 */
@@ -260,19 +396,90 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       /** auto 的判据：够窄 或 有触摸指针（后者能兜住「宽屏但确实是手机/平板」） */
       function effectiveOf(nextMode) {
-        if (nextMode === 'phone') return 'phone';
+        // 'phone-strong' 是旧值（手机档曾分保守/增强两档），继续按手机档处理
+        if (nextMode === 'phone' || nextMode === 'phone-strong') return 'phone';
         if (nextMode === 'desktop') return 'desktop';
         return matches(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`) || matches('(pointer: coarse)')
           ? 'phone'
           : 'desktop';
       }
 
-      function injectStyle() {
-        if (document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`)) return;
-        const tag = document.createElement('style');
-        tag.dataset.raLayoutCss = LAYOUT_STYLE_ID;
-        tag.textContent = PHONE_CSS;
-        document.head.appendChild(tag);
+      /**
+       * 手机布局的 CSS 分两块：带 strong 标记的「增强」块，和其余「保守」块。
+       *
+       * 增强块干的都是**直接改 DSH 网格/层叠**的事（钉列号、把侧栏改成定浮层抽屉、把整屏浮层抬到正文之上）。
+       * 真机上出现过「DOM 与计算样式全对、画面却不更新，拖一下宽度才显示」——视图/合成层面的问题，
+       * 而关掉这些增强块页面就正常呈现。所以默认只注入保守块，增强由配置或 URL 显式开启。
+       */
+      /** 把某块里「包含关键字的那条声明」删掉（声明级二分用，不动选择器与其余声明） */
+      function cutDeclarations(block, cuts) {
+        const brace = block.indexOf('{');
+        if (brace < 0) return block;
+        const head = block.slice(0, brace + 1);
+        const body = block
+          .slice(brace + 1)
+          .split(';')
+          .filter((piece) => piece.trim().length > 0 && !cuts.some((word) => word && piece.includes(word)))
+          .join(';');
+        return body.trim().length > 0 ? head + body : head;
+      }
+
+      function phoneCss(strong, skip, cut) {
+        const skips = skip || [];
+        const cuts = cut || [];
+        if (strong && skips.length === 0 && cuts.length === 0) return PHONE_CSS.replace(/\/\*strong\*\//g, '');
+        return PHONE_CSS.split('}')
+          .map((block) => block.trim())
+          .filter((block) => {
+            if (block.length === 0) return false;
+            if (!strong && block.includes('/*strong*/')) return false;
+            return !skips.some((word) => word && block.includes(word));
+          })
+          .map((block) => (cuts.length === 0 ? block : cutDeclarations(block, cuts)))
+          .map((block) => block + '}')
+          .join('\n');
+      }
+
+      /** 排障开关：URL 上带 ra=off|safe|strong 可临时覆盖远程UI布局（不改宿主配置，刷新即失效） */
+      function raOverride() {
+        try {
+          return new URLSearchParams(window.location.search).get('ra') || '';
+        } catch {
+          return '';
+        }
+      }
+
+      /** 排障用：从 URL 取一个逗号分隔的关键字列表 */
+      function raWords(name) {
+        try {
+          return (new URLSearchParams(window.location.search).get(name) || '')
+            .split(',')
+            .map((word) => word.trim())
+            .filter(Boolean);
+        } catch {
+          return [];
+        }
+      }
+
+      /** ?skip=z-index,grid-template 丢掉整个规则块；?cut=box-shadow,inset 只删块内那几条声明 */
+      function raSkip() {
+        return raWords('skip');
+      }
+      function raCut() {
+        return raWords('cut');
+      }
+
+      function injectStyle(strong, skip, cut) {
+        let tag = document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`);
+        if (!tag) {
+          tag = document.createElement('style');
+          tag.dataset.raLayoutCss = LAYOUT_STYLE_ID;
+          document.head.appendChild(tag);
+        }
+        tag.textContent = phoneCss(strong, skip, cut);
+        // 记下当前这份基准内容：弹窗开合后的「重绘兜底」会在这份基准后面追加一个变化的注释，
+        // 不记的话它会把上一次的旧样式写回去。
+        tag.dataset.raBase = tag.textContent;
       }
 
       /** 从某个槽位元素往上找到「frame 的直接子元素」（也就是那一列），与类名无关 */
@@ -289,21 +496,85 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        * 面板 = 同时含 <nav> 与内容区的那一层，内容区 = 从「关闭」按钮往上、父节点里能看见那个 nav 的一层。
        */
       function tagSettings() {
+        // 先清掉上一次的标记。**这一步是必须的**：设置页关掉后标记会残留，而残留的标记会把
+        // 「设置页左侧导航 / 内容区」的样式继续作用在那两个元素上（真机上表现为左侧栏消失、中间内容看不见）。
+        for (const el of document.querySelectorAll(
+          '[data-ra-settings-panel],[data-ra-settings-nav],[data-ra-settings-content]',
+        )) {
+          el.removeAttribute('data-ra-settings-panel');
+          el.removeAttribute('data-ra-settings-nav');
+          el.removeAttribute('data-ra-settings-content');
+        }
         const closeBtn = document.querySelector('[data-slot="settings.close"]');
         if (!closeBtn) return;
+        // 只允许在设置覆盖层内部往上找。**绝不能爬出去**：frame 的直接子元素里就有左侧栏，
+        // 而它本身是个 <nav> —— 一旦爬到 frame，就会把「左侧栏」认成设置页导航、把 overlay 层认成内容区，
+        // 于是整页被设置样式接管（左侧栏消失、正文空白）。
+        // 只允许「在设置面板内部」往上找。**绝不能爬到应用主框架那一层**：frame 的直接子元素里就有左侧栏，
+        // 而它本身是个 <nav> —— 一旦命中，就会把「左侧栏」认成设置页导航、把 overlay 层认成内容区，
+        // 于是整页被设置样式接管（真机现象：左侧栏消失、正文空白）。
+        //
+        // 注意：不能用「必须位于 [data-slot="shell.overlay"] 内」来收窄 —— 实测设置面板并不在那个槽位里
+        // （它在自己的 wCInkW_panel 里），那样写会让这个函数**永远提前返回**，手机上设置页就一直是电脑版式。
+        const frame = document.querySelector('[data-ra-frame]');
         let content = closeBtn;
         while (content && content.parentElement) {
           const parent = content.parentElement;
+          if (frame && parent === frame) return;
+          if (parent === document.body || parent === document.documentElement) return;
           const nav = [...parent.children].find((child) => child.tagName === 'NAV');
           if (nav) {
             parent.setAttribute('data-ra-settings-panel', '');
             content.setAttribute('data-ra-settings-content', '');
             nav.setAttribute('data-ra-settings-nav', '');
             return;
+            return;
           }
           content = parent;
         }
       }
+
+      /**
+       * 这个元素「真的能点」吗：可见、有尺寸、且落在视口里。
+       *
+       * 为什么要专门判一次：DSH 的 DOM 里长期留着**隐藏的同名副本**（dock 把不活跃的 tab
+       * 用 `[hidden]` + `transform: translateX(504px)` 停在屏幕右边）。直接 `querySelector`
+       * 拿到的往往是那一份 —— 点了按钮却什么也没发生，日志里也看不出异常。
+       * 我调这一项时就先被它骗过一次：右栏明明在屏幕上，我却一直在点屏外那份。
+       */
+      function isClickable(el) {
+        if (!el || el.disabled) return false;
+        if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+        const box = el.getBoundingClientRect();
+        if (box.width <= 0 || box.height <= 0) return false;
+        const vw = window.innerWidth || 0;
+        const vh = window.innerHeight || 0;
+        return box.right > 0 && box.left < vw && box.bottom > 0 && box.top < vh;
+      }
+
+      /**
+       * 按 aria-label 精确点一个**可见的**按钮，返回是否点到。
+       *
+       * 这是整个手机布局与 DSH 交互的**唯一**方式：手势也好、遮罩也好，都只是替用户去点它自己
+       * 那个按钮，而不是我们去改它的 store / 布局状态。好处是行为永远与「用户自己点」一致，
+       * 也不会因为猜错内部状态而让界面进入自相矛盾的形态。
+       */
+      function clickLabel(label) {
+        const candidates = [...document.querySelectorAll('button')].filter(
+          (b) => (b.getAttribute('aria-label') ?? '') === label,
+        );
+        const btn = candidates.find(isClickable);
+        if (!btn) return false;
+        btn.click();
+        return true;
+      }
+
+      /** 屏幕上那个正在显示的右栏面板（排除 dock 留在 DOM 里的隐藏副本） */
+      const visibleRightPanel = () =>
+        [...document.querySelectorAll('[data-sidebar-right-panel]')].find(isClickable) ?? null;
+
+      /** 右侧栏是不是正以可见形态开着（手机上它是「无轨道 + 全屏浮层」） */
+      const rightPanelOpen = () => visibleRightPanel() !== null;
 
       /** 抽屉遮罩：点它等于点「收起侧边栏」，行为与用户自己收起完全一致（不自己改状态） */
       function ensureScrim() {
@@ -311,14 +582,66 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         if (scrim) return scrim;
         scrim = document.createElement('div');
         scrim.id = SCRIM_ID;
-        scrim.addEventListener('click', () => {
-          const btn = [...document.querySelectorAll('button')].find(
-            (b) => (b.getAttribute('aria-label') ?? '') === '收起侧边栏',
-          );
-          if (btn) btn.click();
-        });
+        scrim.addEventListener('click', () => { clickLabel('收起侧边栏'); });
         document.body.appendChild(scrim);
         return scrim;
+      }
+
+      /**
+       * 手机上没意义的右栏控件：「分栏」在 390px 上分不出两栏，「退出全屏」更是不可能
+       * （宽度决定它必须全屏，点了也只会留一个空轨道）。按 aria-label 精确隐藏，
+       * 不碰别的按钮 —— 尤其是「收起右侧边栏」，那是手机上唯一该留的出口。
+       */
+      const PHONE_HIDDEN_LABELS = ['分栏', '退出全屏', 'Split', 'Exit fullscreen'];
+      function hideUselessRightControls() {
+        const panel = document.querySelector('[data-sidebar-right-panel]');
+        if (!panel) return;
+        for (const btn of panel.querySelectorAll('button')) {
+          const label = (btn.getAttribute('aria-label') ?? '').trim();
+          if (PHONE_HIDDEN_LABELS.includes(label)) btn.setAttribute('data-ra-phone-hidden', '');
+        }
+      }
+
+      // 两个浮层的「谁后开」时间戳：手机上它俩都是覆盖整屏的，同时开着只会互相盖。
+      // 后开的那个留下，先开的那个替用户收掉（收的方式仍然是点它自己的收起按钮）。
+      let drawerOpenedAt = 0;
+      let rightOpenedAt = 0;
+      let mutualBusy = false;
+
+      /** 手机上两个浮层互斥：谁后开谁留下 */
+      function enforceOverlayExclusive(drawer) {
+        if (mutualBusy) return;
+        const rightOpen = rightPanelOpen();
+        if (!drawer || !rightOpen) return;
+        const closeDrawer = drawerOpenedAt < rightOpenedAt;
+        mutualBusy = true;
+        const ok = closeDrawer ? clickLabel('收起侧边栏') : clickLabel('收起右侧边栏');
+        if (ok) {
+          const what = closeDrawer ? '左抽屉' : '右栏';
+          try { console.info(`[remote-access] 手机上两个浮层互斥：收掉先开的${what}`); } catch { /* 忽略 */ }
+        }
+        window.setTimeout(() => { mutualBusy = false; }, 300);
+      }
+
+      /**
+       * 主动踢一次重绘。
+       *
+       * 真机上出现过：手机布局生效后 DOM 与计算样式全对，画面却停在旧帧，
+       * **手动拖一下宽度才显示**。这是引擎侧的失效/合成没跟上，CSS 层保证不了；
+       * 所以布局应用后主动做一次「改样式 → 强制同步重排 → 还原」，逼合成器重新栅格化。
+       *
+       * 用 opacity 而不是自定义属性：自定义属性变化不一定触发绘制，opacity 一定会。
+       * 值取 0.999 而不是 1，且下一帧就还原，肉眼不可见。
+       */
+      function nudgeRepaint() {
+        try {
+          const html = document.documentElement;
+          window.requestAnimationFrame(() => {
+            html.style.opacity = '0.999';
+            void html.offsetHeight; // 读布局属性 → 强制同步重排，把新样式推进渲染管线
+            window.requestAnimationFrame(() => { html.style.removeProperty('opacity'); });
+          });
+        } catch { /* 忽略：这只是兜底，失败也不该影响布局 */ }
       }
 
       /** 把「画成什么样」这件事交给 CSS：这里只负责打标记与开关 data-ra-drawer */
@@ -327,10 +650,21 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const phone = document.documentElement.getAttribute('data-ra-layout') === 'phone';
         if (!phone) {
           document.documentElement.removeAttribute('data-ra-drawer');
+          // 退出手机布局时把借来的玻璃属性还回去，别把本机的原生侧栏观感改了
+          try { /* 不再碰这个属性，见下方说明 */ } catch { /* 忽略 */ }
           const scrimOff = document.getElementById(SCRIM_ID);
           if (scrimOff) scrimOff.removeAttribute('data-open');
           return;
         }
+        // 「左侧栏覆盖」是壁纸引擎自己的开关：它做的就是给 body 挂这个属性，让原生侧栏跟着玻璃配方走
+        // （不那么透出壁纸）。手机端直接借用它 —— 只打在**远程页面**上，所以本机观感不受影响；
+        // 没装壁纸插件时这行什么也不做，上面 CSS 里那份实底兜底仍然生效。
+        // 手机上把壁纸引擎的「侧栏液态玻璃」总开关**摘掉**（只摘属性、不动任何元素样式）。
+        // 那个开关的语义是「开了才透明」（插件 settings-schema 原话：关闭后侧栏恢复原生外观，不透明/不模糊），
+        // 而展开后的工作区抽屉在手机上整块盖在正文上，透明会让两层文字糊在一起。
+        // 为什么不用 background 兜底：给 [data-ra-sidebar] 加 !important 实底正是「左侧栏整条不绘制」的原因（已删）。
+        // 本机不受影响 —— 这段只在远程页面跑；插件若在别处又设回来，syncDom 下一次会再摘掉。
+        try { document.body.removeAttribute('data-we-sidebar-glass'); } catch { /* 忽略 */ }
         const frame = document.querySelector('[data-slot="root"] > *');
         if (!frame) return;
         frame.setAttribute('data-ra-frame', '');
@@ -343,15 +677,37 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           const column = columnOf(frame, slot);
           if (column) column.setAttribute(`data-ra-${attr}`, '');
         }
+        // 这两项一度被我停用（当时误判它们是「整页不绘制」的元凶）。真正的原因是那条 background 实底（已删除），
+        // 而且 tagSettings() 已经收紧（先清旧标记 + 只允许在 shell.overlay 内查找、不许爬进 frame），
+        // 所以恢复：设置页在手机上是上下两段可滚动；右栏那两个没意义的控件（分栏 / 退出全屏）在手机上藏掉。
         tagSettings();
+        hideUselessRightControls();
         // 侧栏展开（没有 data-sidebar-collapsed）→ 抽屉模式：正文占满宽度，侧栏浮在上面
         const drawer = !frame.hasAttribute('data-sidebar-collapsed');
+        const drawerChanged = drawer !== wasDrawer;
+        if (drawerChanged) {
+          wasDrawer = drawer;
+          drawerOpenedAt = drawer ? Date.now() : 0;
+        }
+        const rightOpen = rightPanelOpen();
+        const rightChanged = rightOpen !== wasRightOpen;
+        if (rightChanged) {
+          wasRightOpen = rightOpen;
+          rightOpenedAt = rightOpen ? Date.now() : 0;
+        }
         if (drawer) document.documentElement.setAttribute('data-ra-drawer', '');
         else document.documentElement.removeAttribute('data-ra-drawer');
         const scrim = ensureScrim();
         if (drawer) scrim.setAttribute('data-open', '');
         else scrim.removeAttribute('data-open');
+        // 互斥只在增强模式有意义：那时侧栏是「脱离网格的定浮层」，会和右栏抢同一块屏；
+        // 保守模式下侧栏老老实实占着自己那一列，不该去替用户点关任何面板。
+        if (document.documentElement.hasAttribute('data-ra-strong')) enforceOverlayExclusive(drawer);
+        // 抽屉/右栏状态变化时也踢一次：这两个整屏浮层的出现/消失最容易留下旧帧
+        if (drawerChanged || rightChanged) nudgeRepaint();
       }
+      let wasDrawer = false;
+      let wasRightOpen = false;
 
       /** DOM 变动很密（聊天流式输出），所以合并到 200ms 一次，且只在手机布局下干活 */
       function scheduleSync() {
@@ -366,15 +722,28 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       function applyLayout() {
         if (stopped) return;
-        const layout = effectiveOf(mode);
-        if (layout === applied) {
+        const override = raOverride();
+        const layout = override === 'off' ? 'desktop' : effectiveOf(mode);
+        // 增强只在手机布局下有意义；?ra=strong / ?ra=safe 可以临时强制，便于真机二分
+        // 手机档现在默认就是完整版（窄图标栏 + 侧栏抽屉）：原来的「保守版」只留在 ?ra=safe 这条排障开关上，
+        // 不再作为可选模式出现在设置里；旧的 'phone-strong' 仍按手机档处理，免得老配置失效。
+        const strong = layout === 'phone' && override !== 'safe';
+        const skip = layout === 'phone' ? raSkip() : [];
+        const cut = layout === 'phone' ? raCut() : [];
+        const suffix = `${skip.length ? `|${skip.join(',')}` : ''}${cut.length ? `|cut:${cut.join(',')}` : ''}`;
+        const signature = `${strong ? `${layout}:strong` : layout}${suffix}`;
+        if (signature === applied) {
           syncDom();
           return;
         }
-        applied = layout;
+        applied = signature;
         document.documentElement.setAttribute('data-ra-layout', layout);
-        if (layout === 'phone') injectStyle();
+        if (strong) document.documentElement.setAttribute('data-ra-strong', '');
+        else document.documentElement.removeAttribute('data-ra-strong');
+        if (layout === 'phone') injectStyle(strong, skip, cut);
         syncDom();
+        // 首次进入手机布局后踢一次重绘：这一步正好是「打开页面就是空白」的现场
+        if (layout === 'phone') nudgeRepaint();
         emitLayout();
       }
 
@@ -416,6 +785,45 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       bindMedia(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`, () => { if (mode === 'auto') applyLayout(); });
       bindMedia('(pointer: coarse)', () => { if (mode === 'auto') applyLayout(); });
 
+      // 从别处回到这个页面时重读一次配置。最常见的路径是：在桌面端把「远程UI布局」改完、再拿起手机看 ——
+      // 这条路径上**不会有** settings/document-updated 事件（改的不是这个页面），于是页面会一直停在旧档。
+      // 配置只在加载时读一次 + 靠事件跟随，遇上「页面早于配置变更」的时序就会看起来像「设置没生效」。
+      try {
+        const onVisible = () => {
+          if (document.visibilityState === 'visible') loadMode();
+        };
+        document.addEventListener('visibilitychange', onVisible);
+        mediaSources.push(() => document.removeEventListener('visibilitychange', onVisible));
+      } catch { /* 忽略 */ }
+
+      // ---------------------------------------------------------------- 弹窗开合后的重绘
+      //
+      // 真机上复现到的一条：远程页面每次打开都会弹「预览版说明」（那次「继续」写不进宿主设置，
+      // 所以每次都得重来），**点掉它之后手机档下左侧栏整条就不再绘制** —— DOM 里它好好在着
+      // （0,0 56x950），像素没有；把我注入的样式清空后画面立刻恢复。
+      //
+      // 也就是「弹窗关闭这个瞬间」留下的失效没被触发。这里就盯着承载弹窗的 overlay 层：
+      // 它一变，手机档下就强制一次样式重算（重写注入的样式表会让所有匹配元素重新计算样式并重绘），
+      // 用最便宜的方式把这次重绘踢起来。
+      function nudgeStyleRecalc() {
+        if (stopped) return;
+        if (document.documentElement.getAttribute('data-ra-layout') !== 'phone') return;
+        const tag = document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`);
+        if (!tag) return;
+        // 末尾加一个变化着的时间戳注释：内容变了 → 样式表重新解析 → 受影响元素重算并重绘
+        const base = tag.dataset.raBase || (tag.dataset.raBase = tag.textContent);
+        tag.textContent = `${base}\n/* nudge ${Date.now()} */`;
+      }
+
+      let overlayObserver = null;
+      try {
+        const overlayLayer = document.querySelector('[data-slot="shell.overlay"]');
+        if (overlayLayer) {
+          overlayObserver = new MutationObserver(() => nudgeStyleRecalc());
+          overlayObserver.observe(overlayLayer, { childList: true, subtree: true });
+        }
+      } catch { /* 观察不了就算了，这只是治症状的兜底 */ }
+
       // DOM 与侧栏开合：侧栏那个属性变化要立刻反映（不然抽屉会慢半拍）
       let observer = null;
       try {
@@ -434,6 +842,84 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         });
       } catch { /* 观察不了就退化成「只在进页面时算一次」 */ }
 
+      // ---------------------------------------------------------------- 边缘滑动手势
+      //
+      // 手机上左抽屉与右栏都是覆盖整屏的浮层，给它们配一对滑动（与系统「侧滑返回」同一套直觉）：
+      //   向左滑 → 开右栏；  右栏开着时向右滑 → 收右栏
+      //   向右滑 → 开左抽屉；抽屉开着时向左滑 → 收左抽屉
+      //
+      // 起手位置只影响「门槛」：贴边起手（≤28px）算明确意图，56px 就够了；
+      // 从正文中间起手要更严格（72px + 更陡的横向比例），免得把正文里的横向滚动/选择手势吃掉。
+      // 三条自制规则都是为了不跟正文打架：
+      //   1. 只有「明显横向」才接管（|dx| > |dy| * 1.25，贴边起手只需 10px 位移即可判定）；
+      //   2. 只有判定为横向之后才 preventDefault —— 纵向手势完全放给浏览器；
+      //   3. 正文中间起手时横向比例放到 1.8 倍，宁可少触发也不误伤。
+      const EDGE_ZONE = 28;
+      const MIN_SWIPE = 56;
+      const MIN_SWIPE_MID = 72;
+      const RATIO_EDGE = 1.25;
+      const RATIO_MID = 1.8;
+      let swipe = null;
+      const phoneNow = () => document.documentElement.getAttribute('data-ra-layout') === 'phone';
+
+      function onTouchStart(e) {
+        if (!phoneNow() || e.touches.length !== 1) { swipe = null; return; }
+        const point = e.touches[0];
+        const width = window.innerWidth || 0;
+        swipe = {
+          x: point.clientX,
+          y: point.clientY,
+          fromLeft: point.clientX <= EDGE_ZONE,
+          fromRight: point.clientX >= width - EDGE_ZONE,
+          horizontal: false,
+        };
+      }
+
+      function onTouchMove(e) {
+        if (!swipe || e.touches.length !== 1) return;
+        const point = e.touches[0];
+        const dx = point.clientX - swipe.x;
+        const dy = point.clientY - swipe.y;
+        const fromEdge = swipe.fromLeft || swipe.fromRight;
+        if (!swipe.horizontal) {
+          const need = fromEdge ? 10 : 16;
+          if (Math.abs(dx) < need) return;
+          const ratio = fromEdge ? RATIO_EDGE : RATIO_MID;
+          if (Math.abs(dx) <= Math.abs(dy) * ratio) { swipe = null; return; } // 纵向/斜向：交还给页面
+          swipe.horizontal = true;
+        }
+        if (e.cancelable) e.preventDefault(); // 已确认横向：别让浏览器同时翻页/前进后退
+      }
+
+      function onTouchEnd(e) {
+        const started = swipe;
+        swipe = null;
+        if (!started || !started.horizontal) return;
+        const point = e.changedTouches?.[0];
+        if (!point) return;
+        const dx = point.clientX - started.x;
+        const fromEdge = started.fromLeft || started.fromRight;
+        const need = fromEdge ? MIN_SWIPE : MIN_SWIPE_MID;
+        if (Math.abs(dx) < need) return;
+        const drawer = document.documentElement.hasAttribute('data-ra-drawer');
+        const rightOpen = rightPanelOpen();
+        if (dx > 0) {
+          // 向右滑：收起右栏优先（它盖在最上面），否则打开左抽屉
+          if (rightOpen) { clickLabel('收起右侧边栏'); return; }
+          if (!drawer) clickLabel('打开侧边栏');
+          return;
+        }
+        // 向左滑：收起抽屉优先，否则打开右栏
+        if (drawer) { clickLabel('收起侧边栏'); return; }
+        if (!rightOpen) clickLabel('打开右侧边栏');
+      }
+
+      try {
+        window.addEventListener('touchstart', onTouchStart, { passive: true });
+        window.addEventListener('touchmove', onTouchMove, { passive: false });
+        window.addEventListener('touchend', onTouchEnd, { passive: true });
+      } catch { /* 没有触摸 API 就算了 */ }
+
       // 配置被改（本机设置页保存 / 另一台设备改了）→ 立刻生效，不必刷新
       const offs = [];
       try { offs.push(ctx.on('connection/reset', () => { attempt = 0; loadMode(); })); } catch { /* 忽略 */ }
@@ -451,7 +937,242 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         for (const off of mediaSources) {
           try { off(); } catch { /* 忽略 */ }
         }
+        try {
+          window.removeEventListener('touchstart', onTouchStart);
+          window.removeEventListener('touchmove', onTouchMove);
+          window.removeEventListener('touchend', onTouchEnd);
+        } catch { /* 忽略 */ }
         try { observer?.disconnect(); } catch { /* 忽略 */ }
+      };
+    }
+
+    // ---------------------------------------------------------------- UI 设置（只在远程页面生效）
+    //
+    // 官方的「通用设置」里有五项界面偏好。它们在**非回环页面**上是「本页有效、刷新即还原」：
+    // ui-settings 把设置通道的持久化降级成内存态（persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'），
+    // 读写都到不了宿主；但官方这几处的 setter 都是「先改本页状态、再尝试持久化」，写不进去不影响本页生效。
+    // 我们这份配置就是那份还原的补丁：值存在宿主配置里（手机端也能改），每次打开远程页面重新套一遍。
+    //
+    // 三条硬约束，改这里之前先读一遍：
+    //   1. 本机（回环）页面一个像素都不动 —— 与布局控制器同一个开关（ctx.remote.$host.isLoopback）。
+    //   2. 宿主的官方配置一个字都不写：全部走官方自己的「本页」写入入口，宿主设置文档保持原样。
+    //   3. 没有 DOM / 没有对应服务的环境必须安静地什么都不做（tools/test-client.mjs 的桩子）。
+    const UI_FIELDS = [
+      'remoteTheme',
+      'remoteFontSize',
+      'remoteTranscriptView',
+      'remoteDeveloperTools',
+      'remotePerformanceUsage',
+    ];
+
+    /**
+     * 出厂值：'default' 的语义是「照着这几个值套一遍」，而不是「什么都不做」。
+     * 为什么不做成「什么都不做」：用户在同一台手机上先选了「完全展开」、又改回「出厂值」时，
+     * 页面上的状态还留着上一次的选择；显式套回官方默认值才是「出厂值」该有的语义。
+     * 这几个值取自官方源码：ui-theme 的 DEFAULT_PREFERENCE（system）与字号默认 14；
+     * ui-chat 的 DEFAULT_TRANSCRIPT_VIEW_MODE（Web 端 detailed）与 DEFAULT_PERFORMANCE_USAGE（detailed）；
+     * ui-settings 的 developerTools 默认 true（内存作用域下本页的本地默认值也是 true）。
+     */
+    const FACTORY_UI = {
+      setTheme: 'system',
+      setFontSize: 14,
+      // 官方那行的判据分端：桌面客户端 standard，其余（手机浏览器）detailed
+      setTranscriptView: typeof globalThis !== 'undefined' && 'dshDesktop' in globalThis ? 'standard' : 'detailed',
+      setDeveloperTools: true,
+      setPerformanceUsage: 'detailed',
+    };
+
+    /** 「UI 设置」在页面上的生效近况：给设置页那一组显示一行状态 */
+    let uiStatus = null;
+    const uiStatusListeners = new Set();
+    const subscribeUiStatus = (fn) => {
+      uiStatusListeners.add(fn);
+      return () => uiStatusListeners.delete(fn);
+    };
+    const uiStatusNow = () => uiStatus;
+    function publishUiStatus(next) {
+      uiStatus = next;
+      for (const fn of [...uiStatusListeners]) {
+        try { fn(); } catch { /* 订阅方自己的问题，不牵连写入 */ }
+      }
+    }
+
+    /**
+     * 找官方那五项各自的「本页写入入口」。官方只给前两项做了服务，其余挂在那几行设置项的注入面上：
+     *   - 外观 / 字号大小 → ui-theme 的 theme 服务（setTheme / setFontSize）
+     *   - 显示代码工作视图 → ui-settings 的 configForms.developerTools.setEnabled
+     *   - 工作步骤展示 / 性能与用量 → settings.general.item 里 id 为 transcript-view / performance-usage
+     *     那两行的注入面（官方没给服务入口，设置页那两行拿到的就是这两个函数）。
+     * ctx.slots.entries() 是官方公开的「注册视图」，取到 inject 直接调，与用户点那两行同一条路径。
+     * 入口可能比本插件晚就绪，所以缺谁就把谁记进 pending，由调用方退避重试。
+     */
+    function officialUiSetters(ctx) {
+      const found = {};
+      const theme = (() => {
+        try { return typeof ctx.get === 'function' ? ctx.get('theme') : null; } catch { return null; }
+      })();
+      if (theme && typeof theme.setTheme === 'function') found.setTheme = (id) => theme.setTheme(id);
+      if (theme && typeof theme.setFontSize === 'function') found.setFontSize = (px) => theme.setFontSize(px);
+      const developerTools = (() => {
+        try {
+          const forms = typeof ctx.get === 'function' ? ctx.get('configForms') : null;
+          return forms?.developerTools ?? null;
+        } catch { return null; }
+      })();
+      if (developerTools && typeof developerTools.setEnabled === 'function') {
+        found.setDeveloperTools = (enabled) => developerTools.setEnabled(enabled === true);
+      }
+      try {
+        const entries = ctx.slots?.entries?.('settings.general.item') ?? [];
+        for (const entry of entries) {
+          const id = entry?.options?.id;
+          if (id !== 'transcript-view' && id !== 'performance-usage') continue;
+          if (typeof entry.inject !== 'function') continue;
+          let face;
+          try { face = entry.inject(); } catch { continue; }
+          if (id === 'transcript-view' && typeof face?.setTranscriptView === 'function') {
+            found.setTranscriptView = face.setTranscriptView;
+          }
+          if (id === 'performance-usage' && typeof face?.setPerformanceUsage === 'function') {
+            found.setPerformanceUsage = face.setPerformanceUsage;
+          }
+        }
+      } catch { /* 拿不到就等下一次重试 */ }
+      return found;
+    }
+
+    /**
+     * 把读到的配置套到本页上。返回 { applied, pending }：
+     * applied = 已经套上去的项（中文名，给状态行用）；pending = 入口还没就绪的项。
+     * 单项失败只记一条 console.warn —— 官方组件缺席时（比如关掉了 ui-theme）整套照常跑。
+     */
+    function applyUiSettings(config, setters) {
+      const applied = [];
+      const pending = [];
+      const warn = (label, err) => {
+        try { console.warn('[remote-access] 套用「' + label + '」失败：', err); } catch { /* 忽略 */ }
+      };
+      const run = (name, label, apply) => {
+        const setter = setters[name];
+        if (typeof setter !== 'function') { pending.push(label); return; }
+        try { apply(setter); applied.push(label); } catch (err) { warn(label, err); }
+      };
+      run('setTheme', '外观', (set) => {
+        const raw = String(config.remoteTheme ?? 'default');
+        set(['dark', 'light', 'system'].includes(raw) ? raw : FACTORY_UI.setTheme);
+      });
+      run('setFontSize', '字号大小', (set) => {
+        const px = Number(config.remoteFontSize);
+        set(Number.isInteger(px) && px >= 10 && px <= 22 ? px : FACTORY_UI.setFontSize);
+      });
+      run('setTranscriptView', '工作步骤展示', (set) => {
+        const raw = String(config.remoteTranscriptView ?? 'default');
+        set(['compact', 'standard', 'detailed', 'verbose'].includes(raw) ? raw : FACTORY_UI.setTranscriptView);
+      });
+      run('setDeveloperTools', '显示代码工作视图', (set) => {
+        const raw = String(config.remoteDeveloperTools ?? 'default');
+        set(raw === 'on' ? true : raw === 'off' ? false : FACTORY_UI.setDeveloperTools);
+      });
+      run('setPerformanceUsage', '性能与用量', (set) => {
+        const raw = String(config.remotePerformanceUsage ?? 'default');
+        set(['compact', 'detailed'].includes(raw) ? raw : FACTORY_UI.setPerformanceUsage);
+      });
+      return { applied, pending };
+    }
+
+    /**
+     * 「UI 设置」控制器。返回清理函数；**回环页面直接返回空清理**（与布局控制器同一个开关）。
+     */
+    function startUiSettingsController(ctx) {
+      const noop = () => {};
+      if (typeof document === 'undefined') return noop;
+      let remote = false;
+      try { remote = ctx?.remote?.$host?.isLoopback === false; } catch { remote = false; }
+      if (!remote) return noop;
+
+      let stopped = false;
+      let config = null;
+      let setters = null;
+      let attempt = 0;
+      let retryTimer = null;
+      const offs = [];
+
+      /** 退避重试：次数用完就停（页面状态行会说明哪几项没接上） */
+      function scheduleRetry(run, limit) {
+        if (stopped) return;
+        attempt += 1;
+        if (attempt > limit) return;
+        retryTimer = window.setTimeout(run, 300 * attempt);
+      }
+
+      /** 配置读到了就套一遍；入口没齐就重试（官方组件可能比本插件晚挂载） */
+      function apply() {
+        if (stopped || config === null) return;
+        if (setters === null) setters = officialUiSetters(ctx);
+        const result = applyUiSettings(config, setters);
+        publishUiStatus({ applied: result.applied, pending: result.pending });
+        if (result.pending.length > 0) {
+          setters = null; // 入口是「拿到就用」，缺的那几个下次重新找一遍
+          scheduleRetry(apply, 8);
+        }
+      }
+
+      function load() {
+        if (stopped) return;
+        Promise.resolve()
+          .then(() => ctx.remote.settings.describe())
+          .then((response) => {
+            if (stopped) return;
+            if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
+            const value = namespaceOf(response.value)?.value ?? {};
+            const next = {};
+            for (const key of UI_FIELDS) next[key] = value[key];
+            config = next;
+            attempt = 0;
+            setters = null;
+            apply();
+          })
+          .catch((err) => {
+            if (stopped) return;
+            try { console.warn('[remote-access] 读「UI 设置」失败，稍后重试', err); } catch { /* 忽略 */ }
+            scheduleRetry(load, 5);
+          });
+      }
+
+      const on = (fn) => {
+        try {
+          const off = fn();
+          if (typeof off === 'function') offs.push(off);
+        } catch { /* 忽略 */ }
+      };
+      on(() => ctx.on('connection/reset', () => { attempt = 0; setters = null; load(); }));
+      on(() => ctx.remote.$on?.('settings/document-updated', () => { attempt = 0; load(); }));
+      // 官方那两行的注册要等 settings.general.item 被声明之后才拿得到 → 注册一变就重试一次
+      on(() => ctx.on('slots/changed', (key) => {
+        if (key !== 'settings.general.item' || config === null) return;
+        attempt = 0;
+        setters = null;
+        apply();
+      }));
+      // 从别处回到这个页面时重读：配置可能是在桌面上改的，这条路径上没有 document-updated 事件
+      const onVisible = () => {
+        if (document.visibilityState !== 'visible') return;
+        attempt = 0;
+        setters = null;
+        load();
+      };
+      document.addEventListener('visibilitychange', onVisible);
+      offs.push(() => document.removeEventListener('visibilitychange', onVisible));
+
+      load();
+
+      return () => {
+        stopped = true;
+        if (retryTimer !== null) window.clearTimeout(retryTimer);
+        for (const off of offs) {
+          try { off(); } catch { /* 忽略 */ }
+        }
+        uiStatus = null;
       };
     }
 
@@ -467,8 +1188,10 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
         // 远程页面才有布局改造；本机页面这里直接是个空清理函数（「不动本地」的开关就在这一行）
         const stopLayout = startLayoutController(ctx);
+        const stopUi = startUiSettingsController(ctx);
         try {
           if (typeof ctx.effect === 'function') ctx.effect(() => stopLayout);
+          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); });
         } catch { /* 忽略 */ }
 
         /**
@@ -499,6 +1222,8 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
+          // 「UI 设置」是一层可折叠的下一级菜单，默认收起
+          const [uiOpen, setUiOpen] = React.useState(false);
           const revisionRef = React.useRef(snap.revision);
 
           // 回环页面用 configForms（官方通道）；拿不到就退到 Remote 通道（手机）
@@ -510,6 +1235,10 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           // 布局在「手机 ↔ 电脑」之间切换时（改了这一项、或横竖屏转了）让表单跟着重排
           const [, bumpLayout] = React.useState(0);
           React.useEffect(() => subscribeLayout(() => bumpLayout((n) => n + 1)), []);
+
+          // 「UI 设置」的生效近况（只在这一组里显示一行小字）
+          const [, bumpUi] = React.useState(0);
+          React.useEffect(() => subscribeUiStatus(() => bumpUi((n) => n + 1)), []);
 
           React.useEffect(() => {
             if (revisionRef.current === snap.revision) return;
@@ -661,7 +1390,41 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           // 复选框在手机上是行首一个 44px 的方块，单指才好点
           const checkStyle = phone ? { width: 22, height: 22 } : undefined;
 
-          const rows = FIELDS.flatMap((field) => {
+          // 「UI 设置」这一组：可折叠的下一级菜单。标题上带「已改 N 项」，收起来也知道动过没有。
+          const uiFields = FIELDS.filter((field) => field.group === 'ui');
+          const uiChanged = uiFields.filter((field) => {
+            const raw = current[field.key];
+            return field.type === 'number' ? Number(raw) !== 0 : String(raw ?? 'default') !== 'default';
+          }).length;
+          const groupStyle = {
+            marginTop: phone ? 14 : 16,
+            border: '1px solid rgba(127,127,127,0.3)',
+            borderRadius: phone ? 10 : 8,
+            padding: `0 ${phone ? 10 : 12}px ${phone ? 10 : 12}px`,
+          };
+          const groupHeaderStyle = {
+            width: '100%',
+            minHeight: phone ? 44 : undefined,
+            padding: phone ? '12px 0' : '10px 0',
+            textAlign: 'left',
+            font: 'inherit',
+            fontWeight: 600,
+            color: 'inherit',
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+          };
+          const groupHintStyle = { fontSize: 12, opacity: 0.7, margin: '0 0 8px' };
+          const uiState = uiStatusNow();
+          const uiHint = uiState
+            ? uiState.pending.length > 0
+              ? `暂时没接上官方入口：${uiState.pending.join('、')}`
+              : uiState.applied.length > 0
+                ? `已套用到本页：${uiState.applied.join('、')}`
+                : '本页无需套用'
+            : '保存后，在远程页面打开时生效（本机界面不受影响）';
+
+          const renderField = (field) => {
             const value = displayValue(field, current[field.key]);
             const common = {
               key: `${field.key}-i`,
@@ -710,12 +1473,30 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
               });
             }
             return [h('div', { key: `${field.key}-l`, style: labelStyle }, field.label), input];
-          });
+          };
+          const mainRows = FIELDS.filter((field) => field.group !== 'ui').flatMap(renderField);
+          const uiRows = uiFields.flatMap(renderField);
 
           return h(
             'div',
             { style: { padding: phone ? '4px 2px' : '2px 0' } },
-            h('div', { style: rowStyle }, rows),
+            h('div', { style: rowStyle }, mainRows),
+            h(
+              'div',
+              { style: groupStyle },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: groupHeaderStyle,
+                  'aria-expanded': uiOpen ? 'true' : 'false',
+                  onClick: () => setUiOpen((open) => !open),
+                },
+                `${uiOpen ? '▾' : '▸'} UI 设置${uiChanged > 0 ? `（已改 ${uiChanged} 项）` : ''}`,
+              ),
+              h('div', { style: groupHintStyle }, uiHint),
+              uiOpen ? h('div', { style: rowStyle }, uiRows) : null,
+            ),
             h(
               'div',
               {

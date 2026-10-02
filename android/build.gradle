@@ -1,0 +1,16 @@
+// 用 buildscript classpath 引 AGP（不写 plugins{} 块）：
+// plugins{} 会去解析 com.android.application 的 plugin marker，而离线/受限网络下
+// 本机缓存里往往只有 AGP 本体、没有 marker —— classpath + apply plugin 更皮实。
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath 'com.android.tools.build:gradle:8.8.0'
+  }
+}
+
+tasks.register('clean', Delete) {
+  delete rootProject.layout.buildDirectory
+}

@@ -7,6 +7,9 @@
 - **不写死地址**：网段、监听地址、端口、上游、落地文件全是配置项。
 - **两种进入方式**：复制带令牌的网址；或者设一个密码，手机开裸地址输一次（之后 30 天免密）。
 - **手机界面能看**：「远程UI布局」可选手机 / 电脑 / 自动；手机布局**只作用于远程页面**，本机界面一个像素都不动。
+- **手机上的官方界面偏好能留下来**：「UI 设置」把「通用设置」里的外观 / 字号 / 工作步骤展示 / 显示代码工作视图 /
+  性能与用量存进本插件的配置（默认「出厂值」＝不干预官方默认），远程页面每次打开都重新套一遍 ——
+  官方那几项在手机上是「改完刷新即还原」的。
 - **在设置页里改**：保存即热重载（原地关掉旧监听、按新参数重开），不用重启 DSH。
 - **失败可见**：无论成功失败都会写一份自诊断文件，看不到 DSH 日志时也能定位。
 
@@ -45,7 +48,24 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/i
 > 为什么不一步装完：DSH 的插件安装（写 profile 的 `package.json` / `cordis.patch.yml`、跑包管理器）
 > 只能由 DSH 自己做（插件页，或让 agent 用 `plugin_manager` 工具），手工改 profile 容易把它弄坏。
 
-之后改参数都是热重载；但换了 `index.js` / `client.js` 的代码仍需重启一次才会加载。
+之后改参数都是热重载。改代码分两种：`client.js`（浏览器半区）**刷新页面**就会重新拉取；
+`index.js`（宿主半区，含**新增配置字段**）要**重启一次 DSH** 才会加载。
+
+## 安卓 App（APK，可选）
+
+不想在手机浏览器里手打地址的话，可以用配套的外壳 App：
+
+**[下载 dsh-remote-1.0.1.apk](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/download/v1.0.1-android/dsh-remote-1.0.1.apk)**
+（[Release 页](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/tag/v1.0.1-android) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+
+App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
+
+- **首屏就是地址页**：只填 `IP或域名:端口`（**不用写协议**，例 `100.64.0.3:19388`），HTTPS 一个勾决定；
+- 连不上 / 填错 / 电脑没开时**自动退回地址页**，顶栏也永远有「设置」——**断网也改得回来**；
+- 网页仍是电脑上那份 DSH：手机布局、`远程UI布局`、`UI 设置` 全由本插件的配置决定；
+- 只申请 `INTERNET` / `ACCESS_NETWORK_STATE`，自签（`CN=DSH Remote`），同签名的后续版本可直接覆盖安装。
+
+装的时候要允许「安装未知应用」。电脑那端仍然是本插件在监听（默认 `19388`），App 只是把网页装进壳里。
 
 ## 使用
 
@@ -79,17 +99,52 @@ cookie（默认 30 天）；之后直接访问 `http://<地址>:<端口>/` 即�
 
 ## 配置
 
-「设置 → 远程访问」里只有 8 项：**启用 / 允许的网段 / 排除的网段 / 端口 / 并发上限 / 日志级别 / 访问密码 / 远程UI布局**。
+### 设置页里能改的
+
+「设置 → 远程访问」里是 8 个常用项（**启用 / 允许的网段 / 排除的网段 / 端口 / 并发上限 / 日志级别 /
+访问密码 / 远程UI布局**），外加一层可折叠的下一级菜单 **「UI 设置」**（5 项界面偏好，见下）。
 保存会写进 profile 的 `cordis.patch.yml`，插件随即热重载（端口会变，新网址以状态文件为准）。
+
+### 访问密码的规则
 
 **访问密码只收 4–12 位数字或字母**（大小写敏感）。写别的（空格、符号、太短太长）**不会生效**，
 而且**一定看得见**：设置页点保存时就地拦下并说明规则，`cordis.patch.yml` 里手写的非法值会在
 状态文件的诊断里留一条 `「访问密码」没生效…`。这条提示是故意做的 —— 静默失效会让人以为密码设好了，
 然后在手机上撞见 DSH 那句英文 401（这曾经是最难查的一种「坏了」）。
 
-**手机上的同一页也能改**：DSH 的客户端策略让 `configForms` 在非回环页面不可写，但 Remote 通道本身是通的，
+**改密码不会把已经进来的设备踢下线**：放行 cookie 的密钥与 `accessCode` 无关，单独存在
+`<DSH_HOME>\remote-access-secret`（`0600`），DSH 重启后也照样有效。想让所有设备重新输一次密码，
+删掉那个文件即可。
+
+### 手机上的同一页也能改
+
+DSH 的客户端策略让 `configForms` 在非回环页面不可写，但 Remote 通道本身是通的，
 所以那一页直接调 `ctx.remote.settings.describe()` / `mutate()`，写盘跑在 Host 网关自己的上下文里，
 落盘位置与桌面**完全相同**，而且等写盘完成才回执。
+
+### 「UI 设置」这一组是什么、为什么要有副本
+
+设置页里「远程访问」下面有一层可折叠的**下一级菜单「UI 设置」**，放的是官方「通用设置」里的五项界面偏好
+（外观、字号大小、工作步骤展示、显示代码工作视图、性能与用量）。
+
+官方这几项在**非回环页面**上只能「本页有效、刷新即还原」：ui-settings 把设置通道的持久化降级成内存态
+（`persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'`），读写都到不了宿主 —— 手机端在官方设置里
+改完，一刷新就回到默认。本插件因此存了同一批值，并在**每次打开远程页面**时重新套一遍（桌面端改完、
+手机切回来也会重读）：
+
+- 用的是官方自己的「本页」写入入口（`theme.setTheme` / `theme.setFontSize` /
+  `configForms.developerTools.setEnabled` / 官方那两行设置项的 `setTranscriptView`、`setPerformanceUsage`），
+  与你在设置页手点那几行是**同一条路径**；
+- **宿主的官方配置一个字都不写**；本机（回环）页面一个像素都不动（与 `remoteLayout` 同一条硬约束）；
+- `default`（出厂值）不是「什么都不做」，而是**显式套回官方默认值** —— 这样从「完全展开」改回「出厂值」
+  也能真的还原。官方默认值取自官方源码：外观 `system`、字号 `14`、工作步骤展示 Web 端 `detailed`
+  （桌面客户端 `standard`）、显示代码工作视图 `true`、性能与用量 `detailed`；
+- 因此**本插件的配置优先**：在官方「通用设置」里改这几项只对当前页面有效，下一次重读配置时会被本插件的值
+  覆盖。想用官方的默认行为，就把这几项留在「出厂值」；
+- 这一组是**新增的 Host 配置字段**，而宿主的配置 schema 是在 DSH 启动时读进来的：**第一次升级到这一版需要重启
+  一次 DSH**（之后改值、保存都不必重启；浏览器半区刷新页面即可生效）。
+
+### 其余参数
 
 其余参数只在 `cordis.patch.yml` 里配（也不建议常用）：
 
@@ -103,6 +158,11 @@ cookie（默认 30 天）；之后直接访问 `http://<地址>:<端口>/` 即�
 | `logLevel` | `'info'` | `silent` / `info` / `debug` | ✅ |
 | `accessCode` | `''` | 解锁密码（**4–12 位数字或字母**）。设了就**不用复制 token**：手机开裸地址输一次即可；输错一次即把该地址写进「排除的网段」 | ✅ |
 | `remoteLayout` | `'auto'` | 远程页面的界面布局：`auto`（按视口/指针自动判断）/ `phone`（强制手机布局，横竖屏自适应）/ `desktop`（与桌面一致）。**只作用于远程页面** | ✅ |
+| `remoteTheme` | `'default'` | 「UI 设置」一组里的**外观**：`default`（出厂值）/ `dark`（深色）/ `light`（浅色）/ `system`（跟随系统）。**只作用于远程页面**，且不写宿主设置文档 | ✅ |
+| `remoteFontSize` | `0` | 正文字号（10–22 px）：`0` = 出厂值（14） | ✅ |
+| `remoteTranscriptView` | `'default'` | 工作步骤展示：`default` / `compact`（简洁）/ `standard`（标准）/ `detailed`（详细）/ `verbose`（完全展开） | ✅ |
+| `remoteDeveloperTools` | `'default'` | 显示代码工作视图：`default`（出厂值＝开启）/ `on` / `off` | ✅ |
+| `remotePerformanceUsage` | `'default'` | 性能与用量：`default` / `compact`（简洁）/ `detailed`（详细） | ✅ |
 | `listen` | `['auto']` | `auto` = 只监听上面网段里的本机地址；也可写 `['100.x.y.z']` | — |
 | `upstream` | `'auto'` | DSH 界面地址；`auto` 读 `ctx.webServer.port` | — |
 | `rewriteHost` | `true` | 把 `Host`/`Origin` 改写成上游 authority | — |
@@ -112,10 +172,6 @@ cookie（默认 30 天）；之后直接访问 `http://<地址>:<端口>/` 即�
 | `urlFile` | `''` → `<DSH_HOME>/remote-access-url.txt` | 状态文件写哪；`off` = 不写 | — |
 | `printUrl` | `true` | 同时把带票网址打到 DSH 日志 | — |
 | `banFile` | `''` → 与状态文件同目录的 `remote-access-bans.txt` | 拉黑**暂存**文件：只有「写进排除的网段」失败时才用得上，平时不用碰 | — |
-
-**改密码不会把已经进来的设备踢下线**：放行 cookie 的密钥与 `accessCode` 无关，单独存在
-`<DSH_HOME>\remote-access-secret`（`0600`），DSH 重启后也照样有效。想让所有设备重新输一次密码，
-删掉那个文件即可。
 
 ## 手机上的「新建工作区」选目录
 
@@ -240,6 +296,15 @@ DSH 的界面是为桌面三栏设计的。在 390px 宽的手机上，它的表
 （`Config` 是原生 Schemastery schema 且字段都标了 `.volatile()`；`package.json` 把
 `@deepseek-ai/schemastery` 声明成了 peerDependency）。改完 `package.json` 要重启一次 DSH 才生效。
 
+**手机上在「通用设置」里改完，刷新就变回去了** — 那几项（外观 / 字号大小 / 工作步骤展示 / 显示代码工作视图 /
+性能与用量）在非回环页面上是「本页有效、刷新即还原」的。要让它留住，就用本插件的
+「设置 → 远程访问 → **UI 设置**」改：这份值存在宿主配置里，每次打开远程页面重新套一遍
+（默认「出厂值」＝不干预官方默认，行为与官方一致）。
+
+**升级后保存「UI 设置」报 `Config field "…" is not volatile`** — 宿主还不认识这个新字段
+（宿主的配置 schema 在 DSH 启动时读入，改 `index.js` 不会热生效）。**重启一次 DSH** 即可，
+之后改值不必再重启。
+
 **手机在选目录里只能看到主目录** — 见上面「为什么只看到主目录」。
 
 **手机上界面挤成一条、中文一个字一行** — 那是「远程UI布局」还留在 `电脑`（或 `auto` 没判定成手机）。
@@ -272,7 +337,9 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 `test-client.mjs` 覆盖设置页注册与渲染、回环与手机两条读写通道、保存与失败提示
 （Remote 通道返回的是 `{ ok, value }` 信封，这是最容易踩的一处），以及手机布局最关键的那条不变式：
 **回环页面即使窗口只有 390px、配置又写着 `phone`，也不设 `data-ra-layout`、不注入任何样式**；
-远程页面则按 `phone`/`desktop`/`auto`（窄视口、触摸设备）分别给出正确判定。
+远程页面则按 `phone`/`desktop`/`auto`（窄视口、触摸设备）分别给出正确判定；以及「UI 设置」那一组：
+按配置调用官方五个入口、`default` 显式套回官方默认值、**本机页面一个入口都不碰**、官方组件缺席时安静跳过、
+菜单默认收起且展开后是那五档。
 
 `check-config-schema.mjs` 覆盖设置页写盘的两道硬前提，并顺带对表 `client.js` 的表单字段与 `Config`。
 
@@ -285,14 +352,35 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 | 路径 | 说明 |
 |---|---|
 | `index.js` | 插件 Host 半区（零依赖，只用 `node:` 内置模块）：反向代理、访问门、401 说明页、热重载 |
-| `client.js` | 浏览器半区：设置页参数表单 + 只作用于远程页面的手机布局引擎 |
+| `client.js` | 浏览器半区：设置页参数表单（含「UI 设置」子菜单）+ 只作用于远程页面的手机布局引擎 + 把官方那五项界面偏好套到远程页面 |
 | `cordis.patch.yml` | bundle 的 patch：插入插件行、固定选目录器 |
 | `package.json` | 清单（`dsh.bundle.patch` / `exports` / `icon` / `meta`） |
 | `locale/{zh,en}.json` | 插件页显示用的标题与说明 |
 | `icon.svg` | 插件页图标 |
 | `tools/` | 测试（Host / 客户端 / Config 校验）与从 DSH 安装包里取文件的工具 |
+| `android/` | 安卓外壳 App 的源码（首屏地址页 + WebView；Java、零第三方依赖，可离线构建） |
 | `install.ps1` | GitHub 一键取代码（放到本机固定目录，安装仍由 DSH 自己做） |
 | `LICENSE` | MIT |
+
+## 更新日志
+
+### 1.1.0
+- **「UI 设置」**（新）：设置页里多一层可折叠的下一级菜单，把官方「通用设置」里的
+  **外观 / 字号大小 / 工作步骤展示 / 显示代码工作视图 / 性能与用量** 存进本插件配置
+  （`remoteTheme` / `remoteFontSize` / `remoteTranscriptView` / `remoteDeveloperTools` / `remotePerformanceUsage`）。
+  这几项在非回环页面上本来是「改完刷新即还原」，现在每次打开远程页面都会重新套用；
+  `default` = 出厂值（**显式套回官方默认值**），且**只作用于远程页面**、不写宿主设置文档。
+- **安卓 App**（新）：[`android/`](android/) 是 DSH 的安卓外壳（首屏填 `IP:端口`，断网也能改地址），
+  Release 里有可直接安装的 APK（应用名 **DSH**）。
+- **`install.ps1`**：下载后校验包名与必需文件、覆盖前自动备份旧版本、`-Install` 直接交给 `dsh` CLI
+  （DSH 正在跑时自动跳过），还会认出 profile 里钉死的 `github:` 来源并提示怎么换。
+- 手机端：抽屉真正不透明（垫底用壁纸引擎自己的「可读性底色」）、右栏不再压到正文上、边缘滑动手势。
+- 修：上个版本引入的「下游断开后上游才响应」会把 DSH 宿主整个带崩（`ERR_STREAM_UNABLE_TO_PIPE`）。
+- 外观下拉的选项顺序照官方来（浅色在深色之前）。
+
+### 1.0.0
+- 首次发布：按网段开放 DSH 网页界面；带票网址 / 数字密码两种进入方式；`远程UI布局`（手机 / 电脑 / 自动）；
+  状态文件与自诊断；手机上的「新建工作区」用应用内选目录。
 
 ## 许可
 

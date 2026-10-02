@@ -412,6 +412,145 @@ check(
 delete globalThis.document;
 delete globalThis.MutationObserver;
 
+// ---------------------------------------------------------------- 场景五：UI 设置（出厂值 / 指定值 / 本机不动）
+//
+// 这五项（外观 / 字号大小 / 工作步骤展示 / 显示代码工作视图 / 性能与用量）在远程页面上只能「本页生效」：
+// 官方的设置通道在非回环页面上是内存态（persistence = isLoopback ? 'host' : 'memory'）。这里断言两件事：
+//   * 远程页面：按配置调用官方那五个入口，'default'（出厂值）要**显式套回**官方默认值；
+//   * 本机页面：一个入口都不碰（与布局控制器同一条硬约束）。
+
+/** 只挂「UI 设置」控制器：给出官方的五个入口（假实现）与工具面，看它按配置调了什么 */
+function applyWithUiSettings({ isLoopback, config, withSetters = true }) {
+  const calls = [];
+  plugin.apply({
+    get: (name) => {
+      if (!withSetters) return null;
+      if (name === 'theme') {
+        return {
+          setTheme: (id) => calls.push(['setTheme', id]),
+          setFontSize: (px) => calls.push(['setFontSize', px]),
+        };
+      }
+      if (name === 'configForms') {
+        return { developerTools: { setEnabled: (on) => calls.push(['setDeveloperTools', on]) } };
+      }
+      return null;
+    },
+    configForms: {
+      get: () => ({
+        getSnapshot: () => ({ status: 'unavailable', writable: false, mode: 'memory', revision: undefined, value: undefined }),
+        subscribe: () => () => {},
+        mutate: async () => false,
+      }),
+      describe: () => ({ load: async () => {} }),
+    },
+    remote: {
+      $host: { home: undefined, isLoopback },
+      settings: {
+        describe: async () => ({
+          ok: true,
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { ...config }, revision: 1 }] },
+        }),
+        mutate: async () => ({ ok: true, value: { ns: 'remote-access', value: { ...config }, revision: 2 } }),
+      },
+      $on: () => () => {},
+    },
+    on: () => () => {},
+    slots: {
+      inject: (_name, callback) => callback(),
+      register: () => () => {},
+      entries: (key) =>
+        withSetters && key === 'settings.general.item'
+          ? [
+              { options: { id: 'transcript-view' }, inject: () => ({ setTranscriptView: (mode) => calls.push(['setTranscriptView', mode]) }) },
+              { options: { id: 'performance-usage' }, inject: () => ({ setPerformanceUsage: (mode) => calls.push(['setPerformanceUsage', mode]) }) },
+            ]
+          : [],
+    },
+  });
+  return calls;
+}
+
+installDom({ width: 390, coarse: true });
+
+const uiSet = applyWithUiSettings({
+  isLoopback: false,
+  config: {
+    remoteLayout: 'phone',
+    remoteTheme: 'dark',
+    remoteFontSize: 16,
+    remoteTranscriptView: 'verbose',
+    remoteDeveloperTools: 'off',
+    remotePerformanceUsage: 'compact',
+  },
+});
+await sleep(80);
+check(
+  '远程页面：UI 设置按配置套到官方那五个入口',
+  JSON.stringify(uiSet) ===
+    JSON.stringify([
+      ['setTheme', 'dark'],
+      ['setFontSize', 16],
+      ['setTranscriptView', 'verbose'],
+      ['setDeveloperTools', false],
+      ['setPerformanceUsage', 'compact'],
+    ]),
+  JSON.stringify(uiSet),
+);
+
+const uiFactory = applyWithUiSettings({
+  isLoopback: false,
+  config: {
+    remoteLayout: 'phone',
+    remoteTheme: 'default',
+    remoteFontSize: 0,
+    remoteTranscriptView: 'default',
+    remoteDeveloperTools: 'default',
+    remotePerformanceUsage: 'default',
+  },
+});
+await sleep(80);
+check(
+  '远程页面：出厂值 = 显式套回官方默认值（不是「什么都不做」）',
+  JSON.stringify(uiFactory) ===
+    JSON.stringify([
+      ['setTheme', 'system'],
+      ['setFontSize', 14],
+      ['setTranscriptView', 'detailed'],
+      ['setDeveloperTools', true],
+      ['setPerformanceUsage', 'detailed'],
+    ]),
+  JSON.stringify(uiFactory),
+);
+
+const uiLocal = applyWithUiSettings({
+  isLoopback: true,
+  config: {
+    remoteLayout: 'phone',
+    remoteTheme: 'light',
+    remoteFontSize: 22,
+    remoteTranscriptView: 'compact',
+    remoteDeveloperTools: 'on',
+    remotePerformanceUsage: 'compact',
+  },
+});
+await sleep(120);
+check('本机页面：UI 设置一个官方入口都不碰', uiLocal.length === 0, JSON.stringify(uiLocal));
+
+let uiMissingThrew = false;
+let uiMissing = [];
+try {
+  uiMissing = applyWithUiSettings({ isLoopback: false, config: { remoteLayout: 'phone', remoteTheme: 'dark' }, withSetters: false });
+  await sleep(80);
+} catch (err) {
+  uiMissingThrew = true;
+  uiMissing = [String(err?.message ?? err)];
+}
+check('官方入口缺席时安静跳过（不报错、不把插件带崩）', !uiMissingThrew && uiMissing.length === 0, JSON.stringify(uiMissing));
+
+delete globalThis.document;
+delete globalThis.MutationObserver;
+
 // ---------------------------------------------------------------- 场景四：远程UI布局这一项本身
 hostConfig = { ...hostConfig, port: 19388, maxConnections: 64, logLevel: 'info', remoteLayout: 'auto' };
 remoteClosed = false;
@@ -431,7 +570,7 @@ Panel = Panel4;
 render();
 await sleep(80);
 check(
-  '设置页有「远程UI布局」，三个选项就是手机/电脑/自动',
+  '设置页有「远程UI布局」：手机 / 电脑 / 自动',
   byKey(tree, 'remoteLayout-i')?.props?.value === 'auto' &&
     flatten(byKey(tree, 'remoteLayout-i')).filter((n) => n?.type === 'option').map((n) => n.props.value).join(',') ===
       'phone,desktop,auto',
@@ -470,6 +609,43 @@ await sleep(60);
 check(
   '远程UI布局：能保存为 phone',
   mutateCalls.length === 1 && mutateCalls[0].ops.some((op) => op.path[0] === 'remoteLayout' && op.value === 'phone'),
+  JSON.stringify(mutateCalls[0]?.ops ?? null),
+);
+
+// 「UI 设置」这一层下一级菜单：默认收起，点开才是那五项
+const uiHeader = flatten(tree).find((n) => n?.type === 'button' && String(n?.props?.children ?? '').includes('UI 设置'));
+check(
+  '设置页有「UI 设置」这一层下一级菜单（默认收起）',
+  uiHeader !== undefined && uiHeader.props['aria-expanded'] === 'false' && byKey(tree, 'remoteTheme-i') === undefined,
+  uiHeader ? `aria-expanded=${uiHeader.props['aria-expanded']}` : '(没有这一组)',
+);
+uiHeader.props.onClick();
+await sleep(10);
+const optionsOf = (key) =>
+  flatten(byKey(tree, `${key}-i`))
+    .filter((n) => n?.type === 'option')
+    .map((n) => n.props.value)
+    .join(',');
+check(
+  '展开后是那五项，每项都带「出厂值」这一档',
+  ['remoteTheme', 'remoteFontSize', 'remoteTranscriptView', 'remoteDeveloperTools', 'remotePerformanceUsage'].every(
+    (key) => byKey(tree, `${key}-i`) !== undefined,
+  ) &&
+    optionsOf('remoteTheme') === 'default,light,dark,system' &&
+    optionsOf('remoteTranscriptView') === 'default,compact,standard,detailed,verbose' &&
+    optionsOf('remotePerformanceUsage') === 'default,compact,detailed' &&
+    optionsOf('remoteDeveloperTools') === 'default,on,off',
+  [optionsOf('remoteTheme'), optionsOf('remoteTranscriptView'), optionsOf('remotePerformanceUsage'), optionsOf('remoteDeveloperTools')].join(' | '),
+);
+
+mutateCalls.length = 0;
+byKey(tree, 'remoteTheme-i').props.onChange({ target: { value: 'dark' } });
+await sleep(10);
+buttons(tree).find((b) => textOf(b) === '保存').props.onClick();
+await sleep(60);
+check(
+  'UI 设置：能存进配置（remoteTheme=dark）',
+  mutateCalls.length === 1 && mutateCalls[0].ops.some((op) => op.path[0] === 'remoteTheme' && op.value === 'dark'),
   JSON.stringify(mutateCalls[0]?.ops ?? null),
 );
 
