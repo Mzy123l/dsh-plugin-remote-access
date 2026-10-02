@@ -154,6 +154,30 @@ export const Config = Schema
         Schema.string().default('auto'),
         '远程页面的界面布局：auto = 按视口自动判断，phone = 强制手机布局（横竖屏自适应），desktop = 与桌面一致。只作用于远程页面，本机界面不受影响',
       ),
+
+      // 「UI 设置」一组：只作用于远程页面的官方界面偏好。官方在非回环页面上把设置通道降级成内存态
+      // （ui-settings: persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'），手机端改了刷新就还原；
+      // 所以这几项由本插件的配置负责持久化，远程页面每次打开时重新套用。'default' 一律表示「出厂值」。
+      remoteTheme: field(
+        Schema.string().default('default'),
+        '远程页面的外观：default = 出厂值（跟随系统），dark = 深色，light = 浅色，system = 跟随系统。只作用于远程页面',
+      ),
+      remoteFontSize: field(
+        Schema.number().default(0),
+        '远程页面的正文字号（10–22，单位 px）：0 = 出厂值（14）。只作用于远程页面',
+      ),
+      remoteTranscriptView: field(
+        Schema.string().default('default'),
+        '远程页面的工作步骤展示：default = 出厂值，compact = 简洁，standard = 标准，detailed = 详细，verbose = 完全展开。只作用于远程页面',
+      ),
+      remoteDeveloperTools: field(
+        Schema.string().default('default'),
+        '远程页面的「显示代码工作视图」：default = 出厂值（开启），on = 开启，off = 关闭。只作用于远程页面',
+      ),
+      remotePerformanceUsage: field(
+        Schema.string().default('default'),
+        '远程页面的「性能与用量」：default = 出厂值（详细），compact = 简洁，detailed = 详细。只作用于远程页面',
+      ),
       banFile: field(
         Schema.string().default(''),
         '拉黑暂存文件；只有「写进排除的网段」失败时才用得上（留空 = 与状态文件同目录的 remote-access-bans.txt）。平时不用碰它',
@@ -178,6 +202,12 @@ const DEFAULTS = {
   printUrl: true,
   accessCode: '',
   remoteLayout: 'auto',
+
+  remoteTheme: 'default',
+  remoteFontSize: 0,
+  remoteTranscriptView: 'default',
+  remoteDeveloperTools: 'default',
+  remotePerformanceUsage: 'default',
   banFile: '',
   logLevel: 'info',
 };
@@ -246,6 +276,15 @@ function normalizeConfig(rawIn) {
   c.remoteLayout = ['auto', 'phone', 'desktop'].includes(String(unwrap(c.remoteLayout)))
     ? String(unwrap(c.remoteLayout))
     : 'auto';
+  // 「UI 设置」一组：取值一律「出厂值优先」——不认识的值退回 'default'（= 不干预官方默认），
+  // 而不是随便挑一个看起来合理的档位，免得配置里写错一个字就悄悄改了手机上的外观。
+  const pickUiOne = (raw, allowed) => (allowed.includes(String(unwrap(raw))) ? String(unwrap(raw)) : 'default');
+  c.remoteTheme = pickUiOne(c.remoteTheme, ['default', 'dark', 'light', 'system']);
+  const uiFontSize = Number(unwrap(c.remoteFontSize));
+  c.remoteFontSize = Number.isInteger(uiFontSize) && uiFontSize >= 10 && uiFontSize <= 22 ? uiFontSize : 0;
+  c.remoteTranscriptView = pickUiOne(c.remoteTranscriptView, ['default', 'compact', 'standard', 'detailed', 'verbose']);
+  c.remoteDeveloperTools = pickUiOne(c.remoteDeveloperTools, ['default', 'on', 'off']);
+  c.remotePerformanceUsage = pickUiOne(c.remotePerformanceUsage, ['default', 'compact', 'detailed']);
   c.banFile = String(unwrap(c.banFile) ?? '').trim();
   c.logLevel = ['silent', 'info', 'debug'].includes(String(c.logLevel)) ? String(c.logLevel) : 'info';
   return c;

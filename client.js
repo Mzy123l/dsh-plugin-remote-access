@@ -52,6 +52,58 @@ window.__ModuleLoader__.load({
           { value: 'auto', label: '自动' },
         ],
       },
+      // 「UI 设置」一组（group: 'ui'）：官方「通用设置」里的五项界面偏好，只作用于远程页面。
+      // 为什么要有这一份副本：官方设置页在远程页面上是内存态（读写都到不了宿主），手机端改了刷新就还原；
+      // 这里存的是同一批值，由 startUiSettingsController 在每次打开远程页面时重新套到页面上。
+      // 'default' 一律 = 出厂值（跟着官方默认走），所以默认状态下这一组不做任何事。
+      {
+        key: 'remoteTheme',
+        type: 'select',
+        group: 'ui',
+        label: '外观',
+        options: [
+          { value: 'default', label: '出厂值' },
+          { value: 'dark', label: '深色' },
+          { value: 'light', label: '浅色' },
+          { value: 'system', label: '跟随系统' },
+        ],
+      },
+      { key: 'remoteFontSize', type: 'number', group: 'ui', label: '字号大小', placeholder: '10-22，0=出厂值' },
+      {
+        key: 'remoteTranscriptView',
+        type: 'select',
+        group: 'ui',
+        label: '工作步骤展示',
+        options: [
+          { value: 'default', label: '出厂值' },
+          { value: 'compact', label: '简洁' },
+          { value: 'standard', label: '标准' },
+          { value: 'detailed', label: '详细' },
+          { value: 'verbose', label: '完全展开' },
+        ],
+      },
+      {
+        key: 'remoteDeveloperTools',
+        type: 'select',
+        group: 'ui',
+        label: '显示代码工作视图',
+        options: [
+          { value: 'default', label: '出厂值' },
+          { value: 'on', label: '开启' },
+          { value: 'off', label: '关闭' },
+        ],
+      },
+      {
+        key: 'remotePerformanceUsage',
+        type: 'select',
+        group: 'ui',
+        label: '性能与用量',
+        options: [
+          { value: 'default', label: '出厂值' },
+          { value: 'compact', label: '简洁' },
+          { value: 'detailed', label: '详细' },
+        ],
+      },
     ];
 
     const DEFAULTS = {
@@ -63,6 +115,12 @@ window.__ModuleLoader__.load({
       logLevel: 'info',
       accessCode: '',
       remoteLayout: 'auto',
+
+      remoteTheme: 'default',
+      remoteFontSize: 0,
+      remoteTranscriptView: 'default',
+      remoteDeveloperTools: 'default',
+      remotePerformanceUsage: 'default',
     };
 
     /** 访问密码的规则，必须与 index.js 的 normalizeAccessCode 一致（check-config-schema 之外的人工约定） */
@@ -887,6 +945,236 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       };
     }
 
+    // ---------------------------------------------------------------- UI 设置（只在远程页面生效）
+    //
+    // 官方的「通用设置」里有五项界面偏好。它们在**非回环页面**上是「本页有效、刷新即还原」：
+    // ui-settings 把设置通道的持久化降级成内存态（persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'），
+    // 读写都到不了宿主；但官方这几处的 setter 都是「先改本页状态、再尝试持久化」，写不进去不影响本页生效。
+    // 我们这份配置就是那份还原的补丁：值存在宿主配置里（手机端也能改），每次打开远程页面重新套一遍。
+    //
+    // 三条硬约束，改这里之前先读一遍：
+    //   1. 本机（回环）页面一个像素都不动 —— 与布局控制器同一个开关（ctx.remote.$host.isLoopback）。
+    //   2. 宿主的官方配置一个字都不写：全部走官方自己的「本页」写入入口，宿主设置文档保持原样。
+    //   3. 没有 DOM / 没有对应服务的环境必须安静地什么都不做（tools/test-client.mjs 的桩子）。
+    const UI_FIELDS = [
+      'remoteTheme',
+      'remoteFontSize',
+      'remoteTranscriptView',
+      'remoteDeveloperTools',
+      'remotePerformanceUsage',
+    ];
+
+    /**
+     * 出厂值：'default' 的语义是「照着这几个值套一遍」，而不是「什么都不做」。
+     * 为什么不做成「什么都不做」：用户在同一台手机上先选了「完全展开」、又改回「出厂值」时，
+     * 页面上的状态还留着上一次的选择；显式套回官方默认值才是「出厂值」该有的语义。
+     * 这几个值取自官方源码：ui-theme 的 DEFAULT_PREFERENCE（system）与字号默认 14；
+     * ui-chat 的 DEFAULT_TRANSCRIPT_VIEW_MODE（Web 端 detailed）与 DEFAULT_PERFORMANCE_USAGE（detailed）；
+     * ui-settings 的 developerTools 默认 true（内存作用域下本页的本地默认值也是 true）。
+     */
+    const FACTORY_UI = {
+      setTheme: 'system',
+      setFontSize: 14,
+      // 官方那行的判据分端：桌面客户端 standard，其余（手机浏览器）detailed
+      setTranscriptView: typeof globalThis !== 'undefined' && 'dshDesktop' in globalThis ? 'standard' : 'detailed',
+      setDeveloperTools: true,
+      setPerformanceUsage: 'detailed',
+    };
+
+    /** 「UI 设置」在页面上的生效近况：给设置页那一组显示一行状态 */
+    let uiStatus = null;
+    const uiStatusListeners = new Set();
+    const subscribeUiStatus = (fn) => {
+      uiStatusListeners.add(fn);
+      return () => uiStatusListeners.delete(fn);
+    };
+    const uiStatusNow = () => uiStatus;
+    function publishUiStatus(next) {
+      uiStatus = next;
+      for (const fn of [...uiStatusListeners]) {
+        try { fn(); } catch { /* 订阅方自己的问题，不牵连写入 */ }
+      }
+    }
+
+    /**
+     * 找官方那五项各自的「本页写入入口」。官方只给前两项做了服务，其余挂在那几行设置项的注入面上：
+     *   - 外观 / 字号大小 → ui-theme 的 theme 服务（setTheme / setFontSize）
+     *   - 显示代码工作视图 → ui-settings 的 configForms.developerTools.setEnabled
+     *   - 工作步骤展示 / 性能与用量 → settings.general.item 里 id 为 transcript-view / performance-usage
+     *     那两行的注入面（官方没给服务入口，设置页那两行拿到的就是这两个函数）。
+     * ctx.slots.entries() 是官方公开的「注册视图」，取到 inject 直接调，与用户点那两行同一条路径。
+     * 入口可能比本插件晚就绪，所以缺谁就把谁记进 pending，由调用方退避重试。
+     */
+    function officialUiSetters(ctx) {
+      const found = {};
+      const theme = (() => {
+        try { return typeof ctx.get === 'function' ? ctx.get('theme') : null; } catch { return null; }
+      })();
+      if (theme && typeof theme.setTheme === 'function') found.setTheme = (id) => theme.setTheme(id);
+      if (theme && typeof theme.setFontSize === 'function') found.setFontSize = (px) => theme.setFontSize(px);
+      const developerTools = (() => {
+        try {
+          const forms = typeof ctx.get === 'function' ? ctx.get('configForms') : null;
+          return forms?.developerTools ?? null;
+        } catch { return null; }
+      })();
+      if (developerTools && typeof developerTools.setEnabled === 'function') {
+        found.setDeveloperTools = (enabled) => developerTools.setEnabled(enabled === true);
+      }
+      try {
+        const entries = ctx.slots?.entries?.('settings.general.item') ?? [];
+        for (const entry of entries) {
+          const id = entry?.options?.id;
+          if (id !== 'transcript-view' && id !== 'performance-usage') continue;
+          if (typeof entry.inject !== 'function') continue;
+          let face;
+          try { face = entry.inject(); } catch { continue; }
+          if (id === 'transcript-view' && typeof face?.setTranscriptView === 'function') {
+            found.setTranscriptView = face.setTranscriptView;
+          }
+          if (id === 'performance-usage' && typeof face?.setPerformanceUsage === 'function') {
+            found.setPerformanceUsage = face.setPerformanceUsage;
+          }
+        }
+      } catch { /* 拿不到就等下一次重试 */ }
+      return found;
+    }
+
+    /**
+     * 把读到的配置套到本页上。返回 { applied, pending }：
+     * applied = 已经套上去的项（中文名，给状态行用）；pending = 入口还没就绪的项。
+     * 单项失败只记一条 console.warn —— 官方组件缺席时（比如关掉了 ui-theme）整套照常跑。
+     */
+    function applyUiSettings(config, setters) {
+      const applied = [];
+      const pending = [];
+      const warn = (label, err) => {
+        try { console.warn('[remote-access] 套用「' + label + '」失败：', err); } catch { /* 忽略 */ }
+      };
+      const run = (name, label, apply) => {
+        const setter = setters[name];
+        if (typeof setter !== 'function') { pending.push(label); return; }
+        try { apply(setter); applied.push(label); } catch (err) { warn(label, err); }
+      };
+      run('setTheme', '外观', (set) => {
+        const raw = String(config.remoteTheme ?? 'default');
+        set(['dark', 'light', 'system'].includes(raw) ? raw : FACTORY_UI.setTheme);
+      });
+      run('setFontSize', '字号大小', (set) => {
+        const px = Number(config.remoteFontSize);
+        set(Number.isInteger(px) && px >= 10 && px <= 22 ? px : FACTORY_UI.setFontSize);
+      });
+      run('setTranscriptView', '工作步骤展示', (set) => {
+        const raw = String(config.remoteTranscriptView ?? 'default');
+        set(['compact', 'standard', 'detailed', 'verbose'].includes(raw) ? raw : FACTORY_UI.setTranscriptView);
+      });
+      run('setDeveloperTools', '显示代码工作视图', (set) => {
+        const raw = String(config.remoteDeveloperTools ?? 'default');
+        set(raw === 'on' ? true : raw === 'off' ? false : FACTORY_UI.setDeveloperTools);
+      });
+      run('setPerformanceUsage', '性能与用量', (set) => {
+        const raw = String(config.remotePerformanceUsage ?? 'default');
+        set(['compact', 'detailed'].includes(raw) ? raw : FACTORY_UI.setPerformanceUsage);
+      });
+      return { applied, pending };
+    }
+
+    /**
+     * 「UI 设置」控制器。返回清理函数；**回环页面直接返回空清理**（与布局控制器同一个开关）。
+     */
+    function startUiSettingsController(ctx) {
+      const noop = () => {};
+      if (typeof document === 'undefined') return noop;
+      let remote = false;
+      try { remote = ctx?.remote?.$host?.isLoopback === false; } catch { remote = false; }
+      if (!remote) return noop;
+
+      let stopped = false;
+      let config = null;
+      let setters = null;
+      let attempt = 0;
+      let retryTimer = null;
+      const offs = [];
+
+      /** 退避重试：次数用完就停（页面状态行会说明哪几项没接上） */
+      function scheduleRetry(run, limit) {
+        if (stopped) return;
+        attempt += 1;
+        if (attempt > limit) return;
+        retryTimer = window.setTimeout(run, 300 * attempt);
+      }
+
+      /** 配置读到了就套一遍；入口没齐就重试（官方组件可能比本插件晚挂载） */
+      function apply() {
+        if (stopped || config === null) return;
+        if (setters === null) setters = officialUiSetters(ctx);
+        const result = applyUiSettings(config, setters);
+        publishUiStatus({ applied: result.applied, pending: result.pending });
+        if (result.pending.length > 0) {
+          setters = null; // 入口是「拿到就用」，缺的那几个下次重新找一遍
+          scheduleRetry(apply, 8);
+        }
+      }
+
+      function load() {
+        if (stopped) return;
+        Promise.resolve()
+          .then(() => ctx.remote.settings.describe())
+          .then((response) => {
+            if (stopped) return;
+            if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
+            const value = namespaceOf(response.value)?.value ?? {};
+            const next = {};
+            for (const key of UI_FIELDS) next[key] = value[key];
+            config = next;
+            attempt = 0;
+            setters = null;
+            apply();
+          })
+          .catch((err) => {
+            if (stopped) return;
+            try { console.warn('[remote-access] 读「UI 设置」失败，稍后重试', err); } catch { /* 忽略 */ }
+            scheduleRetry(load, 5);
+          });
+      }
+
+      const on = (fn) => {
+        try {
+          const off = fn();
+          if (typeof off === 'function') offs.push(off);
+        } catch { /* 忽略 */ }
+      };
+      on(() => ctx.on('connection/reset', () => { attempt = 0; setters = null; load(); }));
+      on(() => ctx.remote.$on?.('settings/document-updated', () => { attempt = 0; load(); }));
+      // 官方那两行的注册要等 settings.general.item 被声明之后才拿得到 → 注册一变就重试一次
+      on(() => ctx.on('slots/changed', (key) => {
+        if (key !== 'settings.general.item' || config === null) return;
+        attempt = 0;
+        setters = null;
+        apply();
+      }));
+      // 从别处回到这个页面时重读：配置可能是在桌面上改的，这条路径上没有 document-updated 事件
+      const onVisible = () => {
+        if (document.visibilityState !== 'visible') return;
+        attempt = 0;
+        setters = null;
+        load();
+      };
+      document.addEventListener('visibilitychange', onVisible);
+      offs.push(() => document.removeEventListener('visibilitychange', onVisible));
+
+      load();
+
+      return () => {
+        stopped = true;
+        if (retryTimer !== null) window.clearTimeout(retryTimer);
+        for (const off of offs) {
+          try { off(); } catch { /* 忽略 */ }
+        }
+        uiStatus = null;
+      };
+    }
+
     return {
       // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
       inject: ['slots', 'configForms', 'remote', 'remote.settings'],
@@ -899,8 +1187,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
 
         // 远程页面才有布局改造；本机页面这里直接是个空清理函数（「不动本地」的开关就在这一行）
         const stopLayout = startLayoutController(ctx);
+        const stopUi = startUiSettingsController(ctx);
         try {
           if (typeof ctx.effect === 'function') ctx.effect(() => stopLayout);
+          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); });
         } catch { /* 忽略 */ }
 
         /**
@@ -931,6 +1221,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
+          // 「UI 设置」是一层可折叠的下一级菜单，默认收起
+          const [uiOpen, setUiOpen] = React.useState(false);
           const revisionRef = React.useRef(snap.revision);
 
           // 回环页面用 configForms（官方通道）；拿不到就退到 Remote 通道（手机）
@@ -942,6 +1234,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           // 布局在「手机 ↔ 电脑」之间切换时（改了这一项、或横竖屏转了）让表单跟着重排
           const [, bumpLayout] = React.useState(0);
           React.useEffect(() => subscribeLayout(() => bumpLayout((n) => n + 1)), []);
+
+          // 「UI 设置」的生效近况（只在这一组里显示一行小字）
+          const [, bumpUi] = React.useState(0);
+          React.useEffect(() => subscribeUiStatus(() => bumpUi((n) => n + 1)), []);
 
           React.useEffect(() => {
             if (revisionRef.current === snap.revision) return;
@@ -1093,7 +1389,41 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           // 复选框在手机上是行首一个 44px 的方块，单指才好点
           const checkStyle = phone ? { width: 22, height: 22 } : undefined;
 
-          const rows = FIELDS.flatMap((field) => {
+          // 「UI 设置」这一组：可折叠的下一级菜单。标题上带「已改 N 项」，收起来也知道动过没有。
+          const uiFields = FIELDS.filter((field) => field.group === 'ui');
+          const uiChanged = uiFields.filter((field) => {
+            const raw = current[field.key];
+            return field.type === 'number' ? Number(raw) !== 0 : String(raw ?? 'default') !== 'default';
+          }).length;
+          const groupStyle = {
+            marginTop: phone ? 14 : 16,
+            border: '1px solid rgba(127,127,127,0.3)',
+            borderRadius: phone ? 10 : 8,
+            padding: `0 ${phone ? 10 : 12}px ${phone ? 10 : 12}px`,
+          };
+          const groupHeaderStyle = {
+            width: '100%',
+            minHeight: phone ? 44 : undefined,
+            padding: phone ? '12px 0' : '10px 0',
+            textAlign: 'left',
+            font: 'inherit',
+            fontWeight: 600,
+            color: 'inherit',
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+          };
+          const groupHintStyle = { fontSize: 12, opacity: 0.7, margin: '0 0 8px' };
+          const uiState = uiStatusNow();
+          const uiHint = uiState
+            ? uiState.pending.length > 0
+              ? `暂时没接上官方入口：${uiState.pending.join('、')}`
+              : uiState.applied.length > 0
+                ? `已套用到本页：${uiState.applied.join('、')}`
+                : '本页无需套用'
+            : '保存后，在远程页面打开时生效（本机界面不受影响）';
+
+          const renderField = (field) => {
             const value = displayValue(field, current[field.key]);
             const common = {
               key: `${field.key}-i`,
@@ -1142,12 +1472,30 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
               });
             }
             return [h('div', { key: `${field.key}-l`, style: labelStyle }, field.label), input];
-          });
+          };
+          const mainRows = FIELDS.filter((field) => field.group !== 'ui').flatMap(renderField);
+          const uiRows = uiFields.flatMap(renderField);
 
           return h(
             'div',
             { style: { padding: phone ? '4px 2px' : '2px 0' } },
-            h('div', { style: rowStyle }, rows),
+            h('div', { style: rowStyle }, mainRows),
+            h(
+              'div',
+              { style: groupStyle },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: groupHeaderStyle,
+                  'aria-expanded': uiOpen ? 'true' : 'false',
+                  onClick: () => setUiOpen((open) => !open),
+                },
+                `${uiOpen ? '▾' : '▸'} UI 设置${uiChanged > 0 ? `（已改 ${uiChanged} 项）` : ''}`,
+              ),
+              h('div', { style: groupHintStyle }, uiHint),
+              uiOpen ? h('div', { style: rowStyle }, uiRows) : null,
+            ),
             h(
               'div',
               {

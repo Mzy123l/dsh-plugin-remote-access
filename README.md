@@ -103,6 +103,11 @@ cookie（默认 30 天）；之后直接访问 `http://<地址>:<端口>/` 即�
 | `logLevel` | `'info'` | `silent` / `info` / `debug` | ✅ |
 | `accessCode` | `''` | 解锁密码（**4–12 位数字或字母**）。设了就**不用复制 token**：手机开裸地址输一次即可；输错一次即把该地址写进「排除的网段」 | ✅ |
 | `remoteLayout` | `'auto'` | 远程页面的界面布局：`auto`（按视口/指针自动判断）/ `phone`（强制手机布局，横竖屏自适应）/ `desktop`（与桌面一致）。**只作用于远程页面** | ✅ |
+| `remoteTheme` | `'default'` | 「UI 设置」一组里的**外观**：`default`（出厂值）/ `dark`（深色）/ `light`（浅色）/ `system`（跟随系统）。**只作用于远程页面**，且不写宿主设置文档 | ✅ |
+| `remoteFontSize` | `0` | 正文字号（10–22 px）：`0` = 出厂值（14） | ✅ |
+| `remoteTranscriptView` | `'default'` | 工作步骤展示：`default` / `compact`（简洁）/ `standard`（标准）/ `detailed`（详细）/ `verbose`（完全展开） | ✅ |
+| `remoteDeveloperTools` | `'default'` | 显示代码工作视图：`default`（出厂值＝开启）/ `on` / `off` | ✅ |
+| `remotePerformanceUsage` | `'default'` | 性能与用量：`default` / `compact`（简洁）/ `detailed`（详细） | ✅ |
 | `listen` | `['auto']` | `auto` = 只监听上面网段里的本机地址；也可写 `['100.x.y.z']` | — |
 | `upstream` | `'auto'` | DSH 界面地址；`auto` 读 `ctx.webServer.port` | — |
 | `rewriteHost` | `true` | 把 `Host`/`Origin` 改写成上游 authority | — |
@@ -112,6 +117,26 @@ cookie（默认 30 天）；之后直接访问 `http://<地址>:<端口>/` 即�
 | `urlFile` | `''` → `<DSH_HOME>/remote-access-url.txt` | 状态文件写哪；`off` = 不写 | — |
 | `printUrl` | `true` | 同时把带票网址打到 DSH 日志 | — |
 | `banFile` | `''` → 与状态文件同目录的 `remote-access-bans.txt` | 拉黑**暂存**文件：只有「写进排除的网段」失败时才用得上，平时不用碰 | — |
+
+### 「UI 设置」这一组是什么、为什么要有副本
+
+设置页里「远程访问」下面有一层可折叠的**下一级菜单「UI 设置」**，放的是官方「通用设置」里的五项界面偏好
+（外观、字号大小、工作步骤展示、显示代码工作视图、性能与用量）。
+
+官方这几项在**非回环页面**上只能「本页有效、刷新即还原」：ui-settings 把设置通道的持久化降级成内存态
+（`persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'`），读写都到不了宿主 —— 手机端在官方设置里
+改完，一刷新就回到默认。本插件因此存了同一批值，并在**每次打开远程页面**时重新套一遍（桌面端改完、
+手机切回来也会重读）：
+
+- 用的是官方自己的「本页」写入入口（`theme.setTheme` / `theme.setFontSize` /
+  `configForms.developerTools.setEnabled` / 官方那两行设置项的 `setTranscriptView`、`setPerformanceUsage`），
+  与你在设置页手点那几行是**同一条路径**；
+- **宿主的官方配置一个字都不写**；本机（回环）页面一个像素都不动（与 `remoteLayout` 同一条硬约束）；
+- `default`（出厂值）不是「什么都不做」，而是**显式套回官方默认值** —— 这样从「完全展开」改回「出厂值」
+  也能真的还原。官方默认值取自官方源码：外观 `system`、字号 `14`、工作步骤展示 Web 端 `detailed`
+  （桌面客户端 `standard`）、显示代码工作视图 `true`、性能与用量 `detailed`；
+- 因此**本插件的配置优先**：在官方「通用设置」里改这几项只对当前页面有效，下一次重读配置时会被本插件的值
+  覆盖。想用官方的默认行为，就把这几项留在「出厂值」。
 
 **改密码不会把已经进来的设备踢下线**：放行 cookie 的密钥与 `accessCode` 无关，单独存在
 `<DSH_HOME>\remote-access-secret`（`0600`），DSH 重启后也照样有效。想让所有设备重新输一次密码，
