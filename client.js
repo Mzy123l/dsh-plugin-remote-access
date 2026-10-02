@@ -584,13 +584,11 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           const column = columnOf(frame, slot);
           if (column) column.setAttribute(`data-ra-${attr}`, '');
         }
-        // 这里原本会调用 tagSettings() 与 hideUselessRightControls()：两者都是「按结构/aria-label 找到元素、
-        // 打上 data-ra-* 标记、再用 CSS 改它」的做法，是我整个手机布局里**唯一可能误伤别的元素**的部分
-        // （真机上出现过左侧栏被认成设置页导航、overlay 层被认成设置页内容区，结果左侧栏消失、中间内容空白）。
-        // 它们带来的只是「设置页排版更好看」「藏掉两个没用的按钮」这类锦上添花，不值得留着这个风险，
-        // 所以整段停用；对应的 CSS 因为拿不到标记，自然失效。
-        // tagSettings();
-        // hideUselessRightControls();
+        // 这两项一度被我停用（当时误判它们是「整页不绘制」的元凶）。真正的原因是那条 background 实底（已删除），
+        // 而且 tagSettings() 已经收紧（先清旧标记 + 只允许在 shell.overlay 内查找、不许爬进 frame），
+        // 所以恢复：设置页在手机上是上下两段可滚动；右栏那两个没意义的控件（分栏 / 退出全屏）在手机上藏掉。
+        tagSettings();
+        hideUselessRightControls();
         // 侧栏展开（没有 data-sidebar-collapsed）→ 抽屉模式：正文占满宽度，侧栏浮在上面
         const drawer = !frame.hasAttribute('data-sidebar-collapsed');
         const drawerChanged = drawer !== wasDrawer;
