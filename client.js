@@ -191,7 +191,7 @@ html[data-ra-layout="phone"] [data-sidebar-right-panel] { z-index: 65 !important
    **已删除**：真机上复现到，这条 background（!important 覆盖 DSH 的玻璃表面）会让左侧栏整条不再绘制 ——
    DOM 里它在（0,0 56x950），像素没有；只要摘掉这一条就恢复。排查协议：清本地标记 → 重载（弹窗出现）→
    点掉弹窗 → 截图；摘别的规则都不解决，只有摘这条解决。
-   观感那条需求改由「借用壁纸引擎自己的左侧栏覆盖玻璃配方」承担（脚本里设 data-we-sidebar-glass），
+   观感那件事现在不再由我插手：不碰壁纸引擎的任何外观开关 —— 原先我强行打开它的「侧栏液态玻璃」正是「左侧透明」的来源，
    壁纸插件不在时就用 DSH 的默认表面 —— 宁可少一点好看，也不能让页面画不出来。 */
 
 /* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
@@ -560,7 +560,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         if (!phone) {
           document.documentElement.removeAttribute('data-ra-drawer');
           // 退出手机布局时把借来的玻璃属性还回去，别把本机的原生侧栏观感改了
-          try { document.body.removeAttribute('data-we-sidebar-glass'); } catch { /* 忽略 */ }
+          try { /* 不再碰这个属性，见下方说明 */ } catch { /* 忽略 */ }
           const scrimOff = document.getElementById(SCRIM_ID);
           if (scrimOff) scrimOff.removeAttribute('data-open');
           return;
@@ -568,7 +568,10 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         // 「左侧栏覆盖」是壁纸引擎自己的开关：它做的就是给 body 挂这个属性，让原生侧栏跟着玻璃配方走
         // （不那么透出壁纸）。手机端直接借用它 —— 只打在**远程页面**上，所以本机观感不受影响；
         // 没装壁纸插件时这行什么也不做，上面 CSS 里那份实底兜底仍然生效。
-        try { document.body.setAttribute('data-we-sidebar-glass', 'on'); } catch { /* 忽略 */ }
+        // 这里**曾经**强行把壁纸引擎的「侧栏液态玻璃」(body[data-we-sidebar-glass]) 打开 —— 那正是「左侧透明」的来源：
+        // 插件的语义是「开了才透明」（它自己的 settings-schema 写明：该开关关闭后侧栏恢复原生外观，不透明/不模糊）。
+        // 现在改为**完全不碰**：让它跟随插件自己的设置（那个设置本来就会同步过来；插件没装时属性也不存在），
+        // 于是本机与远程看到的是同一套侧栏外观；而 DSH 原生侧栏本身就是不透明的（实测 rgb(249,250,251)）。
         const frame = document.querySelector('[data-slot="root"] > *');
         if (!frame) return;
         frame.setAttribute('data-ra-frame', '');
