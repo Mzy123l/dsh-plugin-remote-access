@@ -155,7 +155,7 @@ Write-Host "  4) 手机网址看这里的『手机访问』那一行：$(Join-Pa
 Write-Host ''
 Write-Host '也可以完全不用这个脚本（插件页直接填）:' -ForegroundColor Cyan
 Write-Host "  · github:$Repo                （可直接带 #分支 或 #commit）"
-Write-Host "  · dsh-remote-access-cidr      （从 npm 装，发布后可用）"
+Write-Host '  · 或者直接填本机某个目录的绝对路径'
 if ($backup) { Write-Host ''; Write-Host "旧的版本备份在：$backup（确认没问题后可以删掉）" -ForegroundColor DarkGray }
 Write-Host ''
 

@@ -21,14 +21,17 @@
 
 | 填什么 | 从哪里装 |
 |---|---|
-| `dsh-remote-access-cidr` | npm（发布后可用） |
-| `github:Mzy123l/dsh-remote-access-cidr` | 直接从 GitHub |
+| `github:Mzy123l/dsh-remote-access-cidr` | 直接从 GitHub（推荐） |
 | 本机某个目录的绝对路径 | 自己 clone / 下载下来时 |
+
+> ⚠️ npm 上那个 `dsh-remote-access-cidr` **已停止更新**（停在 1.0.0），请别再用它安装；
+> 安装请走上面这两条 —— 需要什么版本，GitHub 上就是什么版本。
 
 **② 命令行**（等价于插件页那一步；DSH 正在运行时 profile 写锁会占住）：
 
 ```powershell
-dsh plugin --profile desktop add dsh-remote-access-cidr
+dsh plugin --profile desktop add github:Mzy123l/dsh-remote-access-cidr
+# CLI 若不认这种写法，就填本机目录的绝对路径
 ```
 
 **③ GitHub 一键取代码** —— 想把源码放到本机再装：
