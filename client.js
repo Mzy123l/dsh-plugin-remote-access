@@ -278,6 +278,18 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
   /* 横屏手机里垂直方向更金贵：导航那条压薄一点 */
   html[data-ra-layout="phone"] [data-ra-settings-nav] { padding: 6px 12px 4px !important; }
 }
+
+/* 抽屉的实底：**不覆盖 DSH 的表面元素**（那条 background !important 覆盖表面会让左侧栏整列不再绘制，
+   已在 d92a572 删除并验证），改为在抽屉背后垫一层自己的底色 —— 伪元素 + z-index:-1，
+   正好夹在父层背景与内容之间。这样即使内层面板仍带着壁纸引擎调出来的半透明底色，合成结果也不透明。
+   只在手机档的抽屉上生效，本机与电脑档不注入。 */
+html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar]::before {
+  content: "" !important;
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: -1 !important;
+  background: var(--dsw-alias-bg-base, #101a36) !important; /*strong*/
+}
 `;
 
     /** 布局变化（手机 ↔ 电脑、横屏 ↔ 竖屏）的订阅者，设置页组件靠它跟着重渲染 */
