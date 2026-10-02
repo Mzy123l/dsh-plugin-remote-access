@@ -64,6 +64,10 @@ public class MainActivity extends Activity {
   private FrameLayout errorView;
   private FrameLayout webHost;
   private EditText hostInput;
+  /** 地址页左上角的返回：只在「已经连过、又点设置进来」的时候出现 */
+  private ImageButton setupBack;
+  /** 是否已经载入过页面 —— 决定地址页要不要给「返回」 */
+  private boolean webLoaded = false;
   private CheckBox tlsCheck;
   private TextView setupError;
   private TextView errorTitle;
@@ -180,6 +184,18 @@ public class MainActivity extends Activity {
     int p = dp(20);
     column.setPadding(p, dp(28), p, dp(28));
 
+    // 左上角返回：从网页点「设置」进来时才有意义（首次启动没有「回去」可回，所以那时不显示）
+    setupBack = iconButton(R.drawable.ic_back, "返回");
+    setupBack.setOnClickListener(v -> {
+      setupView.setVisibility(View.GONE);
+      errorView.setVisibility(View.GONE);
+      webHost.setVisibility(View.VISIBLE);
+    });
+    setupBack.setVisibility(View.GONE);
+    LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(dp(40), dp(40));
+    backParams.bottomMargin = dp(6);
+    column.addView(setupBack, backParams);
+
     LinearLayout brand = new LinearLayout(this);
     brand.setOrientation(LinearLayout.HORIZONTAL);
     brand.setGravity(Gravity.CENTER_VERTICAL);
@@ -253,6 +269,7 @@ public class MainActivity extends Activity {
 
   private void showSetup(String message) {
     setupError.setText(message == null ? "" : message);
+    if (setupBack != null) setupBack.setVisibility(webLoaded ? View.VISIBLE : View.GONE);
     setupView.setVisibility(View.VISIBLE);
     errorView.setVisibility(View.GONE);
     webHost.setVisibility(View.GONE);
@@ -515,6 +532,7 @@ public class MainActivity extends Activity {
     hostInput.setText(host);
     setupView.setVisibility(View.GONE);
     errorView.setVisibility(View.GONE);
+    webLoaded = true;
     webHost.setVisibility(View.VISIBLE);
     progress.setVisibility(View.VISIBLE);
     progress.setProgress(5);
@@ -524,6 +542,12 @@ public class MainActivity extends Activity {
 
   @Override
   public void onBackPressed() {
+    // 地址页开着、而且之前已经连上过：返回键就是「回到网页」，不用重新连
+    if (setupView != null && setupView.getVisibility() == View.VISIBLE && webLoaded && webHost != null) {
+      setupView.setVisibility(View.GONE);
+      webHost.setVisibility(View.VISIBLE);
+      return;
+    }
     if (webHost != null && webHost.getVisibility() == View.VISIBLE && web != null && web.canGoBack()) {
       web.goBack();
       return;
