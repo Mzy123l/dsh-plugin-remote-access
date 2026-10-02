@@ -634,31 +634,6 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         }, 200);
       }
 
-      /**
-       * 远程页面左下角的小标记：把「客户端读到的配置值 → 最终生效的档位」直接写在屏幕上。
-       * 真机上出现过「设置里是手机、实际是电脑」，而页面里到底读到了什么只能靠猜。现在一眼分清三种情况：
-       *   - 完全没有这个标记            → 客户端模块根本没加载（缓存/取不到），不是布局逻辑的问题；
-       *   - 标记 cfg=desktop            → 配置值没读到（或读到的是旧值）；
-       *   - 标记 cfg=phone → phone 却仍是电脑档 → 才是应用布局这一步的问题。
-       */
-      function showBadge(configValue, layout) {
-        try {
-          let el = document.getElementById('dsh-ra-badge');
-          if (!el) {
-            el = document.createElement('div');
-            el.id = 'dsh-ra-badge';
-            el.style.cssText =
-              'position:fixed;left:6px;bottom:6px;z-index:2147483000;pointer-events:none;opacity:.85;' +
-              'font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:3px 6px;border-radius:6px;' +
-              'background:rgba(0,0,0,.6);color:#fff;max-width:70vw;';
-            (document.body || document.documentElement).appendChild(el);
-          }
-          const strong = document.documentElement.hasAttribute('data-ra-strong');
-          const override = raOverride();
-          el.textContent = 'RA cfg=' + configValue + ' -> ' + layout + (strong ? '+strong' : '') + (override ? ' (?ra=' + override + ')' : '');
-        } catch (e) { /* 忽略：标记只是排查用 */ }
-      }
-
       function applyLayout() {
         if (stopped) return;
         const override = raOverride();
@@ -684,7 +659,6 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         // 首次进入手机布局后踢一次重绘：这一步正好是「打开页面就是空白」的现场
         if (layout === 'phone') nudgeRepaint();
         emitLayout();
-        showBadge(mode, layout);
       }
 
       /** 读一次「远程UI布局」配置；失败就退到 auto（并重试几次，刚进页面时 Remote 可能还没就绪） */
