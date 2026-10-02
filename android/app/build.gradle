@@ -16,8 +16,8 @@ android {
     applicationId 'dev.dsh.remote'
     minSdk 26
     targetSdk 34
-    versionCode 3
-    versionName '1.1.0'
+    versionCode 7
+    versionName '1.1.1'
   }
 
   if (keystoreFile.exists()) {

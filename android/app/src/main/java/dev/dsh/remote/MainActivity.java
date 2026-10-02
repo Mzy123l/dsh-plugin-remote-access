@@ -64,6 +64,10 @@ public class MainActivity extends Activity {
   private FrameLayout errorView;
   private FrameLayout webHost;
   private EditText hostInput;
+  /** 地址页左上角的返回：只在「已经连过、又点设置进来」的时候出现 */
+  private ImageButton setupBack;
+  /** 是否已经载入过页面 —— 决定地址页要不要给「返回」 */
+  private boolean webLoaded = false;
   private CheckBox tlsCheck;
   private TextView setupError;
   private TextView errorTitle;
@@ -180,6 +184,18 @@ public class MainActivity extends Activity {
     int p = dp(20);
     column.setPadding(p, dp(28), p, dp(28));
 
+    // 左上角返回：从网页点「设置」进来时才有意义（首次启动没有「回去」可回，所以那时不显示）
+    setupBack = iconButton(R.drawable.ic_back, "返回");
+    setupBack.setOnClickListener(v -> {
+      setupView.setVisibility(View.GONE);
+      errorView.setVisibility(View.GONE);
+      webHost.setVisibility(View.VISIBLE);
+    });
+    setupBack.setVisibility(View.GONE);
+    LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(dp(40), dp(40));
+    backParams.bottomMargin = dp(6);
+    column.addView(setupBack, backParams);
+
     LinearLayout brand = new LinearLayout(this);
     brand.setOrientation(LinearLayout.HORIZONTAL);
     brand.setGravity(Gravity.CENTER_VERTICAL);
@@ -253,6 +269,7 @@ public class MainActivity extends Activity {
 
   private void showSetup(String message) {
     setupError.setText(message == null ? "" : message);
+    if (setupBack != null) setupBack.setVisibility(webLoaded ? View.VISIBLE : View.GONE);
     setupView.setVisibility(View.VISIBLE);
     errorView.setVisibility(View.GONE);
     webHost.setVisibility(View.GONE);
@@ -423,27 +440,30 @@ public class MainActivity extends Activity {
     webHost.addView(loadHint, hintParams);
 
     // 两个小图标：右上角一枚半透明胶囊，放着会自己淡下去，点一下回来
+    // 两枚小图标：竖着贴在**左侧图标栏下方的空白处**（那一列图标下面是空的；顺手也不挡顶部工具栏、
+    // 右栏把手与输入区）。放着会自己淡下去，点一下回来。
     LinearLayout pill = new LinearLayout(this);
-    pill.setOrientation(LinearLayout.HORIZONTAL);
-    pill.setGravity(Gravity.CENTER_VERTICAL);
-    pill.setAlpha(0.92f);
-    pill.setBackground(rounded(dark ? 0xE6141821 : 0xF2FFFFFF, 22, lineColor, 1));
+    pill.setOrientation(LinearLayout.VERTICAL);
+    pill.setGravity(Gravity.CENTER_HORIZONTAL);
+    pill.setAlpha(0.9f);
+    pill.setBackground(rounded(dark ? 0xD9141821 : 0xE6FFFFFF, 20, lineColor, 1));
     int pp = dp(3);
     pill.setPadding(pp, pp, pp, pp);
 
     ImageButton settings = iconButton(android.R.drawable.ic_menu_preferences, "设置");
     settings.setOnClickListener(v -> showSetup(null));
-    pill.addView(settings, new LinearLayout.LayoutParams(dp(38), dp(38)));
+    pill.addView(settings, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
     ImageButton reload = iconButton(android.R.drawable.ic_popup_sync, "刷新");
     reload.setOnClickListener(v -> web.reload());
-    pill.addView(reload, new LinearLayout.LayoutParams(dp(38), dp(38)));
+    pill.addView(reload, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
     FrameLayout.LayoutParams pillParams = new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    pillParams.gravity = Gravity.TOP | Gravity.END;
-    pillParams.topMargin = dp(10);
-    pillParams.rightMargin = dp(10);
+    // 左抽屉收起时是一条 56px 宽的图标栏；6dp 让 34dp 的图标略靠左，52dp 把它抬到列表上方
+    pillParams.gravity = Gravity.BOTTOM | Gravity.START;
+    pillParams.leftMargin = dp(6);
+    pillParams.bottomMargin = dp(52);
     webHost.addView(pill, pillParams);
 
     pill.postDelayed(() -> pill.animate().alpha(0.3f).setDuration(400), 3500);
@@ -515,6 +535,7 @@ public class MainActivity extends Activity {
     hostInput.setText(host);
     setupView.setVisibility(View.GONE);
     errorView.setVisibility(View.GONE);
+    webLoaded = true;
     webHost.setVisibility(View.VISIBLE);
     progress.setVisibility(View.VISIBLE);
     progress.setProgress(5);
@@ -524,6 +545,12 @@ public class MainActivity extends Activity {
 
   @Override
   public void onBackPressed() {
+    // 地址页开着、而且之前已经连上过：返回键就是「回到网页」，不用重新连
+    if (setupView != null && setupView.getVisibility() == View.VISIBLE && webLoaded && webHost != null) {
+      setupView.setVisibility(View.GONE);
+      webHost.setVisibility(View.VISIBLE);
+      return;
+    }
     if (webHost != null && webHost.getVisibility() == View.VISIBLE && web != null && web.canGoBack()) {
       web.goBack();
       return;

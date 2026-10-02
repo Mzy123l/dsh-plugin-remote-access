@@ -862,8 +862,50 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       let swipe = null;
       const phoneNow = () => document.documentElement.getAttribute('data-ra-layout') === 'phone';
 
+      /**
+       * 起手点是不是落在「自己就要吃横向手势」的东西里 —— 是的话我们根本不接管这一划。
+       *
+       * 真机反馈：拖动壁纸吉祥物、横向拖表格/代码块，都会把抽屉/右栏划出来。原因是原来只看
+       * 起手坐标与位移比例，不看**你按的是什么**：画布上的拖动和容器里的横向滚动同样是「明显的横向」。
+       * 所以这里沿着祖先链找几类「横向归属方」，命中任意一类就放手：
+       *   · 横向能滚的容器（表格、代码块 <pre>、设置页的胶囊条、轮播…）；
+       *   · canvas / video / img —— 壁纸吉祥物、图片预览这类拖拽目标；
+       *   · draggable、contenteditable、range 滑杆、select/textarea；
+       *   · 壁纸引擎自己的节点（data-we* / data-wallpaper*）；
+       *   · 当前有非折叠的文本选区（用户在拖选择柄）。
+       * 判断失败一律当作「没命中」，也就是保持旧行为，不至于把滑动开关整个弄丢。
+       */
+      function horizontalOwner(target) {
+        try {
+          for (let el = target, depth = 0; el && depth < 14; el = el.parentElement, depth += 1) {
+            if (typeof Element === 'undefined' || !(el instanceof Element)) break;
+            const tag = el.tagName;
+            if (tag === 'CANVAS' || tag === 'VIDEO' || tag === 'IMG') return true;
+            if (tag === 'SELECT' || tag === 'TEXTAREA') return true;
+            if (tag === 'INPUT' && el.type === 'range') return true;
+            if (el.isContentEditable) return true;
+            if (el.hasAttribute('draggable') && el.getAttribute('draggable') !== 'false') return true;
+            const attrs = typeof el.getAttributeNames === 'function' ? el.getAttributeNames() : [];
+            if (attrs.some((n) => n.startsWith('data-we') || n.startsWith('data-wallpaper'))) return true;
+            if (el.scrollWidth - el.clientWidth > 24) {
+              const overflowX = getComputedStyle(el).overflowX;
+              if (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'overlay') return true;
+            }
+            const touchAction = getComputedStyle(el).touchAction;
+            if (touchAction && (touchAction.includes('pan-x') || touchAction === 'none')) return true;
+          }
+          const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
+          if (sel && !sel.isCollapsed && String(sel).length > 0) return true;
+        } catch { /* 判断失败就当没命中 */ }
+        return false;
+      }
+
       function onTouchStart(e) {
         if (!phoneNow() || e.touches.length !== 1) { swipe = null; return; }
+        // 抽屉开着时，整层都是我们自己的侧栏列表（工作区/会话那一串）：不再问「这一划归谁」——
+        // 否则列表里任何一个横向略有溢出的容器都会把「滑回主页」整个吃掉（真机上就是这么发生的）。
+        const drawerOpen = document.documentElement.hasAttribute('data-ra-drawer');
+        if (!drawerOpen && horizontalOwner(e.target)) { swipe = null; return; }
         const point = e.touches[0];
         const width = window.innerWidth || 0;
         swipe = {
@@ -904,9 +946,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         const drawer = document.documentElement.hasAttribute('data-ra-drawer');
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
-          // 向右滑：收起右栏优先（它盖在最上面），否则打开左抽屉
+          // 向右滑：抽屉开着时先**收起抽屉**（这就是「回到主页」），其次收右栏，最后才是打开抽屉
+          if (drawer) { clickLabel('收起侧边栏'); return; }
           if (rightOpen) { clickLabel('收起右侧边栏'); return; }
-          if (!drawer) clickLabel('打开侧边栏');
+          clickLabel('打开侧边栏');
           return;
         }
         // 向左滑：收起抽屉优先，否则打开右栏

@@ -748,7 +748,21 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
 
       // 写响应头本身也会抛（下游刚断、或头已经发过），所以单独包起来
       try {
-        res.writeHead(upRes.statusCode || 502, upRes.headers);
+        // 内容寻址的静态产物：聚合插件包（URL 带 rev= 内容哈希）与 Vite 产物（文件名里带哈希）。
+        // 上游一个缓存头都不发（实测：没有 cache-control / etag / last-modified），浏览器没有 freshness
+        // 依据就只能每次重新下 —— 手机上就是「每次进去都慢」；而 WebView 的缓存比 Edge 更保守，尤其明显。
+        // 这里给它们钉一年 immutable：换版本时 URL 里的 rev/哈希会变，自然重新下，不会看到旧东西。
+        let headers = upRes.headers;
+        try {
+          const urlPath = String(upRes.req?.path || '');
+          const hashedAsset =
+            urlPath.startsWith('/plugins/') || urlPath.startsWith('/assets/') || /[?&]rev=/.test(urlPath);
+          const ok = (upRes.statusCode || 0) === 200 || (upRes.statusCode || 0) === 206;
+          if (hashedAsset && ok && !headers['cache-control']) {
+            headers = { ...headers, 'cache-control': 'public, max-age=31536000, immutable' };
+          }
+        } catch { /* 加缓存头失败也照常转发 */ }
+        res.writeHead(upRes.statusCode || 502, headers);
       } catch (err) {
         dropUpstream(`写响应头失败: ${err?.message}`);
         return;
