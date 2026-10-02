@@ -543,6 +543,21 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
   };
 
   const server = http.createServer((req, res) => {
+    // 边界护栏：这个回调里的任何同步异常都会变成 uncaughtException 并**带走整个 DSH 宿主**
+    // （线上真发生过一次：下游已销毁时 pipeline 同步抛 ERR_STREAM_UNABLE_TO_PIPE）。
+    // 代理是网络边缘，输入全是不可信的，所以这里必须什么都不许漏出去。
+    try {
+      handleRequest(req, res);
+    } catch (err) {
+      note('error', `处理请求时抛出异常（已兜住，宿主不受影响）: ${err?.stack ?? err}`);
+      try {
+        if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('500 internal proxy error\n');
+      } catch { /* 下游已经断了 */ }
+    }
+  });
+
+  function handleRequest(req, res) {
     const peer = bareIp(req.socket.remoteAddress);
     if (!peerAllowed(peer, cfg) || gate.banned(peer)) {
       note('debug', `拒绝 ${peer} → 403（不在允许网段、命中黑名单，或在拉黑名单里）`);
@@ -624,6 +639,23 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
       // 否则显式设了 30s 超时的用户，照样会在下大文件 / 看长流的时候被中途掐断。
       try { upRes.socket?.setTimeout?.(0); } catch { /* 没有 socket 就算了 */ }
 
+      /**
+       * 下游已经不能写了（手机切后台、关标签、abort、切网）时就走到这里。
+       *
+       * 为什么必须专门判一次：`stream.pipeline` / `pipe` 在目标是**已销毁**的流时不是发 error，
+       * 而是**同步抛** `ERR_STREAM_UNABLE_TO_PIPE`。这里是在 HTTP 请求回调里，同步抛出去就是
+       * uncaughtException —— 线上实测直接把 DSH 的宿主进程带崩（外壳报 host exited with 1 并重启）。
+       * 代理再怎么写错，也不该有能力崩掉宿主，所以这条路径只「把上游读干丢掉」。
+       */
+      const dropUpstream = (why) => {
+        note('debug', `下游已断开，丢弃这次上游响应（${why}）`);
+        try { upRes.destroy(); } catch { /* 已经断了 */ }
+      };
+      if (res.destroyed || res.writableEnded) {
+        dropUpstream('res 已销毁');
+        return;
+      }
+
       // 上游说没票，可我们明明判过已授权 → 多半是浏览器那张 DSH cookie 失效了（每次重启 DSH 都换）。
       // 用本实例当前的票再试一次：DSH 会 303 + 发一张新 cookie，用户不用手动清 cookie、换网址。
       if (upRes.statusCode === 401 && canRepair && !repaired) {
@@ -647,14 +679,26 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
         return;
       }
 
-      res.writeHead(upRes.statusCode || 502, upRes.headers);
+      // 写响应头本身也会抛（下游刚断、或头已经发过），所以单独包起来
+      try {
+        res.writeHead(upRes.statusCode || 502, upRes.headers);
+      } catch (err) {
+        dropUpstream(`写响应头失败: ${err?.message}`);
+        return;
+      }
+
       // 用 pipeline 而不是 pipe：上游半路断掉时它会**同时收掉下游**。
       // 只 pipe 的话，上游 socket 被 destroy 只会让 upRes 发个 error，而 res 既不 end 也不 destroy，
       // 手机端就一直挂在那个残缺响应上等（这正是「壁纸卡着不动」的一种收尾形态）。
-      pipeline(upRes, res, (err) => {
-        if (!err) return;
-        note('debug', `转发中断（下游一起收掉，别让手机挂着）: ${err?.message}`);
-      });
+      // 它同样可能同步抛，所以外面再兜一层 try/catch —— 这条路径绝不能把异常放出请求回调。
+      try {
+        pipeline(upRes, res, (err) => {
+          if (!err) return;
+          note('debug', `转发中断（下游一起收掉，别让手机挂着）: ${err?.message}`);
+        });
+      } catch (err) {
+        dropUpstream(`无法建立转发: ${err?.message}`);
+      }
     };
 
     const upReq = http.request(options, onUpstream);
@@ -665,7 +709,7 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
     });
     upReq.on('error', failUpstream);
     req.pipe(upReq);
-  });
+  }
 
   server.on('connection', (socket) => {
     if (cfg.maxConnections > 0 && active >= cfg.maxConnections) {
@@ -680,6 +724,16 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
   // WebSocket / 事件流透传（DSH 界面靠它推送）。升级请求走 DSH cookie，不补票（补票会被 303 打断）；
   // cookie 失效时先靠上面那次「401 → 带票重试」把 cookie 换新（页面导航会走到），WS 自己不做重试。
   server.on('upgrade', (req, socket, head) => {
+    // 与 handleRequest 同样的护栏：这里的同步异常一样会变成 uncaughtException 带走宿主。
+    try {
+      handleUpgrade(req, socket, head);
+    } catch (err) {
+      note('error', `处理 WebSocket 升级时抛出异常（已兜住）: ${err?.stack ?? err}`);
+      try { socket.destroy(); } catch { /* 已经断了 */ }
+    }
+  });
+
+  function handleUpgrade(req, socket, head) {
     const peer = bareIp(socket.remoteAddress);
     if (!peerAllowed(peer, cfg) || gate.banned(peer)) {
       note('debug', `拒绝 ${peer} 的 WebSocket`);
@@ -709,7 +763,7 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
       socket.destroy();
     });
     socket.on('error', () => upstream.destroy());
-  });
+  }
 
   server.on('error', (err) => note('error', `监听 ${addr} 失败: ${err?.message}`));
   server.listen({ host: addr, port: cfg.port }, () => {

@@ -754,9 +754,72 @@ check(
 dispose14();
 brokenUpstream.close();
 
+// ---- 场景 13：下游先断开、上游后响应 → 不许抛出未捕获异常 ----
+//
+// 线上事故复现：手机上关标签/切后台之后，上游的响应才到，`stream.pipeline(upRes, res)`
+// 会**同步抛** ERR_STREAM_UNABLE_TO_PIPE；它抛在 HTTP 请求回调里 → uncaughtException
+// → DSH 宿主进程直接退出（外壳报 `host exited with 1` 并重启）。
+//
+// 这里有个**版本陷阱**，改这段之前务必知道：
+//   下游已经 destroyed 时，pipeline 在 **Node ≥ 24 才会同步抛**，Node 22/20 根本不抛
+//   （本机实测同一矩阵：Node 22.18 全部 no-throw，Electron 44 的 Node 24.21 全部 SYNC-THROW）。
+//   DSH 宿主的 Node 正是 24.x，而开发机常常是 22 —— 所以「用未捕获异常来断言」在开发机上会假过。
+// 因此主判据用**版本无关**的那一条：状态文件里必须留下「下游已断开，丢弃这次上游响应」。
+// （另加一条 uncaughtException 断言，在 Node ≥ 24 上才真正有牙齿。）
+const lateUpstream = http.createServer((req, res) => {
+  setTimeout(() => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('late-body');
+  }, 300);
+});
+await new Promise((r) => lateUpstream.listen(0, '127.0.0.1', r));
+const lateUpPort = lateUpstream.address().port;
+const lateFile = path.join(os.tmpdir(), `ra-late-${Date.now()}.txt`);
+const dispose15 = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${lateUpPort}`,
+  urlFile: lateFile,
+  logLevel: 'debug',
+});
+await new Promise((r) => setTimeout(r, 400));
+const lateProxyPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(lateFile, 'utf8'))?.[1] ?? 0);
+
+const uncaught = [];
+const collectUncaught = (err) => uncaught.push(err);
+process.on('uncaughtException', collectUncaught);
+try {
+  // 发一条请求，然后在下游**立刻**断开（60ms 后发 RST；上游 300ms 才回应）
+  const probe = net.connect(lateProxyPort, '127.0.0.1');
+  await new Promise((resolve) => {
+    probe.on('connect', () => {
+      probe.write('GET /late HTTP/1.1\r\nHost: probe\r\n\r\n');
+      setTimeout(() => { probe.resetAndDestroy(); resolve(); }, 60);
+    });
+    probe.on('error', () => resolve());
+  });
+  await new Promise((r) => setTimeout(r, 800)); // 等上游那次响应到达代理
+} finally {
+  process.off('uncaughtException', collectUncaught);
+}
+const lateText = fs.readFileSync(lateFile, 'utf8');
+check(
+  '下游断开后上游才响应：识别为「下游已断开」并丢弃，不去 pipe',
+  lateText.includes('下游已断开，丢弃这次上游响应'),
+  (lateText.match(/下游已断开[^\n]*/) ?? ['(没有这条记录)'])[0].slice(0, 70),
+);
+check(
+  '下游断开后上游才响应：不抛未捕获异常（Node ≥ 24 上这条才有牙齿）',
+  uncaught.length === 0,
+  `${uncaught.map((e) => e?.code ?? e?.message).join(', ') || '(无)'}；本机 node ${process.versions.node}`,
+);
+dispose15();
+lateUpstream.close();
+
 authUpstream.close();
 
-for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile]) {
+for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile, lateFile]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
 }
 
