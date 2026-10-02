@@ -38,6 +38,14 @@ function createReact() {
       if (!(i in hooks)) hooks[i] = { current: init };
       return hooks[i];
     },
+    // 与真实 React 一样占一个 hook 槽位（否则后面的 useEffect 索引会错位）
+    useCallback(fn, list) {
+      const i = cursor++;
+      const prev = deps[i];
+      const changed = !list || !prev || list.length !== prev.length || list.some((v, k) => v !== prev[k]);
+      if (changed) { deps[i] = list; hooks[i] = fn; }
+      return hooks[i] ?? fn;
+    },
     useEffect(fn, list) {
       const i = cursor++;
       const prev = deps[i];
@@ -112,7 +120,19 @@ let remoteClosed = false;
 const remoteSettings = {
   async describe() {
     if (remoteClosed) return { ok: false, error: { code: 'connection/closed', message: '连接已断开' } };
-    return { ok: true, value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { ...hostConfig }, revision }] } };
+    return {
+      ok: true,
+      value: {
+        writable: true,
+        hasDocument: true,
+        namespaces: [
+          { ns: 'remote-access', value: { ...hostConfig }, revision },
+          // 官方命名空间：只读的「本机配置」页要靠它们证明「显示的是宿主真值」
+          { ns: 'ui-theme', value: { preference: 'dark' }, revision },
+          { ns: 'ui-chat', value: { transcriptView: 'standard', performanceUsage: 'detailed' }, revision },
+        ],
+      },
+    };
   },
   async mutate(ns, ops, expected) {
     mutateCalls.push({ ns, ops, expected });
@@ -123,6 +143,8 @@ const remoteSettings = {
 };
 
 let Panel = null;
+/** 所有 settings.section 注册（用来断言「本机配置」这一页只在远程页面出现） */
+let registrations = [];
 const makeCtx = () => ({
   // 手机页面：configForms 恒为不可写（DSH 的非回环策略）
   configForms: {
@@ -133,12 +155,15 @@ const makeCtx = () => ({
     }),
     describe: () => ({ load: async () => {} }),
   },
-  remote: { settings: remoteSettings, $on: () => () => {} },
+  // 手机/远程页面：$host.isLoopback = false 是 DSH 在非回环页面给的固定事实
+  remote: { $host: { home: undefined, isLoopback: false }, settings: remoteSettings, $on: () => () => {} },
   on: () => () => {},
   slots: {
     inject: (_name, callback) => callback(),
-    register: (_options, Component) => {
-      Panel = Component;
+    register: (options, Component) => {
+      registrations.push({ id: options?.id, label: options?.label, Component });
+      // 远程页面现在会注册两页；Panel 始终指「参数」那一页，免得后面的断言拿到只读页
+      if (options?.id === 'remote-access') Panel = Component;
       return () => {};
     },
   },
@@ -471,6 +496,84 @@ check(
   '远程UI布局：能保存为 phone',
   mutateCalls.length === 1 && mutateCalls[0].ops.some((op) => op.path[0] === 'remoteLayout' && op.value === 'phone'),
   JSON.stringify(mutateCalls[0]?.ops ?? null),
+);
+
+// ---------------------------------------------------------------- 场景五：只读的「本机配置」（只在远程页面出现）
+/** 把元素树里所有文本拼起来（比只取一层 children 稳） */
+const allText = (node) => {
+  const out = [];
+  const walk = (n) => {
+    if (n === null || n === undefined || typeof n === 'boolean') return;
+    if (typeof n === 'string' || typeof n === 'number') { out.push(String(n)); return; }
+    if (Array.isArray(n)) { for (const item of n) walk(item); return; }
+    if (typeof n === 'object') walk(n.props?.children);
+  };
+  walk(node);
+  return out.join('|');
+};
+
+registrations = [];
+remoteClosed = false;
+// 关掉共享的「重渲染调度」：这一场景自己直接渲染只读页，别让上一场景遗留的
+// state 更新在 apply 期间回调到参数页（那会拿到不匹配的 form → snap 为空）
+react.onSchedule(() => {});
+plugin.apply(makeCtx());
+const hostReg = registrations.find((r) => r.id === 'remote-access-host-config');
+check(
+  '远程页面：额外注册了只读的「本机配置」页',
+  !!hostReg && hostReg.label === '本机配置',
+  registrations.map((r) => `${r.id}:${r.label}`).join(', '),
+);
+check(
+  '远程页面：本插件的参数页照旧在（两页共存）',
+  registrations.some((r) => r.id === 'remote-access'),
+  registrations.map((r) => r.id).join(', '),
+);
+
+react.resetAll();
+let hostTree = hostReg ? hostReg.Component() : null;
+await sleep(80);
+// 只重置游标（不清 hook 存储）：把 load() 写回的 state 读出来 —— 这一场景
+// 关掉了自动调度，所以更新要自己触发一次重渲染
+react.reset();
+hostTree = hostReg ? hostReg.Component() : null;
+const hostText = allText(hostTree);
+check('本机配置页：显示宿主真实值（深浅色 = dark，而不是默认值）', hostText.includes('dark'), hostText.slice(0, 90));
+check('本机配置页：显示宿主真实值（工作步骤展示 = standard）', hostText.includes('standard'));
+check('本机配置页：不显示本插件自己的命名空间', !hostText.includes('remote-access'), hostText.slice(0, 90));
+check(
+  '本机配置页：只有一个按钮，且是「重新读取」（没有任何写入口）',
+  buttons(hostTree).length === 1 && textOf(buttons(hostTree)[0]).includes('重新读取'),
+  buttons(hostTree).map((b) => textOf(b)).join(','),
+);
+check(
+  '本机配置页：明说只读、且提示到本机改',
+  hostText.includes('只读') && hostText.includes('本机'),
+);
+
+// 回环页面：不该出现这一页（本机看官方设置页就是真值）
+registrations = [];
+let loopPanel = null;
+plugin.apply({
+  configForms: {
+    get: () => ({
+      getSnapshot: () => ({ status: 'ready', writable: true, mode: 'host', revision: 1, value: {} }),
+      subscribe: () => () => {},
+      mutate: async () => true,
+    }),
+    describe: () => ({ load: async () => {} }),
+  },
+  remote: { $host: { isLoopback: true }, settings: remoteSettings, $on: () => () => {} },
+  on: () => () => {},
+  slots: {
+    inject: (_n, cb) => cb(),
+    register: (options, Component) => { registrations.push({ id: options?.id, label: options?.label }); loopPanel = Component; return () => {}; },
+  },
+});
+check(
+  '本机页面：不注册「本机配置」页（官方设置页本来就是真值）',
+  !registrations.some((r) => r.id === 'remote-access-host-config'),
+  registrations.map((r) => r.id).join(', '),
 );
 
 console.log(results.join('\n'));
