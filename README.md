@@ -21,11 +21,14 @@
 
 | 填什么 | 从哪里装 |
 |---|---|
-| `github:Mzy123l/dsh-plugin-remote-access` | 直接从 GitHub（推荐） |
+| `dsh-plugin-remote-access` | 从 npm（1.2.0 起已发布，装起来最快） |
+| `github:Mzy123l/dsh-plugin-remote-access` | 直接从 GitHub（要与仓库同步的最新代码时） |
 | 本机某个目录的绝对路径 | 自己 clone / 下载下来时 |
 
-> ⚠️ npm 上那个 `dsh-remote-access-cidr` **已停止更新**（停在 1.0.0），`dsh-remote-access` 则是别人的包，
-> 两个旧名字都别再用来安装；安装请走上面这两条 —— 需要什么版本，GitHub 上就是什么版本。
+> ⚠️ npm 上那两个旧名字 —— `dsh-remote-access-cidr`（**我们自己发的，停在 1.0.0**）和
+> `dsh-remote-access`（**别人的包**）—— 都别再用来安装。当前名字是 `dsh-plugin-remote-access`：
+> <https://www.npmjs.com/package/dsh-plugin-remote-access>。
+> （页面上那个 `0.0.0-stage` 是 npm 给新包名自动建的占位版本，`latest` 指向 1.2.0，不用管它。）
 
 > 📛 **改名（1.2.0）：`dsh-remote-access-cidr` → `dsh-plugin-remote-access`。**
 > bundle 的插件行是按**包名**装载的，所以旧来源装的那份不会自己跟过来：到「设置 → 插件」里把旧条目
@@ -35,8 +38,9 @@
 **② 命令行**（等价于插件页那一步；DSH 正在运行时 profile 写锁会占住）：
 
 ```powershell
-dsh plugin --profile desktop add github:Mzy123l/dsh-plugin-remote-access
-# CLI 若不认这种写法，就填本机目录的绝对路径
+dsh plugin --profile desktop add dsh-plugin-remote-access
+# 想跟仓库最新代码：dsh plugin --profile desktop add github:Mzy123l/dsh-plugin-remote-access
+# CLI 若不认这两种写法，就填本机目录的绝对路径
 ```
 
 **③ GitHub 一键取代码** —— 想把源码放到本机再装：
@@ -377,6 +381,8 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
   [`Mzy123l/dsh-plugin-remote-access`](https://github.com/Mzy123l/dsh-plugin-remote-access)。
   插件行的 `id`（`remote-access`）与设置命名空间没变，但 bundle 是按包名装载的，
   所以已装的旧来源**不会自动跟过来** —— 按上面「安装」里的迁移说明重装一次即可。
+- **发布到 npm**：新名字下已发布 [dsh-plugin-remote-access](https://www.npmjs.com/package/dsh-plugin-remote-access)@1.2.0
+  （旧的 `dsh-remote-access-cidr` 停在 1.0.0，不再更新）。装起来最快的写法从此变成直接填包名。
 - 文档：README / `install.ps1` / 代码注释里的旧名字与旧链接全部换成新仓库名，APK 链接指向当前 release。
 
 ### 1.1.1 – 1.1.2
