@@ -63,8 +63,9 @@ window.__ModuleLoader__.load({
         label: '外观',
         options: [
           { value: 'default', label: '出厂值' },
-          { value: 'dark', label: '深色' },
+          // 顺序照官方那行来（THEME_PREFERENCES = light / dark / system），我们不要自作主张换个先后
           { value: 'light', label: '浅色' },
+          { value: 'dark', label: '深色' },
           { value: 'system', label: '跟随系统' },
         ],
       },

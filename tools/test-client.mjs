@@ -631,7 +631,7 @@ check(
   ['remoteTheme', 'remoteFontSize', 'remoteTranscriptView', 'remoteDeveloperTools', 'remotePerformanceUsage'].every(
     (key) => byKey(tree, `${key}-i`) !== undefined,
   ) &&
-    optionsOf('remoteTheme') === 'default,dark,light,system' &&
+    optionsOf('remoteTheme') === 'default,light,dark,system' &&
     optionsOf('remoteTranscriptView') === 'default,compact,standard,detailed,verbose' &&
     optionsOf('remotePerformanceUsage') === 'default,compact,detailed' &&
     optionsOf('remoteDeveloperTools') === 'default,on,off',
