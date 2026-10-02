@@ -358,8 +358,29 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 | `locale/{zh,en}.json` | 插件页显示用的标题与说明 |
 | `icon.svg` | 插件页图标 |
 | `tools/` | 测试（Host / 客户端 / Config 校验）与从 DSH 安装包里取文件的工具 |
+| `android/` | 安卓外壳 App 的源码（首屏地址页 + WebView；Java、零第三方依赖，可离线构建） |
 | `install.ps1` | GitHub 一键取代码（放到本机固定目录，安装仍由 DSH 自己做） |
 | `LICENSE` | MIT |
+
+## 更新日志
+
+### 1.1.0
+- **「UI 设置」**（新）：设置页里多一层可折叠的下一级菜单，把官方「通用设置」里的
+  **外观 / 字号大小 / 工作步骤展示 / 显示代码工作视图 / 性能与用量** 存进本插件配置
+  （`remoteTheme` / `remoteFontSize` / `remoteTranscriptView` / `remoteDeveloperTools` / `remotePerformanceUsage`）。
+  这几项在非回环页面上本来是「改完刷新即还原」，现在每次打开远程页面都会重新套用；
+  `default` = 出厂值（**显式套回官方默认值**），且**只作用于远程页面**、不写宿主设置文档。
+- **安卓 App**（新）：[`android/`](android/) 是 DSH 的安卓外壳（首屏填 `IP:端口`，断网也能改地址），
+  Release 里有可直接安装的 APK（应用名 **DSH**）。
+- **`install.ps1`**：下载后校验包名与必需文件、覆盖前自动备份旧版本、`-Install` 直接交给 `dsh` CLI
+  （DSH 正在跑时自动跳过），还会认出 profile 里钉死的 `github:` 来源并提示怎么换。
+- 手机端：抽屉真正不透明（垫底用壁纸引擎自己的「可读性底色」）、右栏不再压到正文上、边缘滑动手势。
+- 修：上个版本引入的「下游断开后上游才响应」会把 DSH 宿主整个带崩（`ERR_STREAM_UNABLE_TO_PIPE`）。
+- 外观下拉的选项顺序照官方来（浅色在深色之前）。
+
+### 1.0.0
+- 首次发布：按网段开放 DSH 网页界面；带票网址 / 数字密码两种进入方式；`远程UI布局`（手机 / 电脑 / 自动）；
+  状态文件与自诊断；手机上的「新建工作区」用应用内选目录。
 
 ## 许可
 

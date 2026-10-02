@@ -1,8 +1,8 @@
 {
   "name": "dsh-remote-access-cidr",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
-  "description": "Expose this machine's DSH web GUI to a chosen CIDR range (e.g. Tailscale), with an optional numeric access code.",
+  "description": "Expose this machine's DSH web GUI to a chosen CIDR range (e.g. Tailscale), with an optional numeric access code, a phone layout that only affects remote pages, and the official UI preferences stored in this plugin's own config.",
   "license": "MIT",
   "icon": "./icon.svg",
   "repository": {
@@ -46,7 +46,7 @@
   ],
   "meta": {
     "title": "远程访问入口（限网段）",
-    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10）：只监听网段内的本机地址，网段外一律拒绝；可复制带票网址，也可设数字密码直接访问。"
+    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10）：只监听网段内的本机地址，网段外一律拒绝；可复制带票网址，也可设数字密码直接访问。手机端可选「手机布局」（横竖屏自适应），并且官方「通用设置」里的外观 / 字号大小 / 工作步骤展示 / 显示代码工作视图 / 性能与用量可以存进本插件配置、只作用于远程页面。"
   },
   "dsh": {
     "bundle": {
