@@ -55,8 +55,10 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/i
 
 不想在手机浏览器里手打地址的话，可以用配套的外壳 App：
 
-**[下载 dsh-remote-1.0.0.apk](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/download/v1.0.0-android/dsh-remote-1.0.0.apk)**
-（[Release 页](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/tag/v1.0.0-android) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+**[下载 dsh-remote-1.0.1.apk](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/download/v1.0.1-android/dsh-remote-1.0.1.apk)**
+（[Release 页](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/tag/v1.0.1-android) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+
+App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
 
 - **首屏就是地址页**：只填 `IP或域名:端口`（**不用写协议**，例 `100.64.0.3:19388`），HTTPS 一个勾决定；
 - 连不上 / 填错 / 电脑没开时**自动退回地址页**，顶栏也永远有「设置」——**断网也改得回来**；

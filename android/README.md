@@ -1,4 +1,4 @@
-# DSH 远程 · 安卓外壳
+# DSH · 安卓外壳
 
 把电脑上 DSH 的**远程访问网页**装进一个安卓 App。手机装一次，之后只管填地址。
 
@@ -53,7 +53,7 @@ keyPassword=...
 
 ## 发布
 
-现成的包在 Releases 里（本仓库 `v1.0.0-android`）。换版本时：
+现成的包在 Releases 里（本仓库 `v1.0.1-android`；应用名 **DSH**，图标是自适应图标 + 各密度 PNG）。换版本时：
 
 1. `android/app/build.gradle` 里抬 `versionCode` / `versionName`（`versionCode` 必须比上一版大，否则覆盖安装会被拒）；
 2. 构建、签名，把 APK 传上去；
