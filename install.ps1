@@ -1,5 +1,5 @@
 <#
-  install.ps1 —— 从 GitHub 取回 dsh-remote-access-cidr，放到固定目录，并尽量把安装这一步也替你走完。
+  install.ps1 —— 从 GitHub 取回 dsh-plugin-remote-access，放到固定目录，并尽量把安装这一步也替你走完。
 
   两段动作，互相独立：
 
@@ -14,14 +14,14 @@
 
   用法（任选一种）：
 
-    # A. 直接跑（默认取 main，落到 %LOCALAPPDATA%\dsh-plugins\dsh-remote-access-cidr）
-    irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1 | iex
+    # A. 直接跑（默认取 main，落到 %LOCALAPPDATA%\dsh-plugins\dsh-plugin-remote-access）
+    irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main/install.ps1 | iex
 
     # B. 带参数：代理 / 换目录 / 换分支 / 顺便装进 DSH
-    $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1
+    $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main/install.ps1
     & ([scriptblock]::Create($s)) -Proxy http://127.0.0.1:7890 -Force -Install
 
-    # C. 装还没合并进 main 的分支（例如 PR 上的新功能）
+    # C. 装还没合并进 main 的分支（例如 PR 上的新功能；下面那个分叉仓库自己的名字没跟着上游改）
     & ([scriptblock]::Create($s)) -Repo Sonder-Traveller/dsh-remote-access-cidr -Ref fix/aborted-downstream-crash -Install
 
   装完重启一次 DSH，然后「设置 → 远程访问」里改参数；手机网址在 <DSH_HOME>\remote-access-url.txt。
@@ -29,11 +29,11 @@
 [CmdletBinding()]
 param(
   # GitHub 仓库（改名后写新名字即可，GitHub 会自动重定向旧地址）
-  [string]$Repo = 'Mzy123l/dsh-remote-access-cidr',
+  [string]$Repo = 'Mzy123l/dsh-plugin-remote-access',
   # 分支或 tag
   [string]$Ref = 'main',
   # 装到哪（默认用户级，不需要管理员）
-  [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'dsh-plugins\dsh-remote-access-cidr'),
+  [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'dsh-plugins\dsh-plugin-remote-access'),
   # 走代理下载，例如 http://127.0.0.1:7890；留空 = 直连
   [string]$Proxy = '',
   # 目录已存在时覆盖（会先备份旧版本）
@@ -58,14 +58,14 @@ function Invoke-Download([string]$Uri, [string]$OutFile) {
 
 # ---------------------------------------------------------------- 1) 取代码
 
-Write-Step "准备把 dsh-remote-access-cidr 取到: $InstallDir"
+Write-Step "准备把 dsh-plugin-remote-access 取到: $InstallDir"
 $hasOld = Test-Path (Join-Path $InstallDir 'package.json')
 if ($hasOld -and -not $Force) {
   Write-Warn2 '该目录里已经有一份（加 -Force 才会覆盖）。如果你只是想重新装一遍，跳到下面的『下一步』。'
 }
 
-$zip = Join-Path $env:TEMP "dsh-remote-access-cidr-$([guid]::NewGuid().ToString('N')).zip"
-$staging = Join-Path $env:TEMP "dsh-remote-access-cidr-$([guid]::NewGuid().ToString('N'))"
+$zip = Join-Path $env:TEMP "dsh-plugin-remote-access-$([guid]::NewGuid().ToString('N')).zip"
+$staging = Join-Path $env:TEMP "dsh-plugin-remote-access-$([guid]::NewGuid().ToString('N'))"
 
 $url = "https://codeload.github.com/$Repo/zip/refs/heads/$Ref"
 try {
@@ -91,7 +91,7 @@ if (-not $root) { throw '压缩包里没有目录，下载可能被劫持或仓�
 $manifest = Join-Path $root.FullName 'package.json'
 if (-not (Test-Path $manifest)) { throw '取到的内容里没有 package.json，不是本插件仓库？' }
 $pkg = Get-Content $manifest -Raw | ConvertFrom-Json
-if ($pkg.name -ne 'dsh-remote-access-cidr') { throw "包名对不上（拿到的是 $($pkg.name)）" }
+if ($pkg.name -ne 'dsh-plugin-remote-access') { throw "包名对不上（拿到的是 $($pkg.name)）" }
 foreach ($need in 'index.js', 'client.js', 'cordis.patch.yml') {
   if (-not (Test-Path (Join-Path $root.FullName $need))) { throw "缺少 $need，仓库内容不完整" }
 }
@@ -162,9 +162,15 @@ Write-Host ''
 # 已经用 github: 装过同一个插件时提醒一句：profile 里那份是钉死的 commit，不会自动变成这个目录
 $profileFile = Join-Path $dshHome "profiles\$Profile\package.json"
 if (Test-Path $profileFile) {
-  $spec = (Get-Content $profileFile -Raw | ConvertFrom-Json).dependencies.'dsh-remote-access-cidr'
+  $deps = (Get-Content $profileFile -Raw | ConvertFrom-Json).dependencies
+  $spec = if ($deps) { $deps.'dsh-plugin-remote-access' } else { $null }
+  # 改名前的旧包名：老用户的 profile 里还是这个键
+  if (-not $spec -and $deps) { $spec = $deps.'dsh-remote-access-cidr' }
   if ($spec -and "$spec" -notmatch '^(link:|file:|\.|/|[A-Za-z]:)') {
     Write-Warn2 "你的 profile 里已经用的是「$spec」——它钉死在那个来源，不会自动换成这个目录。"
     Write-Warn2 "想换成这份代码：先在设置 → 插件里把它移除，再用上面的目录重新添加。"
+    if ("$spec" -match 'dsh-remote-access-cidr') {
+      Write-Warn2 '（这条是改名前的旧来源：插件行按包名装载，改名后建议移除旧条目、按 dsh-plugin-remote-access 重新添加。）'
+    }
   }
 }

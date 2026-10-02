@@ -1,4 +1,4 @@
-# dsh-remote-access-cidr
+# dsh-plugin-remote-access
 
 给 **DeepSeek Harness（DSH）桌面版**用的插件：把本机 DSH 的网页界面**只开放给你指定的网段**
 （默认 Tailscale 的 `100.64.0.0/10`），于是手机或另一台电脑也能用上它。
@@ -21,30 +21,35 @@
 
 | 填什么 | 从哪里装 |
 |---|---|
-| `github:Mzy123l/dsh-remote-access-cidr` | 直接从 GitHub（推荐） |
+| `github:Mzy123l/dsh-plugin-remote-access` | 直接从 GitHub（推荐） |
 | 本机某个目录的绝对路径 | 自己 clone / 下载下来时 |
 
-> ⚠️ npm 上那个 `dsh-remote-access-cidr` **已停止更新**（停在 1.0.0），请别再用它安装；
-> 安装请走上面这两条 —— 需要什么版本，GitHub 上就是什么版本。
+> ⚠️ npm 上那个 `dsh-remote-access-cidr` **已停止更新**（停在 1.0.0），`dsh-remote-access` 则是别人的包，
+> 两个旧名字都别再用来安装；安装请走上面这两条 —— 需要什么版本，GitHub 上就是什么版本。
+
+> 📛 **改名（1.2.0）：`dsh-remote-access-cidr` → `dsh-plugin-remote-access`。**
+> bundle 的插件行是按**包名**装载的，所以旧来源装的那份不会自己跟过来：到「设置 → 插件」里把旧条目
+> **移除**，再按新名字添加一次。移除有可能一并清掉 profile 里 `cordis.patch.yml` 中 `id: remote-access`
+> 那一行的 `config:`（网段 / 密码 / UI 设置都在里面）—— 想留参数，先把它抄下来，装好再粘回去。
 
 **② 命令行**（等价于插件页那一步；DSH 正在运行时 profile 写锁会占住）：
 
 ```powershell
-dsh plugin --profile desktop add github:Mzy123l/dsh-remote-access-cidr
+dsh plugin --profile desktop add github:Mzy123l/dsh-plugin-remote-access
 # CLI 若不认这种写法，就填本机目录的绝对路径
 ```
 
 **③ GitHub 一键取代码** —— 想把源码放到本机再装：
 
 ```powershell
-irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main/install.ps1 | iex
 ```
 
-脚本只负责**把代码取到一个固定目录**（默认 `%LOCALAPPDATA%\dsh-plugins\dsh-remote-access-cidr`），
+脚本只负责**把代码取到一个固定目录**（默认 `%LOCALAPPDATA%\dsh-plugins\dsh-plugin-remote-access`），
 装的动作仍然交给 DSH 自己（插件页填那个目录）。需要代理时：
 
 ```powershell
-$s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/install.ps1
+$s = irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main/install.ps1
 & ([scriptblock]::Create($s)) -Proxy http://127.0.0.1:7890
 ```
 
@@ -58,8 +63,8 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-remote-access-cidr/main/i
 
 不想在手机浏览器里手打地址的话，可以用配套的外壳 App：
 
-**[下载 dsh-remote-1.0.1.apk](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/download/v1.0.1-android/dsh-remote-1.0.1.apk)**
-（[Release 页](https://github.com/Sonder-Traveller/dsh-remote-access-cidr/releases/tag/v1.0.1-android) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+**[下载 dsh-remote-1.1.1.apk](https://github.com/Mzy123l/dsh-plugin-remote-access/releases/download/v1.1.1/dsh-remote-1.1.1.apk)**
+（[Release 页](https://github.com/Mzy123l/dsh-plugin-remote-access/releases) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
 
 App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
 
@@ -366,6 +371,21 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 | `LICENSE` | MIT |
 
 ## 更新日志
+
+### 1.2.0
+- **改名**：包名 `dsh-remote-access-cidr` → **`dsh-plugin-remote-access`**，仓库同为
+  [`Mzy123l/dsh-plugin-remote-access`](https://github.com/Mzy123l/dsh-plugin-remote-access)。
+  插件行的 `id`（`remote-access`）与设置命名空间没变，但 bundle 是按包名装载的，
+  所以已装的旧来源**不会自动跟过来** —— 按上面「安装」里的迁移说明重装一次即可。
+- 文档：README / `install.ps1` / 代码注释里的旧名字与旧链接全部换成新仓库名，APK 链接指向当前 release。
+
+### 1.1.1 – 1.1.2
+- 安卓外壳：地址页左上角加返回（从网页点设置进来时回得去）；设置 / 刷新两枚小图标挪到左侧图标栏下方；
+  APK 版本号统一为 1.1.1。
+- 手机端手势：起手落在画布 / 可横滚容器 / 可拖拽 / 壁纸节点上时不接管横滑
+  （拖动吉祥物、横拖表格代码块不再滑出面板）；抽屉开着时向右滑也能收起。
+- 代理：给内容寻址的静态产物（`/plugins/??rev=…` 与 `/assets/`）钉一年 `immutable` 缓存，
+  治「每次进去都要重下十几 MB」。
 
 ### 1.1.0
 - **「UI 设置」**（新）：设置页里多一层可折叠的下一级菜单，把官方「通用设置」里的

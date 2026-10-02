@@ -1,5 +1,5 @@
 /**
- * dsh-remote-access-cidr —— 把本机 DSH 的网页界面开放给指定网段（例如 Tailscale），
+ * dsh-plugin-remote-access —— 把本机 DSH 的网页界面开放给指定网段（例如 Tailscale），
  * 供手机 / 另一台电脑通过一条「带票的网址」访问。
  *
  * 设计要点：
@@ -31,7 +31,7 @@ import { pipeline } from 'node:stream';
  * 下面这个异步资源在**模块加载时**创建（那时没有 HMR 事务），把写盘放进它的作用域即可绕开。
  * 导出它是为了让独立测试能验证「确实逃出了那个 store」。
  */
-const configWriteScope = new AsyncResource('dsh-remote-access-cidr/config-write');
+const configWriteScope = new AsyncResource('dsh-plugin-remote-access/config-write');
 
 export function runOutsideHmr(fn) {
   return configWriteScope.runInAsyncScope(fn);
@@ -556,7 +556,7 @@ a{color:#60a5fa}
   <li>旧标签页里的网址别再用；用刚复制的那条打开。</li>
 </ol>
 <p class="hint">状态文件（本机）：<code>${statusPath || '&lt;DSH_HOME&gt;/remote-access-url.txt'}</code><br>
-本页由 dsh-remote-access-cidr 生成，只在这里解释原因，不放行任何请求。</p>
+本页由 dsh-plugin-remote-access 生成，只在这里解释原因，不放行任何请求。</p>
 <p><a href="/">重试一次</a></p>
 </main></body></html>`;
 }
@@ -984,7 +984,7 @@ export function apply(ctx, config) {
 
   function render() {
     return [
-      '# dsh-remote-access-cidr 状态（本文件含访问令牌，等于本机操作权限，别外传）',
+      '# dsh-plugin-remote-access 状态（本文件含访问令牌，等于本机操作权限，别外传）',
       `# 更新时间: ${new Date().toISOString()}`,
       '',
       urls.length ? `远程访问网址: ${urls.join('  ')}` : '远程访问网址: （尚未生成）',
@@ -1084,7 +1084,7 @@ export function apply(ctx, config) {
         fs.rmSync(file, { force: true });
       } else {
         const head =
-          '# dsh-remote-access-cidr 拉黑暂存：这些地址还没写进「排除的网段」，会自动补写；\n' +
+          '# dsh-plugin-remote-access 拉黑暂存：这些地址还没写进「排除的网段」，会自动补写；\n' +
           '# 正常情况下不用碰这个文件 —— 拉黑请在「设置 → 远程访问 → 排除的网段」里管理。\n';
         fs.writeFileSync(file, `${head}${unique.join('\n')}\n`, { mode: 0o600 });
       }

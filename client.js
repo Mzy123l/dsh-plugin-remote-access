@@ -1,5 +1,5 @@
 /**
- * dsh-remote-access-cidr 的浏览器半区：只在「设置」里提供一页可编辑的参数表单。
+ * dsh-plugin-remote-access 的浏览器半区：只在「设置」里提供一页可编辑的参数表单。
  *
  * 注册位置：settings.section（设置左侧导航的一页）。
  *
@@ -17,7 +17,7 @@
  * 页面上只说人话：失败给一句「下一步做什么」，内部状态只写开发者控制台。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-remote-access-cidr',
+  id: 'dsh-plugin-remote-access',
   factory(require) {
     const React = require('react');
     const h = React.createElement;

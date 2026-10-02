@@ -59,7 +59,7 @@ const makeCtx = (extra = {}) => {
  * fail=true 时模拟写盘失败（插件应退回暂存文件并继续拦住该地址）。
  */
 const makeEditor = ({ denyCidrs = [], fail = false } = {}) => {
-  const entry = { options: { id: 'remote-access', name: 'dsh-remote-access-cidr', config: { denyCidrs } } };
+  const entry = { options: { id: 'remote-access', name: 'dsh-plugin-remote-access', config: { denyCidrs } } };
   const state = { calls: [] };
   return {
     state,
