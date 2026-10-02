@@ -398,6 +398,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           document.head.appendChild(tag);
         }
         tag.textContent = phoneCss(strong, skip, cut);
+        // 记下当前这份基准内容：弹窗开合后的「重绘兜底」会在这份基准后面追加一个变化的注释，
+        // 不记的话它会把上一次的旧样式写回去。
+        tag.dataset.raBase = tag.textContent;
       }
 
       /** 从某个槽位元素往上找到「frame 的直接子元素」（也就是那一列），与类名无关 */
@@ -691,6 +694,34 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       };
       bindMedia(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`, () => { if (mode === 'auto') applyLayout(); });
       bindMedia('(pointer: coarse)', () => { if (mode === 'auto') applyLayout(); });
+
+      // ---------------------------------------------------------------- 弹窗开合后的重绘
+      //
+      // 真机上复现到的一条：远程页面每次打开都会弹「预览版说明」（那次「继续」写不进宿主设置，
+      // 所以每次都得重来），**点掉它之后手机档下左侧栏整条就不再绘制** —— DOM 里它好好在着
+      // （0,0 56x950），像素没有；把我注入的样式清空后画面立刻恢复。
+      //
+      // 也就是「弹窗关闭这个瞬间」留下的失效没被触发。这里就盯着承载弹窗的 overlay 层：
+      // 它一变，手机档下就强制一次样式重算（重写注入的样式表会让所有匹配元素重新计算样式并重绘），
+      // 用最便宜的方式把这次重绘踢起来。
+      function nudgeStyleRecalc() {
+        if (stopped) return;
+        if (document.documentElement.getAttribute('data-ra-layout') !== 'phone') return;
+        const tag = document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`);
+        if (!tag) return;
+        // 末尾加一个变化着的时间戳注释：内容变了 → 样式表重新解析 → 受影响元素重算并重绘
+        const base = tag.dataset.raBase || (tag.dataset.raBase = tag.textContent);
+        tag.textContent = `${base}\n/* nudge ${Date.now()} */`;
+      }
+
+      let overlayObserver = null;
+      try {
+        const overlayLayer = document.querySelector('[data-slot="shell.overlay"]');
+        if (overlayLayer) {
+          overlayObserver = new MutationObserver(() => nudgeStyleRecalc());
+          overlayObserver.observe(overlayLayer, { childList: true, subtree: true });
+        }
+      } catch { /* 观察不了就算了，这只是治症状的兜底 */ }
 
       // DOM 与侧栏开合：侧栏那个属性变化要立刻反映（不然抽屉会慢半拍）
       let observer = null;
