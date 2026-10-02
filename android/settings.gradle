@@ -1,0 +1,18 @@
+// dsh-remote-android —— 地址输入页 + WebView 外壳，零第三方依赖（只有 AGP）
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+
+dependencyResolutionManagement {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+
+rootProject.name = 'dsh-remote-android'
+include ':app'

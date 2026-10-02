@@ -1,0 +1,51 @@
+apply plugin: 'com.android.application'
+
+// 签名：仓库里不放密钥。android/keystore.properties（已 gitignore）存在就用它签 release，
+// 不存在就产出未签名的 release APK（也能装，但更新覆盖需要同一把钥匙）。
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file('keystore.properties')
+if (keystoreFile.exists()) {
+  keystoreFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+  namespace 'dev.dsh.remote'
+  compileSdk 34
+
+  defaultConfig {
+    applicationId 'dev.dsh.remote'
+    minSdk 26
+    targetSdk 34
+    versionCode 1
+    versionName '1.0.0'
+  }
+
+  if (keystoreFile.exists()) {
+    signingConfigs {
+      release {
+        storeFile rootProject.file(keystoreProps['storeFile'])
+        storePassword keystoreProps['storePassword']
+        keyAlias keystoreProps['keyAlias']
+        keyPassword keystoreProps['keyPassword']
+      }
+    }
+  }
+
+  buildTypes {
+    release {
+      minifyEnabled false
+      shrinkResources false
+      if (keystoreFile.exists()) signingConfig signingConfigs.release
+    }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  lint {
+    abortOnError false
+    checkReleaseBuilds false
+  }
+}
