@@ -692,6 +692,17 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       bindMedia(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`, () => { if (mode === 'auto') applyLayout(); });
       bindMedia('(pointer: coarse)', () => { if (mode === 'auto') applyLayout(); });
 
+      // 从别处回到这个页面时重读一次配置。最常见的路径是：在桌面端把「远程UI布局」改完、再拿起手机看 ——
+      // 这条路径上**不会有** settings/document-updated 事件（改的不是这个页面），于是页面会一直停在旧档。
+      // 配置只在加载时读一次 + 靠事件跟随，遇上「页面早于配置变更」的时序就会看起来像「设置没生效」。
+      try {
+        const onVisible = () => {
+          if (document.visibilityState === 'visible') loadMode();
+        };
+        document.addEventListener('visibilitychange', onVisible);
+        mediaSources.push(() => document.removeEventListener('visibilitychange', onVisible));
+      } catch { /* 忽略 */ }
+
       // ---------------------------------------------------------------- 弹窗开合后的重绘
       //
       // 真机上复现到的一条：远程页面每次打开都会弹「预览版说明」（那次「继续」写不进宿主设置，
