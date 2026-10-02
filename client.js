@@ -47,7 +47,8 @@ window.__ModuleLoader__.load({
         type: 'select',
         label: '远程UI布局',
         options: [
-          { value: 'phone', label: '手机（横竖屏自适应）' },
+          { value: 'phone', label: '手机（默认：只做可读性与手势）' },
+          { value: 'phone-strong', label: '手机（增强：窄图标栏 + 侧栏抽屉）' },
           { value: 'desktop', label: '电脑' },
           { value: 'auto', label: '自动' },
         ],
@@ -128,7 +129,7 @@ window.__ModuleLoader__.load({
      * 拿不到这个属性、也就永远匹配不上任何一条规则（这就是「不动本地」的实现方式）。
      */
     const PHONE_CSS = `
-html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { display: none !important; }
+html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { /*strong*/ display: none !important; }
 html[data-ra-layout="phone"] [data-ra-center],
 html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
 
@@ -142,11 +143,12 @@ html[data-ra-layout="phone"] [data-ra-frame] { transition: none !important; }
 /* 侧栏：收起时保持 56px 图标栏；展开时改成「抽屉」压在正文上 —— 而不是把正文挤成 110px 一条 */
 /* 三列显式钉住列号：抽屉模式把侧栏改成 position:fixed 后就脱离网格了，
    自动排位会把「正文」顶到第 1 条轨道（0px）上，正文会直接消失。 */
-html[data-ra-layout="phone"] [data-ra-sidebar] { grid-column: 1 !important; }
-html[data-ra-layout="phone"] [data-ra-center] { grid-column: 2 !important; }
-html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; }
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; }
+html[data-ra-layout="phone"] [data-ra-sidebar] { grid-column: 1 !important; /*strong*/ }
+html[data-ra-layout="phone"] [data-ra-center] { grid-column: 2 !important; /*strong*/ }
+html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; /*strong*/ }
+html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; /*strong*/ }
 html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
+  /*strong*/
   position: fixed !important;
   top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
   /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 88vw 但右边仍留出可见的正文 */
@@ -164,8 +166,8 @@ html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
 html[data-ra-layout="phone"] [data-ra-right] {
   /* 抬到正文之上：底部统计、输入框、对话/轨迹页签各自都有层叠上下文，
      不抬的话它们会画在右栏这个浮层上面（真机截图里就是「这一页冒出了输入框和底部 info」）。 */
-  position: relative !important;
-  z-index: 64 !important;
+  position: relative !important; /*strong*/
+  z-index: 64 !important; /*strong*/
 }
 html[data-ra-layout="phone"] [data-sidebar-right-panel] {
   max-width: 100vw !important;
@@ -174,8 +176,9 @@ html[data-ra-layout="phone"] [data-sidebar-right-panel] {
   padding-right: env(safe-area-inset-right, 0px) !important;
   padding-bottom: env(safe-area-inset-bottom, 0px) !important;
   overscroll-behavior: contain;
-  z-index: 65 !important;
 }
+/* 单独一条：只把「抬到正文之上」这件事放进增强模式，实底那条留在保守模式 */
+html[data-ra-layout="phone"] [data-sidebar-right-panel] { z-index: 65 !important; /*strong*/ }
 
 /* 手机上这两个浮层必须是**不透明**的。
    DSH 的默认表面是「玻璃」—— 有意让壁纸透出来；桌面三栏时很好看，但手机上它俩整个盖在正文上，
@@ -190,7 +193,7 @@ html[data-ra-layout="phone"] [data-sidebar-right-panel] {
 }
 
 /* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
-html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] {
+html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
   grid-template-columns: 48px minmax(0px, 1fr) 0px !important;
 }
 /* 「分栏」在 390px 上没有意义，「退出全屏」更是不可能（宽度决定它必须全屏）。
@@ -198,7 +201,7 @@ html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] {
 html[data-ra-layout="phone"] [data-ra-phone-hidden] { display: none !important; }
 
 #dsh-ra-scrim { display: none; }
-html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] {
+html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] { /*strong*/
   display: block; position: fixed; inset: 0; z-index: 60;
   background: rgba(0,0,0,0.42); -webkit-tap-highlight-color: transparent;
 }
@@ -308,19 +311,46 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       /** auto 的判据：够窄 或 有触摸指针（后者能兜住「宽屏但确实是手机/平板」） */
       function effectiveOf(nextMode) {
-        if (nextMode === 'phone') return 'phone';
+        if (nextMode === 'phone' || nextMode === 'phone-strong') return 'phone';
         if (nextMode === 'desktop') return 'desktop';
         return matches(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`) || matches('(pointer: coarse)')
           ? 'phone'
           : 'desktop';
       }
 
-      function injectStyle() {
-        if (document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`)) return;
-        const tag = document.createElement('style');
-        tag.dataset.raLayoutCss = LAYOUT_STYLE_ID;
-        tag.textContent = PHONE_CSS;
-        document.head.appendChild(tag);
+      /**
+       * 手机布局的 CSS 分两块：带 strong 标记的「增强」块，和其余「保守」块。
+       *
+       * 增强块干的都是**直接改 DSH 网格/层叠**的事（钉列号、把侧栏改成定浮层抽屉、把整屏浮层抬到正文之上）。
+       * 真机上出现过「DOM 与计算样式全对、画面却不更新，拖一下宽度才显示」——视图/合成层面的问题，
+       * 而关掉这些增强块页面就正常呈现。所以默认只注入保守块，增强由配置或 URL 显式开启。
+       */
+      function phoneCss(strong) {
+        if (strong) return PHONE_CSS.replace(/\/\*strong\*\//g, '');
+        return PHONE_CSS.split('}')
+          .map((block) => block.trim())
+          .filter((block) => block.length > 0 && !block.includes('/*strong*/'))
+          .map((block) => block + '}')
+          .join('\n');
+      }
+
+      /** 排障开关：URL 上带 ra=off|safe|strong 可临时覆盖远程UI布局（不改宿主配置，刷新即失效） */
+      function raOverride() {
+        try {
+          return new URLSearchParams(window.location.search).get('ra') || '';
+        } catch {
+          return '';
+        }
+      }
+
+      function injectStyle(strong) {
+        let tag = document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`);
+        if (!tag) {
+          tag = document.createElement('style');
+          tag.dataset.raLayoutCss = LAYOUT_STYLE_ID;
+          document.head.appendChild(tag);
+        }
+        tag.textContent = phoneCss(strong);
       }
 
       /** 从某个槽位元素往上找到「frame 的直接子元素」（也就是那一列），与类名无关 */
@@ -511,7 +541,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const scrim = ensureScrim();
         if (drawer) scrim.setAttribute('data-open', '');
         else scrim.removeAttribute('data-open');
-        enforceOverlayExclusive(drawer);
+        // 互斥只在增强模式有意义：那时侧栏是「脱离网格的定浮层」，会和右栏抢同一块屏；
+        // 保守模式下侧栏老老实实占着自己那一列，不该去替用户点关任何面板。
+        if (document.documentElement.hasAttribute('data-ra-strong')) enforceOverlayExclusive(drawer);
         // 抽屉/右栏状态变化时也踢一次：这两个整屏浮层的出现/消失最容易留下旧帧
         if (drawerChanged || rightChanged) nudgeRepaint();
       }
@@ -531,14 +563,21 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       function applyLayout() {
         if (stopped) return;
-        const layout = effectiveOf(mode);
-        if (layout === applied) {
+        const override = raOverride();
+        const layout = override === 'off' ? 'desktop' : effectiveOf(mode);
+        // 增强只在手机布局下有意义；?ra=strong / ?ra=safe 可以临时强制，便于真机二分
+        const strong =
+          layout === 'phone' && (override === 'strong' || (override !== 'safe' && mode === 'phone-strong'));
+        const signature = strong ? `${layout}:strong` : layout;
+        if (signature === applied) {
           syncDom();
           return;
         }
-        applied = layout;
+        applied = signature;
         document.documentElement.setAttribute('data-ra-layout', layout);
-        if (layout === 'phone') injectStyle();
+        if (strong) document.documentElement.setAttribute('data-ra-strong', '');
+        else document.documentElement.removeAttribute('data-ra-strong');
+        if (layout === 'phone') injectStyle(strong);
         syncDom();
         // 首次进入手机布局后踢一次重绘：这一步正好是「打开页面就是空白」的现场
         if (layout === 'phone') nudgeRepaint();
