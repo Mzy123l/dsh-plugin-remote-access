@@ -440,27 +440,30 @@ public class MainActivity extends Activity {
     webHost.addView(loadHint, hintParams);
 
     // 两个小图标：右上角一枚半透明胶囊，放着会自己淡下去，点一下回来
+    // 两枚小图标：竖着贴在**左侧图标栏下方的空白处**（那一列图标下面是空的；顺手也不挡顶部工具栏、
+    // 右栏把手与输入区）。放着会自己淡下去，点一下回来。
     LinearLayout pill = new LinearLayout(this);
-    pill.setOrientation(LinearLayout.HORIZONTAL);
-    pill.setGravity(Gravity.CENTER_VERTICAL);
-    pill.setAlpha(0.92f);
-    pill.setBackground(rounded(dark ? 0xE6141821 : 0xF2FFFFFF, 22, lineColor, 1));
+    pill.setOrientation(LinearLayout.VERTICAL);
+    pill.setGravity(Gravity.CENTER_HORIZONTAL);
+    pill.setAlpha(0.9f);
+    pill.setBackground(rounded(dark ? 0xD9141821 : 0xE6FFFFFF, 20, lineColor, 1));
     int pp = dp(3);
     pill.setPadding(pp, pp, pp, pp);
 
     ImageButton settings = iconButton(android.R.drawable.ic_menu_preferences, "设置");
     settings.setOnClickListener(v -> showSetup(null));
-    pill.addView(settings, new LinearLayout.LayoutParams(dp(38), dp(38)));
+    pill.addView(settings, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
     ImageButton reload = iconButton(android.R.drawable.ic_popup_sync, "刷新");
     reload.setOnClickListener(v -> web.reload());
-    pill.addView(reload, new LinearLayout.LayoutParams(dp(38), dp(38)));
+    pill.addView(reload, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
     FrameLayout.LayoutParams pillParams = new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    pillParams.gravity = Gravity.TOP | Gravity.END;
-    pillParams.topMargin = dp(10);
-    pillParams.rightMargin = dp(10);
+    // 左抽屉收起时是一条 56px 宽的图标栏；11dp 让 34dp 的图标正好落在它的中线上
+    pillParams.gravity = Gravity.BOTTOM | Gravity.START;
+    pillParams.leftMargin = dp(11);
+    pillParams.bottomMargin = dp(26);
     webHost.addView(pill, pillParams);
 
     pill.postDelayed(() -> pill.animate().alpha(0.3f).setDuration(400), 3500);
