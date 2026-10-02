@@ -173,12 +173,13 @@ html[data-ra-layout="phone"] [data-sidebar-right-panel] {
 /* 手机上这两个浮层必须是**不透明**的。
    DSH 的默认表面是「玻璃」—— 有意让壁纸透出来；桌面三栏时很好看，但手机上它俩整个盖在正文上，
    于是两层文字糊在一起（左抽屉看起来像没画背景，右栏把底下的输入框/底部统计也透出来）。
-   这里给兜底的实底 + 强雾化；装了壁纸插件时脚本还会借用它自己的「左侧栏覆盖」玻璃配方。 */
+   这里只给实底。曾经还叠过 backdrop-filter 的 blur()，但那个属性会把这一层推进独立的合成路径，
+   在 Electron 视图 / 移动端 GPU 上的风险明显更高（我们排查过一例「DOM 正常但画面不更新」），
+   而实底本身已经解决可读性 —— 不值得为一点观感换那个风险。
+   装了壁纸插件时脚本还会借用它自己的「左侧栏覆盖」玻璃配方，那时观感与其余面板一致。 */
 html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar],
 html[data-ra-layout="phone"] [data-sidebar-right-panel] {
   background: var(--dsw-alias-bg-base, #101a36) !important;
-  -webkit-backdrop-filter: blur(22px) saturate(1.35) !important;
-  backdrop-filter: blur(22px) saturate(1.35) !important;
 }
 
 /* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
