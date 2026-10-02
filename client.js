@@ -47,8 +47,7 @@ window.__ModuleLoader__.load({
         type: 'select',
         label: '远程UI布局',
         options: [
-          { value: 'phone', label: '手机（默认：只做可读性与手势）' },
-          { value: 'phone-strong', label: '手机（增强：窄图标栏 + 侧栏抽屉）' },
+          { value: 'phone', label: '手机（横竖屏自适应）' },
           { value: 'desktop', label: '电脑' },
           { value: 'auto', label: '自动' },
         ],
@@ -313,6 +312,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       /** auto 的判据：够窄 或 有触摸指针（后者能兜住「宽屏但确实是手机/平板」） */
       function effectiveOf(nextMode) {
+        // 'phone-strong' 是旧值（手机档曾分保守/增强两档），继续按手机档处理
         if (nextMode === 'phone' || nextMode === 'phone-strong') return 'phone';
         if (nextMode === 'desktop') return 'desktop';
         return matches(`(max-width: ${LAYOUT_PHONE_WIDTH}px)`) || matches('(pointer: coarse)')
@@ -632,8 +632,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const override = raOverride();
         const layout = override === 'off' ? 'desktop' : effectiveOf(mode);
         // 增强只在手机布局下有意义；?ra=strong / ?ra=safe 可以临时强制，便于真机二分
-        const strong =
-          layout === 'phone' && (override === 'strong' || (override !== 'safe' && mode === 'phone-strong'));
+        // 手机档现在默认就是完整版（窄图标栏 + 侧栏抽屉）：原来的「保守版」只留在 ?ra=safe 这条排障开关上，
+        // 不再作为可选模式出现在设置里；旧的 'phone-strong' 仍按手机档处理，免得老配置失效。
+        const strong = layout === 'phone' && override !== 'safe';
         const skip = layout === 'phone' ? raSkip() : [];
         const cut = layout === 'phone' ? raCut() : [];
         const suffix = `${skip.length ? `|${skip.join(',')}` : ''}${cut.length ? `|cut:${cut.join(',')}` : ''}`;

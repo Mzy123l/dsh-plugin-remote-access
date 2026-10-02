@@ -431,10 +431,10 @@ Panel = Panel4;
 render();
 await sleep(80);
 check(
-  '设置页有「远程UI布局」：手机（保守）/ 手机（增强）/ 电脑 / 自动',
+  '设置页有「远程UI布局」：手机 / 电脑 / 自动',
   byKey(tree, 'remoteLayout-i')?.props?.value === 'auto' &&
     flatten(byKey(tree, 'remoteLayout-i')).filter((n) => n?.type === 'option').map((n) => n.props.value).join(',') ===
-      'phone,phone-strong,desktop,auto',
+      'phone,desktop,auto',
   flatten(byKey(tree, 'remoteLayout-i')).filter((n) => n?.type === 'option').map((n) => n.props.value).join(','),
 );
 
