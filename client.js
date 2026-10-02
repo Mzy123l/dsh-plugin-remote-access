@@ -414,8 +414,22 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        * 面板 = 同时含 <nav> 与内容区的那一层，内容区 = 从「关闭」按钮往上、父节点里能看见那个 nav 的一层。
        */
       function tagSettings() {
+        // 先清掉上一次的标记。**这一步是必须的**：设置页关掉后标记会残留，而残留的标记会把
+        // 「设置页左侧导航 / 内容区」的样式继续作用在那两个元素上（真机上表现为左侧栏消失、中间内容看不见）。
+        for (const el of document.querySelectorAll(
+          '[data-ra-settings-panel],[data-ra-settings-nav],[data-ra-settings-content]',
+        )) {
+          el.removeAttribute('data-ra-settings-panel');
+          el.removeAttribute('data-ra-settings-nav');
+          el.removeAttribute('data-ra-settings-content');
+        }
         const closeBtn = document.querySelector('[data-slot="settings.close"]');
         if (!closeBtn) return;
+        // 只允许在设置覆盖层内部往上找。**绝不能爬出去**：frame 的直接子元素里就有左侧栏，
+        // 而它本身是个 <nav> —— 一旦爬到 frame，就会把「左侧栏」认成设置页导航、把 overlay 层认成内容区，
+        // 于是整页被设置样式接管（左侧栏消失、正文空白）。
+        const overlay = document.querySelector('[data-slot="shell.overlay"]');
+        if (!overlay || !overlay.contains(closeBtn)) return;
         let content = closeBtn;
         while (content && content.parentElement) {
           const parent = content.parentElement;
@@ -426,6 +440,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
             nav.setAttribute('data-ra-settings-nav', '');
             return;
           }
+          if (parent === overlay) return; // 到头了，说明这次没有可标记的面板
           content = parent;
         }
       }
