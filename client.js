@@ -282,13 +282,15 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 /* 抽屉的实底：**不覆盖 DSH 的表面元素**（那条 background !important 覆盖表面会让左侧栏整列不再绘制，
    已在 d92a572 删除并验证），改为在抽屉背后垫一层自己的底色 —— 伪元素 + z-index:-1，
    正好夹在父层背景与内容之间。这样即使内层面板仍带着壁纸引擎调出来的半透明底色，合成结果也不透明。
-   只在手机档的抽屉上生效，本机与电脑档不注入。 */
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar]::before {
+   只在手机档的抽屉上生效、且只在壁纸激活时（透明正是那时才发生）；本机与电脑档不注入。 */
+html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-sidebar]::before {
   content: "" !important;
   position: absolute !important;
   inset: 0 !important;
   z-index: -1 !important;
-  background: var(--dsw-alias-bg-base, #101a36) !important; /*strong*/
+  /* 用壁纸引擎自己的「可读性底色」：那是当前主题下真正不透明的表面色（实测 #151849）。
+     绝不能用 --dsw-alias-bg-base —— 它被壁纸插件改成了 transparent，垫了等于没垫（已实测）。 */
+  background: var(--we-readability-base, #151517) !important; /*strong*/
 }
 `;
 
