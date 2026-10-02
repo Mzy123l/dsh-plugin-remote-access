@@ -187,17 +187,12 @@ html[data-ra-layout="phone"] [data-sidebar-right-panel] {
 /* 单独一条：只把「抬到正文之上」这件事放进增强模式，实底那条留在保守模式 */
 html[data-ra-layout="phone"] [data-sidebar-right-panel] { z-index: 65 !important; /*strong*/ }
 
-/* 手机上这两个浮层必须是**不透明**的。
-   DSH 的默认表面是「玻璃」—— 有意让壁纸透出来；桌面三栏时很好看，但手机上它俩整个盖在正文上，
-   于是两层文字糊在一起（左抽屉看起来像没画背景，右栏把底下的输入框/底部统计也透出来）。
-   这里只给实底。曾经还叠过 backdrop-filter 的 blur()，但那个属性会把这一层推进独立的合成路径，
-   在 Electron 视图 / 移动端 GPU 上的风险明显更高（我们排查过一例「DOM 正常但画面不更新」），
-   而实底本身已经解决可读性 —— 不值得为一点观感换那个风险。
-   装了壁纸插件时脚本还会借用它自己的「左侧栏覆盖」玻璃配方，那时观感与其余面板一致。 */
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar],
-html[data-ra-layout="phone"] [data-sidebar-right-panel] {
-  background: var(--dsw-alias-bg-base, #101a36) !important;
-}
+/* 这里曾经给这两个浮层加「不透明实底 + 强雾化」来治「太透」。
+   **已删除**：真机上复现到，这条 background（!important 覆盖 DSH 的玻璃表面）会让左侧栏整条不再绘制 ——
+   DOM 里它在（0,0 56x950），像素没有；只要摘掉这一条就恢复。排查协议：清本地标记 → 重载（弹窗出现）→
+   点掉弹窗 → 截图；摘别的规则都不解决，只有摘这条解决。
+   观感那条需求改由「借用壁纸引擎自己的左侧栏覆盖玻璃配方」承担（脚本里设 data-we-sidebar-glass），
+   壁纸插件不在时就用 DSH 的默认表面 —— 宁可少一点好看，也不能让页面画不出来。 */
 
 /* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
 html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
