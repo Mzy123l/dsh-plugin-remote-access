@@ -3,7 +3,10 @@ package dev.dsh.remote;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
@@ -24,30 +27,33 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
 /**
- * DSH 远程访问的安卓外壳：一个「地址页」 + 一个 WebView。
+ * DSH 的安卓外壳：地址页（卡片） + 错误页 + 网页，外加两枚「融进页面」的小图标。
  *
- * 为什么地址页要放最前面、而且离线也必须能进：
- *   1) 第一次打开时还没有地址，只能先问；
- *   2) 地址填错 / 网没通 / 电脑没开时，WebView 里显示不了任何 DSH 界面 ——
- *      如果设置藏在网页里，就永远改不回来了。所以这里：
- *      首屏就是地址页、WebView 失败时自动退回地址页、顶栏永远有「设置」按钮。
+ * 三块界面一次只显示一块：
+ *   1) 地址页 —— 首次启动 / 点右上角设置 / 从错误页点「改地址」；卡片式，只填 host[:port]，不带协议；
+ *   2) 错误页 —— 把 WebView 的错误码翻成人话（解析不了 / 连不上 / 超时），给「重试」与「改地址」；
+ *   3) 网页 —— WebView + 右上角一枚半透明胶囊里的两个小图标（设置 / 刷新），没有横条、没有文字按钮；
+ *      顶部一条 3dp 进度线；首次连上时提示「首次要下插件、之后走缓存」。
  *
- * 地址只填 host[:port]，不带协议（协议由「用 HTTPS」这一个勾决定），
- * 例：100.64.0.3:19388 或 dsh.example.com
+ * 为什么地址页必须能离线进：地址错了/电脑没开时网页里什么都显示不了，
+ * 如果设置藏在网页里，就永远改不回来。
  */
 public class MainActivity extends Activity {
 
   private static final String PREFS = "dsh_remote";
   private static final String KEY_HOST = "host";
   private static final String KEY_TLS = "tls";
+  private static final String KEY_WARMED = "warmed";
 
-  /** host[:port]：字母数字点横线 + 可选端口；故意不收协议、路径、空格 */
+  /** host[:port]：字母数字点横线 + 可选端口；不收协议、路径、空格 */
   private static final java.util.regex.Pattern HOST_RE =
       java.util.regex.Pattern.compile("^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?(:\\d{1,5})?$");
 
@@ -55,154 +61,284 @@ public class MainActivity extends Activity {
 
   private FrameLayout root;
   private ScrollView setupView;
-  private LinearLayout webHost;
+  private FrameLayout errorView;
+  private FrameLayout webHost;
   private EditText hostInput;
   private CheckBox tlsCheck;
-  private TextView setupStatus;
-  private TextView titleView;
+  private TextView setupError;
+  private TextView errorTitle;
+  private TextView errorDetail;
+  private TextView loadHint;
   private ProgressBar progress;
   private WebView web;
   private ValueCallback<Uri[]> fileCallback;
 
+  private int bgColor;
+  private int cardColor;
+  private int fgColor;
+  private int mutedColor;
+  private int lineColor;
+  private int fieldColor;
+  private int accentColor;
+  private int errorColor;
+  private boolean dark;
+
   @Override
   protected void onCreate(Bundle state) {
     super.onCreate(state);
+    readPalette();
     root = new FrameLayout(this);
+    root.setBackgroundColor(bgColor);
     setContentView(root);
+
     buildSetupView();
+    buildErrorView();
     buildWebView();
 
     SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
     String saved = prefs.getString(KEY_HOST, "");
-    boolean tls = prefs.getBoolean(KEY_TLS, false);
-    tlsCheck.setChecked(tls);
+    tlsCheck.setChecked(prefs.getBoolean(KEY_TLS, false));
     if (saved == null || saved.trim().isEmpty()) {
-      showSetup("第一次使用：填上电脑那台的地址（形如 100.64.0.3:19388），协议不用写。");
+      showSetup(null);
     } else {
       hostInput.setText(saved);
-      connect(saved, tls);
+      connect(saved, prefs.getBoolean(KEY_TLS, false));
     }
   }
 
-  private int dp(int v) {
+  // ---------------------------------------------------------------- 配色与小工具
+
+  private void readPalette() {
+    dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+        == Configuration.UI_MODE_NIGHT_YES;
+    bgColor = dark ? 0xFF0B0D12 : 0xFFF2F5FB;
+    cardColor = dark ? 0xFF141821 : 0xFFFFFFFF;
+    fgColor = dark ? 0xFFE8EAED : 0xFF0F172A;
+    mutedColor = dark ? 0xFF9AA4B2 : 0xFF64748B;
+    lineColor = dark ? 0xFF242A36 : 0xFFE2E8F0;
+    fieldColor = dark ? 0xFF0F131A : 0xFFF8FAFC;
+    accentColor = dark ? 0xFF3B82F6 : 0xFF2563EB;
+    errorColor = dark ? 0xFFF87171 : 0xFFDC2626;
+  }
+
+  private int dp(float v) {
     return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
   }
 
-  // ---------------------------------------------------------------- 地址页
+  private GradientDrawable rounded(int fill, float radiusDp, int strokeColor, float strokeDp) {
+    GradientDrawable d = new GradientDrawable();
+    d.setColor(fill);
+    d.setCornerRadius(dp(radiusDp));
+    if (strokeDp > 0) d.setStroke(dp(strokeDp), strokeColor);
+    return d;
+  }
+
+  private TextView label(String text, float sizeSp, int color, boolean bold) {
+    TextView t = new TextView(this);
+    t.setText(text);
+    t.setTextSize(sizeSp);
+    t.setTextColor(color);
+    if (bold) t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+    return t;
+  }
+
+  private LinearLayout card() {
+    LinearLayout c = new LinearLayout(this);
+    c.setOrientation(LinearLayout.VERTICAL);
+    c.setBackground(rounded(cardColor, 18, lineColor, 1));
+    int p = dp(20);
+    c.setPadding(p, p, p, p);
+    return c;
+  }
+
+  private Button primaryButton(String text) {
+    Button b = new Button(this);
+    b.setText(text);
+    b.setTextSize(16);
+    b.setAllCaps(false);
+    b.setTextColor(Color.WHITE);
+    b.setBackground(rounded(accentColor, 12, 0, 0));
+    b.setMinHeight(dp(48));
+    b.setPadding(0, 0, 0, 0);
+    return b;
+  }
+
+  private TextView ghostButton(String text) {
+    TextView b = label(text, 15, accentColor, false);
+    int p = dp(14);
+    b.setPadding(p, p, p, p);
+    b.setGravity(Gravity.CENTER);
+    b.setBackground(rounded(dark ? 0xFF1B2130 : 0xFFEDF2FB, 12, 0, 0));
+    return b;
+  }
+
+  // ---------------------------------------------------------------- 1) 地址页
 
   private void buildSetupView() {
     LinearLayout column = new LinearLayout(this);
     column.setOrientation(LinearLayout.VERTICAL);
-    column.setPadding(dp(20), dp(28), dp(20), dp(20));
+    int p = dp(20);
+    column.setPadding(p, dp(28), p, dp(28));
 
-    TextView title = new TextView(this);
-    title.setText("DSH 远程");
-    title.setTextSize(24);
-    title.setPadding(0, 0, 0, dp(6));
-    column.addView(title);
+    LinearLayout brand = new LinearLayout(this);
+    brand.setOrientation(LinearLayout.HORIZONTAL);
+    brand.setGravity(Gravity.CENTER_VERTICAL);
+    TextView mark = label("DSH", 13, Color.WHITE, true);
+    mark.setGravity(Gravity.CENTER);
+    mark.setBackground(rounded(accentColor, 10, 0, 0));
+    brand.addView(mark, new LinearLayout.LayoutParams(dp(38), dp(38)));
+    brand.addView(label("  远程访问", 16, fgColor, true));
+    LinearLayout.LayoutParams brandParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    brandParams.bottomMargin = dp(16);
+    column.addView(brand, brandParams);
 
-    TextView hint = new TextView(this);
-    hint.setText("填电脑上 DSH 的远程访问地址。协议不用写；端口写在冒号后面（没写端口就是 80/443）。");
-    hint.setTextSize(14);
-    hint.setAlpha(0.75f);
-    hint.setPadding(0, 0, 0, dp(18));
-    column.addView(hint);
+    LinearLayout c = card();
+    c.addView(label("连接到电脑上的 DSH", 19, fgColor, true));
+    TextView sub = label("填电脑上 DSH 的远程访问地址：只写 IP 或域名，端口写在冒号后面。", 13, mutedColor, false);
+    sub.setPadding(0, dp(4), 0, dp(16));
+    c.addView(sub);
 
+    c.addView(label("服务器地址", 12, mutedColor, false));
     hostInput = new EditText(this);
     hostInput.setHint("100.64.0.3:19388");
-    hostInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-    hostInput.setSingleLine(true);
-    hostInput.setImeOptions(EditorInfo.IME_ACTION_GO);
+    hostInput.setHintTextColor(mutedColor);
+    hostInput.setTextColor(fgColor);
     hostInput.setTextSize(18);
-    column.addView(hostInput, new LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    hostInput.setSingleLine(true);
+    hostInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+    hostInput.setImeOptions(EditorInfo.IME_ACTION_GO);
+    hostInput.setBackground(rounded(fieldColor, 12, lineColor, 1));
+    int hp = dp(12);
+    hostInput.setPadding(hp, hp, hp, hp);
+    LinearLayout.LayoutParams hostParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    hostParams.topMargin = dp(6);
+    c.addView(hostInput, hostParams);
 
     tlsCheck = new CheckBox(this);
     tlsCheck.setText("用 HTTPS（反代开了 TLS 才勾）");
-    tlsCheck.setPadding(0, dp(10), 0, dp(6));
-    column.addView(tlsCheck);
+    tlsCheck.setTextColor(mutedColor);
+    tlsCheck.setTextSize(13);
+    LinearLayout.LayoutParams tlsParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    tlsParams.topMargin = dp(8);
+    c.addView(tlsCheck, tlsParams);
 
-    Button connectButton = new Button(this);
-    connectButton.setText("连接");
-    connectButton.setOnClickListener(v -> {
-      String raw = hostInput.getText().toString();
-      connect(raw, tlsCheck.isChecked());
-    });
-    column.addView(connectButton, new LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    Button connect = primaryButton("连接");
+    connect.setOnClickListener(v -> connect(hostInput.getText().toString(), tlsCheck.isChecked()));
+    LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    connectParams.topMargin = dp(12);
+    c.addView(connect, connectParams);
 
-    setupStatus = new TextView(this);
-    setupStatus.setTextSize(14);
-    setupStatus.setPadding(0, dp(14), 0, 0);
-    column.addView(setupStatus);
+    setupError = label("", 13, errorColor, false);
+    setupError.setPadding(0, dp(10), 0, 0);
+    c.addView(setupError);
 
-    TextView help = new TextView(this);
-    help.setTextSize(13);
-    help.setAlpha(0.6f);
-    help.setPadding(0, dp(22), 0, 0);
-    help.setText("地址在哪找：电脑上「设置 → 远程访问」里的状态文件 "
-        + "remote-access-url.txt，里面『手机访问』那一行就是。\n"
-        + "填了访问密码的，连上后先在页面里输一次密码（30 天免密）。");
-    column.addView(help);
+    column.addView(c);
+
+    TextView where = label("地址在哪找：电脑上「设置 → 远程访问」的状态文件 remote-access-url.txt，"
+        + "里面『手机访问』那一行。\n设了访问密码的，连上后在页面里输一次（30 天免密）。", 12, mutedColor, false);
+    where.setLineSpacing(0, 1.35f);
+    where.setPadding(0, dp(14), 0, 0);
+    column.addView(where);
 
     setupView = new ScrollView(this);
+    setupView.setFillViewport(true);
     setupView.addView(column);
-    setupView.setBackgroundColor(Color.TRANSPARENT);
     root.addView(setupView, new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
   }
 
-  /** 回到地址页（可带一句原因）。WebView 失败、点「设置」、第一次启动都走这里。 */
   private void showSetup(String message) {
-    if (message != null) setupStatus.setText(message);
+    setupError.setText(message == null ? "" : message);
     setupView.setVisibility(View.VISIBLE);
+    errorView.setVisibility(View.GONE);
     webHost.setVisibility(View.GONE);
   }
 
-  // ---------------------------------------------------------------- 网页
+  // ---------------------------------------------------------------- 2) 错误页
+
+  private void buildErrorView() {
+    LinearLayout column = new LinearLayout(this);
+    column.setOrientation(LinearLayout.VERTICAL);
+    int p = dp(20);
+    column.setPadding(p, dp(28), p, dp(28));
+
+    LinearLayout c = card();
+    TextView mark = label("!", 20, Color.WHITE, true);
+    mark.setGravity(Gravity.CENTER);
+    mark.setBackground(rounded(errorColor, 12, 0, 0));
+    LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(44), dp(44));
+    markParams.bottomMargin = dp(14);
+    c.addView(mark, markParams);
+
+    errorTitle = label("连不上这台设备", 19, fgColor, true);
+    c.addView(errorTitle);
+    errorDetail = label("", 13, mutedColor, false);
+    errorDetail.setLineSpacing(0, 1.35f);
+    errorDetail.setPadding(0, dp(6), 0, dp(16));
+    c.addView(errorDetail);
+
+    Button retry = primaryButton("重试");
+    retry.setOnClickListener(v -> {
+      String host = hostInput.getText().toString().trim();
+      if (host.isEmpty()) showSetup("先填地址：形如 100.64.0.3:19388");
+      else connect(host, tlsCheck.isChecked());
+    });
+    c.addView(retry);
+
+    TextView change = ghostButton("改地址");
+    change.setOnClickListener(v -> showSetup("把地址改对再点连接。"));
+    LinearLayout.LayoutParams changeParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    changeParams.topMargin = dp(10);
+    c.addView(change, changeParams);
+
+    column.addView(c);
+
+    errorView = new FrameLayout(this);
+    errorView.addView(column, new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    errorView.setVisibility(View.GONE);
+    root.addView(errorView, new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+  }
+
+  /** 把 WebView 的错误码翻成人话 —— 它自带那句英文说明对手机用户没有用 */
+  private void showError(String url, int errorCode, CharSequence description) {
+    String reason;
+    switch (errorCode) {
+      case WebViewClient.ERROR_HOST_LOOKUP:
+        reason = "域名解析不了：地址可能打错了，或者当前网络拿不到 DNS。";
+        break;
+      case WebViewClient.ERROR_CONNECT:
+      case WebViewClient.ERROR_FAILED_SSL_HANDSHAKE:
+        reason = "地址通了但端口连不上：电脑上的 DSH 没开、端口不对，或者不在同一网段。";
+        break;
+      case WebViewClient.ERROR_TIMEOUT:
+        reason = "等太久没回应：网络慢，或者那台电脑不在线。";
+        break;
+      case WebViewClient.ERROR_IO:
+        reason = "网络读写失败：多半是不在同一网络（比如没连上 Tailscale）。";
+        break;
+      default:
+        reason = "加载失败：" + description + "。";
+        break;
+    }
+    errorTitle.setText("打不开 " + url);
+    errorDetail.setText(reason + "\n\n检查完点「重试」，或点「改地址」换一个。");
+    errorView.setVisibility(View.VISIBLE);
+    setupView.setVisibility(View.GONE);
+    webHost.setVisibility(View.GONE);
+    progress.setVisibility(View.GONE);
+  }
+
+  // ---------------------------------------------------------------- 3) 网页 + 悬浮图标
 
   private void buildWebView() {
-    webHost = new LinearLayout(this);
-    webHost.setOrientation(LinearLayout.VERTICAL);
-
-    LinearLayout bar = new LinearLayout(this);
-    bar.setOrientation(LinearLayout.HORIZONTAL);
-    bar.setGravity(Gravity.CENTER_VERTICAL);
-    bar.setPadding(dp(6), dp(4), dp(6), dp(4));
-
-    Button settingsButton = new Button(this);
-    settingsButton.setText("设置");
-    settingsButton.setOnClickListener(v -> showSetup(null));
-    bar.addView(settingsButton);
-
-    Button backButton = new Button(this);
-    backButton.setText("后退");
-    backButton.setOnClickListener(v -> {
-      if (web.canGoBack()) web.goBack();
-    });
-    bar.addView(backButton);
-
-    Button reloadButton = new Button(this);
-    reloadButton.setText("刷新");
-    reloadButton.setOnClickListener(v -> web.reload());
-    bar.addView(reloadButton);
-
-    titleView = new TextView(this);
-    titleView.setTextSize(13);
-    titleView.setAlpha(0.7f);
-    titleView.setSingleLine(true);
-    titleView.setPadding(dp(8), 0, 0, 0);
-    LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
-        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-    bar.addView(titleView, titleParams);
-    webHost.addView(bar, new LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-    progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-    progress.setMax(100);
-    progress.setVisibility(View.GONE);
-    webHost.addView(progress, new LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, dp(6)));
+    webHost = new FrameLayout(this);
 
     web = new WebView(this);
     WebSettings s = web.getSettings();
@@ -213,9 +349,12 @@ public class MainActivity extends Activity {
     s.setLoadWithOverviewMode(true);
     s.setMediaPlaybackRequiresUserGesture(false);
     s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+    s.setCacheMode(WebSettings.LOAD_DEFAULT);
     CookieManager cookies = CookieManager.getInstance();
     cookies.setAcceptCookie(true);
     cookies.setAcceptThirdPartyCookies(web, true);
+    webHost.addView(web, new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
     web.setWebViewClient(new WebViewClient() {
       @Override
@@ -226,7 +365,7 @@ public class MainActivity extends Activity {
         try {
           startActivity(new Intent(Intent.ACTION_VIEW, u));
         } catch (Exception ignored) {
-          // 设备上没人能接这个 scheme，忽略即可，不要崩
+          // 设备上没有能接这个 scheme 的应用，忽略
         }
         return true;
       }
@@ -234,15 +373,14 @@ public class MainActivity extends Activity {
       @Override
       public void onPageFinished(WebView view, String url) {
         progress.setVisibility(View.GONE);
+        loadHint.setVisibility(View.GONE);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_WARMED, true).apply();
       }
 
       @Override
       public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
         if (request == null || !request.isForMainFrame()) return;
-        progress.setVisibility(View.GONE);
-        // 连不上就退回地址页：这样「地址填错 / 电脑没开机 / 网段不对」都还能改回来
-        showSetup("打不开 " + request.getUrl() + "：" + error.getDescription()
-            + "\n把地址改对再点连接；地址没错就检查电脑上的 DSH 是否在跑、手机是否在同一网段。");
+        showError(String.valueOf(request.getUrl()), error.getErrorCode(), error.getDescription());
       }
     });
 
@@ -251,11 +389,11 @@ public class MainActivity extends Activity {
       public void onProgressChanged(WebView view, int newProgress) {
         progress.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
         progress.setProgress(newProgress);
+        if (newProgress >= 60) loadHint.setVisibility(View.GONE);
       }
 
       @Override
-      public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
-          FileChooserParams params) {
+      public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
         if (fileCallback != null) fileCallback.onReceiveValue(null);
         fileCallback = callback;
         try {
@@ -271,11 +409,70 @@ public class MainActivity extends Activity {
       }
     });
 
-    webHost.addView(web, new LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+    // 首次加载提示：只对「还没成功连上过」的设备显示一次
+    loadHint = label("首次加载要下载插件（十几 MB），只有第一次慢；之后走缓存秒开", 12, fgColor, false);
+    loadHint.setGravity(Gravity.CENTER);
+    loadHint.setLineSpacing(0, 1.3f);
+    int lp = dp(10);
+    loadHint.setPadding(lp, lp, lp, lp);
+    loadHint.setBackground(rounded(dark ? 0xE61B2130 : 0xF2FFFFFF, 12, lineColor, 1));
+    FrameLayout.LayoutParams hintParams = new FrameLayout.LayoutParams(dp(300), ViewGroup.LayoutParams.WRAP_CONTENT);
+    hintParams.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+    hintParams.topMargin = dp(18);
+    loadHint.setVisibility(View.GONE);
+    webHost.addView(loadHint, hintParams);
 
+    // 两个小图标：右上角一枚半透明胶囊，放着会自己淡下去，点一下回来
+    LinearLayout pill = new LinearLayout(this);
+    pill.setOrientation(LinearLayout.HORIZONTAL);
+    pill.setGravity(Gravity.CENTER_VERTICAL);
+    pill.setAlpha(0.92f);
+    pill.setBackground(rounded(dark ? 0xE6141821 : 0xF2FFFFFF, 22, lineColor, 1));
+    int pp = dp(3);
+    pill.setPadding(pp, pp, pp, pp);
+
+    ImageButton settings = iconButton(android.R.drawable.ic_menu_preferences, "设置");
+    settings.setOnClickListener(v -> showSetup(null));
+    pill.addView(settings, new LinearLayout.LayoutParams(dp(38), dp(38)));
+
+    ImageButton reload = iconButton(android.R.drawable.ic_popup_sync, "刷新");
+    reload.setOnClickListener(v -> web.reload());
+    pill.addView(reload, new LinearLayout.LayoutParams(dp(38), dp(38)));
+
+    FrameLayout.LayoutParams pillParams = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    pillParams.gravity = Gravity.TOP | Gravity.END;
+    pillParams.topMargin = dp(10);
+    pillParams.rightMargin = dp(10);
+    webHost.addView(pill, pillParams);
+
+    pill.postDelayed(() -> pill.animate().alpha(0.3f).setDuration(400), 3500);
+    pill.setOnClickListener(v -> pill.animate().alpha(0.95f).setDuration(150));
+
+    progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+    progress.setMax(100);
+    progress.setProgressTintList(ColorStateList.valueOf(accentColor));
+    progress.setProgressBackgroundTintList(ColorStateList.valueOf(Color.TRANSPARENT));
+    progress.setVisibility(View.GONE);
+    FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, dp(3));
+    progressParams.gravity = Gravity.TOP;
+    webHost.addView(progress, progressParams);
+
+    webHost.setVisibility(View.GONE);
     root.addView(webHost, new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+  }
+
+  private ImageButton iconButton(int drawable, String description) {
+    ImageButton b = new ImageButton(this);
+    b.setImageResource(drawable);
+    b.setContentDescription(description);
+    b.setColorFilter(dark ? 0xFFE8EAED : 0xFF334155);
+    b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+    b.setBackgroundColor(Color.TRANSPARENT);
+    b.setPadding(dp(8), dp(8), dp(8), dp(8));
+    return b;
   }
 
   @Override
@@ -296,10 +493,9 @@ public class MainActivity extends Activity {
 
   // ---------------------------------------------------------------- 连接
 
-  /** 规范化输入并开网页。raw 只允许 host[:port]；协议由 tls 决定。 */
+  /** 规范化输入并开网页：raw 只允许 host[:port]，协议由 tls 决定 */
   private void connect(String raw, boolean tls) {
     String host = raw == null ? "" : raw.trim();
-    // 手滑粘了整条网址也不至于没法用：把协议和结尾的斜杠剥掉
     host = host.replaceFirst("(?i)^https?://", "");
     while (host.endsWith("/")) host = host.substring(0, host.length() - 1);
     host = host.replaceAll("\\s+", "");
@@ -313,19 +509,17 @@ public class MainActivity extends Activity {
       return;
     }
 
-    String url = (tls ? "https://" : "http://") + host + "/";
-    SharedPreferences.Editor edit = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
-    edit.putString(KEY_HOST, host);
-    edit.putBoolean(KEY_TLS, tls);
-    edit.apply();
+    SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+    prefs.edit().putString(KEY_HOST, host).putBoolean(KEY_TLS, tls).apply();
 
     hostInput.setText(host);
-    titleView.setText((tls ? "https://" : "http://") + host);
     setupView.setVisibility(View.GONE);
+    errorView.setVisibility(View.GONE);
     webHost.setVisibility(View.VISIBLE);
     progress.setVisibility(View.VISIBLE);
-    progress.setProgress(0);
-    web.loadUrl(url);
+    progress.setProgress(5);
+    loadHint.setVisibility(prefs.getBoolean(KEY_WARMED, false) ? View.GONE : View.VISIBLE);
+    web.loadUrl((tls ? "https://" : "http://") + host + "/");
   }
 
   @Override
