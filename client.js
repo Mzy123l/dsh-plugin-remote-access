@@ -887,7 +887,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             if (el.hasAttribute('draggable') && el.getAttribute('draggable') !== 'false') return true;
             const attrs = typeof el.getAttributeNames === 'function' ? el.getAttributeNames() : [];
             if (attrs.some((n) => n.startsWith('data-we') || n.startsWith('data-wallpaper'))) return true;
-            if (el.scrollWidth - el.clientWidth > 4) {
+            if (el.scrollWidth - el.clientWidth > 24) {
               const overflowX = getComputedStyle(el).overflowX;
               if (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'overlay') return true;
             }
@@ -902,8 +902,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
 
       function onTouchStart(e) {
         if (!phoneNow() || e.touches.length !== 1) { swipe = null; return; }
-        // 先看按在什么上：横向归属方（画布/可横滚容器/可拖拽…）自己处理这一划，我们不抢
-        if (horizontalOwner(e.target)) { swipe = null; return; }
+        // 抽屉开着时，整层都是我们自己的侧栏列表（工作区/会话那一串）：不再问「这一划归谁」——
+        // 否则列表里任何一个横向略有溢出的容器都会把「滑回主页」整个吃掉（真机上就是这么发生的）。
+        const drawerOpen = document.documentElement.hasAttribute('data-ra-drawer');
+        if (!drawerOpen && horizontalOwner(e.target)) { swipe = null; return; }
         const point = e.touches[0];
         const width = window.innerWidth || 0;
         swipe = {
@@ -944,9 +946,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         const drawer = document.documentElement.hasAttribute('data-ra-drawer');
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
-          // 向右滑：收起右栏优先（它盖在最上面），否则打开左抽屉
+          // 向右滑：抽屉开着时先**收起抽屉**（这就是「回到主页」），其次收右栏，最后才是打开抽屉
+          if (drawer) { clickLabel('收起侧边栏'); return; }
           if (rightOpen) { clickLabel('收起右侧边栏'); return; }
-          if (!drawer) clickLabel('打开侧边栏');
+          clickLabel('打开侧边栏');
           return;
         }
         // 向左滑：收起抽屉优先，否则打开右栏

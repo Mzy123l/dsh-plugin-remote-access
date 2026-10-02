@@ -460,10 +460,10 @@ public class MainActivity extends Activity {
 
     FrameLayout.LayoutParams pillParams = new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    // 左抽屉收起时是一条 56px 宽的图标栏；11dp 让 34dp 的图标正好落在它的中线上
+    // 左抽屉收起时是一条 56px 宽的图标栏；6dp 让 34dp 的图标略靠左，52dp 把它抬到列表上方
     pillParams.gravity = Gravity.BOTTOM | Gravity.START;
-    pillParams.leftMargin = dp(11);
-    pillParams.bottomMargin = dp(26);
+    pillParams.leftMargin = dp(6);
+    pillParams.bottomMargin = dp(52);
     webHost.addView(pill, pillParams);
 
     pill.postDelayed(() -> pill.animate().alpha(0.3f).setDuration(400), 3500);
