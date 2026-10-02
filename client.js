@@ -149,7 +149,7 @@ html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; /*stro
 html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; /*strong*/ }
 html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
   /*strong*/
-  position: fixed !important;
+  position: absolute !important;
   top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
   /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 88vw 但右边仍留出可见的正文 */
   width: min(88vw, 340px) !important;
@@ -202,7 +202,7 @@ html[data-ra-layout="phone"] [data-ra-phone-hidden] { display: none !important; 
 
 #dsh-ra-scrim { display: none; }
 html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] { /*strong*/
-  display: block; position: fixed; inset: 0; z-index: 60;
+  display: block; position: absolute; inset: 0; z-index: 60;
   background: rgba(0,0,0,0.42); -webkit-tap-highlight-color: transparent;
 }
 
@@ -325,11 +325,16 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        * 真机上出现过「DOM 与计算样式全对、画面却不更新，拖一下宽度才显示」——视图/合成层面的问题，
        * 而关掉这些增强块页面就正常呈现。所以默认只注入保守块，增强由配置或 URL 显式开启。
        */
-      function phoneCss(strong) {
-        if (strong) return PHONE_CSS.replace(/\/\*strong\*\//g, '');
+      function phoneCss(strong, skip) {
+        const skips = skip || [];
+        if (strong && skips.length === 0) return PHONE_CSS.replace(/\/\*strong\*\//g, '');
         return PHONE_CSS.split('}')
           .map((block) => block.trim())
-          .filter((block) => block.length > 0 && !block.includes('/*strong*/'))
+          .filter((block) => {
+            if (block.length === 0) return false;
+            if (!strong && block.includes('/*strong*/')) return false;
+            return !skips.some((word) => word && block.includes(word));
+          })
           .map((block) => block + '}')
           .join('\n');
       }
@@ -343,14 +348,26 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         }
       }
 
-      function injectStyle(strong) {
+      /** 排障用：?skip=z-index,grid-template 可在增强模式里按关键字丢掉对应规则块 */
+      function raSkip() {
+        try {
+          return (new URLSearchParams(window.location.search).get('skip') || '')
+            .split(',')
+            .map((word) => word.trim())
+            .filter(Boolean);
+        } catch {
+          return [];
+        }
+      }
+
+      function injectStyle(strong, skip) {
         let tag = document.querySelector(`style[data-ra-layout-css="${LAYOUT_STYLE_ID}"]`);
         if (!tag) {
           tag = document.createElement('style');
           tag.dataset.raLayoutCss = LAYOUT_STYLE_ID;
           document.head.appendChild(tag);
         }
-        tag.textContent = phoneCss(strong);
+        tag.textContent = phoneCss(strong, skip);
       }
 
       /** 从某个槽位元素往上找到「frame 的直接子元素」（也就是那一列），与类名无关 */
@@ -568,7 +585,8 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         // 增强只在手机布局下有意义；?ra=strong / ?ra=safe 可以临时强制，便于真机二分
         const strong =
           layout === 'phone' && (override === 'strong' || (override !== 'safe' && mode === 'phone-strong'));
-        const signature = strong ? `${layout}:strong` : layout;
+        const skip = layout === 'phone' ? raSkip() : [];
+        const signature = `${strong ? `${layout}:strong` : layout}${skip.length ? `|${skip.join(',')}` : ''}`;
         if (signature === applied) {
           syncDom();
           return;
@@ -577,7 +595,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         document.documentElement.setAttribute('data-ra-layout', layout);
         if (strong) document.documentElement.setAttribute('data-ra-strong', '');
         else document.documentElement.removeAttribute('data-ra-strong');
-        if (layout === 'phone') injectStyle(strong);
+        if (layout === 'phone') injectStyle(strong, skip);
         syncDom();
         // 首次进入手机布局后踢一次重绘：这一步正好是「打开页面就是空白」的现场
         if (layout === 'phone') nudgeRepaint();
