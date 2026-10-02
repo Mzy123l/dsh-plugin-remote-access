@@ -132,6 +132,13 @@ html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { display: non
 html[data-ra-layout="phone"] [data-ra-center],
 html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
 
+/* 关键：手机布局下**关掉框架自己的列宽过渡**。
+   框架带着 .BynINW_frame[data-animating] 上的 transition: grid-template-columns …，而 grid-template-columns
+   是可动画的布局属性；我用 !important 改写轨道值（48px / 0px）时又挂着这条过渡，真机上出现过
+   「DOM 与计算值都对、画面却不重绘，直到手动拖一下宽度才刷新」的卡顿 —— 关掉它就没有这个组合了。
+   反正手机端的轨道值由我定，过渡本身也没有意义。 */
+html[data-ra-layout="phone"] [data-ra-frame] { transition: none !important; }
+
 /* 侧栏：收起时保持 56px 图标栏；展开时改成「抽屉」压在正文上 —— 而不是把正文挤成 110px 一条 */
 /* 三列显式钉住列号：抽屉模式把侧栏改成 position:fixed 后就脱离网格了，
    自动排位会把「正文」顶到第 1 条轨道（0px）上，正文会直接消失。 */
