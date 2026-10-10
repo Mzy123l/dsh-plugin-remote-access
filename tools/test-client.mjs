@@ -649,6 +649,259 @@ check(
   JSON.stringify(mutateCalls[0]?.ops ?? null),
 );
 
+// ---------------------------------------------------------------- 场景六：返回键（只给手机布局）
+//
+// 安卓外壳（android/MainActivity）把系统返回键接管了：网页上那一下返回键，外壳会先问这里
+// 「还有几层该先关掉的东西」。所以这一段要断言三件事：
+//   · 层数算得对（抽屉 / 官方浮层都算，且官方浮层在最上面）；
+//   · closeTop() 关的确实是**最上面**那层，而且走的是它自己的入口（抽屉=点「收起侧边栏」、
+//     官方浮层=派发 Escape）—— 不是我们去改谁的状态；
+//   · 「只给手机布局」：电脑布局恒为 0、本机页面连入口都不装，停用后入口要收回。
+
+/** 极简选择器匹配：够这段用（tag / [attr] / [attr="v"] / 逗号并列 / "A > B"） */
+function matchSimple(el, sel) {
+  const parsed = /^([a-zA-Z]*)((?:\[[^\]]+\])*)$/.exec(sel);
+  if (!parsed) return false;
+  const [, tag, attrs] = parsed;
+  if (tag && el.tagName !== tag.toUpperCase()) return false;
+  for (const m of attrs.matchAll(/\[([^\]=]+)(?:="([^"]*)")?\]/g)) {
+    if (!el.hasAttribute(m[1])) return false;
+    if (m[2] !== undefined && el.getAttribute(m[1]) !== m[2]) return false;
+  }
+  return true;
+}
+function matchesSelector(el, sel) {
+  return String(sel)
+    .split(',')
+    .map((one) => one.trim())
+    .filter(Boolean)
+    .some((one) => {
+      const chain = one.split('>').map((part) => part.trim()).filter(Boolean);
+      let node = el;
+      for (let i = chain.length - 1; i >= 0; i -= 1) {
+        if (!node || !matchSimple(node, chain[i] === '*' ? '' : chain[i])) return false;
+        if (i > 0) node = node.parentElement;
+      }
+      return true;
+    });
+}
+const descendants = (el, out = []) => {
+  for (const child of el.children ?? []) {
+    out.push(child);
+    descendants(child, out);
+  }
+  return out;
+};
+
+function makeBackEl(tag, attrs = {}) {
+  const el = {
+    tagName: tag.toUpperCase(),
+    id: attrs.id ?? '',
+    disabled: false,
+    children: [],
+    parentElement: null,
+    dataset: {},
+    style: {},
+    textContent: '',
+    clicks: 0,
+    _attrs: new Map(),
+    _box: { width: 100, height: 40, left: 10, top: 10, right: 110, bottom: 50 },
+    getAttribute(n) { return this._attrs.has(n) ? this._attrs.get(n) : null; },
+    setAttribute(n, v) { this._attrs.set(n, String(v)); },
+    removeAttribute(n) { this._attrs.delete(n); },
+    hasAttribute(n) { return this._attrs.has(n); },
+    getAttributeNames() { return [...this._attrs.keys()]; },
+    addEventListener() {},
+    removeEventListener() {},
+    appendChild(c) { c.parentElement = this; this.children.push(c); return c; },
+    closest(sel) { for (let n = this; n; n = n.parentElement) if (matchesSelector(n, sel)) return n; return null; },
+    getBoundingClientRect() { return this._box; },
+    click() { this.clicks += 1; },
+    querySelector(sel) { return descendants(this).find((e) => matchesSelector(e, sel)) ?? null; },
+    querySelectorAll(sel) { return descendants(this).filter((e) => matchesSelector(e, sel)); },
+    contains() { return false; },
+  };
+  for (const [k, v] of Object.entries(attrs)) if (k !== 'id') el._attrs.set(k, String(v));
+  return el;
+}
+
+/** 造一个够布局控制器 + 返回键 API 用的 DOM；返回里面的关键元素，方便断言 */
+function installBackDom({ width = 390, drawerOpen = true } = {}) {
+  const html = makeBackEl('html');
+  const head = makeBackEl('head');
+  const body = makeBackEl('body');
+  html.appendChild(head);
+  html.appendChild(body);
+
+  const root = makeBackEl('div', { 'data-slot': 'root' });
+  const frame = makeBackEl('div');
+  root.appendChild(frame);
+  body.appendChild(root);
+  if (!drawerOpen) frame.setAttribute('data-sidebar-collapsed', '');
+
+  const openDrawer = makeBackEl('button', { 'aria-label': '打开侧边栏' });
+  const closeDrawer = makeBackEl('button', { 'aria-label': '收起侧边栏' });
+  body.appendChild(openDrawer);
+  body.appendChild(closeDrawer);
+
+  const styles = [];
+  const dispatched = [];
+  const doc = {
+    documentElement: html,
+    head,
+    body,
+    createElement: (tag) => {
+      const el = makeBackEl(tag);
+      if (tag === 'style') styles.push(el);
+      return el;
+    },
+    getElementById: (id) => [html, ...descendants(html)].find((e) => e.id === id) ?? null,
+    // style[data-ra-layout-css=…] 在真实 DOM 里是 dataset 写出来的属性，桩子里单独认一下
+    querySelector: (sel) => {
+      if (String(sel).startsWith('style[')) return styles.find((s) => s.dataset.raLayoutCss) ?? null;
+      return [html, ...descendants(html)].find((e) => matchesSelector(e, sel)) ?? null;
+    },
+    querySelectorAll: (sel) => [html, ...descendants(html)].filter((e) => matchesSelector(e, sel)),
+    addEventListener() {},
+    dispatchEvent: (ev) => { dispatched.push(ev); return true; },
+  };
+  globalThis.document = doc;
+  globalThis.MutationObserver = class { observe() {} disconnect() {} };
+  globalThis.KeyboardEvent = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
+  globalThis.window.matchMedia = (query) => ({
+    matches: /max-width/.test(query) ? width <= Number(/max-width:\s*(\d+)/.exec(query)[1]) : false,
+    addEventListener() {},
+    removeEventListener() {},
+  });
+  globalThis.window.setTimeout = setTimeout;
+  globalThis.window.clearTimeout = clearTimeout;
+  globalThis.window.addEventListener = () => {};
+  globalThis.window.removeEventListener = () => {};
+  globalThis.window.innerWidth = width;
+  globalThis.window.innerHeight = 844;
+  return { html, body, frame, styles, dispatched, openDrawer, closeDrawer, makeBackEl };
+}
+
+/** 只挂布局控制器，并把它的清理函数抓出来（返回 stop()） */
+function applyBackController({ isLoopback, remoteLayout }) {
+  // ctx.effect 的契约：回调可以「返回一个清理函数」，停用时由宿主执行。
+  // 插件里注册了不止一个 effect，所以这里要全收着，停用时按同样的规矩跑。
+  const effects = [];
+  plugin.apply({
+    configForms: {
+      get: () => ({
+        getSnapshot: () => ({ status: 'unavailable', writable: false, mode: 'memory', revision: undefined, value: undefined }),
+        subscribe: () => () => {},
+        mutate: async () => false,
+      }),
+      describe: () => ({ load: async () => {} }),
+    },
+    remote: {
+      $host: { home: undefined, isLoopback },
+      settings: {
+        describe: async () => ({
+          ok: true,
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { remoteLayout }, revision: 1 }] },
+        }),
+        mutate: async () => ({ ok: true, value: {} }),
+      },
+      $on: () => () => {},
+    },
+    on: () => () => {},
+    effect: (fn) => { effects.push(fn); },
+    slots: { inject: (_n, cb) => cb(), register: () => () => {} },
+  });
+  return () => {
+    for (const fn of effects) {
+      try {
+        const cleanup = fn();
+        if (typeof cleanup === 'function') cleanup();
+      } catch { /* 忽略 */ }
+    }
+  };
+}
+
+// ---- 远程页面 + 手机布局：抽屉开着 → 1 层；官方浮层盖在上面 → 2 层，且先关浮层
+const backDom = installBackDom({ drawerOpen: true });
+applyBackController({ isLoopback: false, remoteLayout: 'phone' });
+await sleep(80);
+check(
+  '手机布局：给外壳留了返回键入口（window.__dshRaBack）',
+  typeof globalThis.window.__dshRaBack?.count === 'function' && typeof globalThis.window.__dshRaBack?.closeTop === 'function',
+);
+check(
+  '手机布局：抽屉开着算 1 层',
+  globalThis.window.__dshRaBack?.count() === 1,
+  String(globalThis.window.__dshRaBack?.count()),
+);
+
+// 官方浮层（设置面板这类 Modal）盖在抽屉上：层数变 2，且 closeTop 先走它
+const dialog = backDom.makeBackEl('div', { role: 'dialog', 'aria-modal': 'true' });
+const dialogClose = backDom.makeBackEl('button', { 'data-slot': 'settings.close' });
+dialog.appendChild(dialogClose);
+backDom.body.appendChild(dialog);
+check(
+  '手机布局：官方浮层 + 抽屉 = 2 层',
+  globalThis.window.__dshRaBack?.count() === 2,
+  String(globalThis.window.__dshRaBack?.count()),
+);
+const closedDialog = globalThis.window.__dshRaBack?.closeTop();
+check(
+  '官方浮层在最上面：closeTop() 派发 Escape 关它，而不是去点抽屉',
+  closedDialog === true && backDom.dispatched.some((ev) => ev.type === 'keydown' && ev.key === 'Escape') && backDom.closeDrawer.clicks === 0,
+  `closed=${closedDialog} dispatched=${backDom.dispatched.length} 抽屉点击=${backDom.closeDrawer.clicks}`,
+);
+
+// 浮层关掉（桩子里用「不可见」模拟）→ 回到抽屉那一层
+dialog._box = { width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0 };
+check(
+  '浮层没了就只剩抽屉：1 层',
+  globalThis.window.__dshRaBack?.count() === 1,
+  String(globalThis.window.__dshRaBack?.count()),
+);
+const closedDrawer = globalThis.window.__dshRaBack?.closeTop();
+check(
+  '抽屉在最上面：closeTop() 点它自己的「收起侧边栏」',
+  closedDrawer === true && backDom.closeDrawer.clicks === 1,
+  `closed=${closedDrawer} 抽屉点击=${backDom.closeDrawer.clicks}`,
+);
+
+// ---- 电脑布局：网页这一半一律报 0（外壳那边就照旧走网页历史 / 退出）
+const deskBackDom = installBackDom({ drawerOpen: true });
+applyBackController({ isLoopback: false, remoteLayout: 'desktop' });
+await sleep(80);
+check(
+  '电脑布局：层数恒为 0，closeTop() 不接手',
+  globalThis.window.__dshRaBack?.count() === 0 && globalThis.window.__dshRaBack?.closeTop() === false,
+  `count=${globalThis.window.__dshRaBack?.count()} 抽屉点击=${deskBackDom.closeDrawer.clicks}`,
+);
+
+// ---- 本机（回环）页面：连入口都不装（先把上一台控制器的入口清掉，证明不是残留）
+delete globalThis.window.__dshRaBack;
+const localBackDom = installBackDom({ drawerOpen: true });
+applyBackController({ isLoopback: true, remoteLayout: 'phone' });
+await sleep(80);
+check(
+  '本机页面：不装返回键入口（本机窗口再窄也一样）',
+  globalThis.window.__dshRaBack === undefined && localBackDom.html.getAttribute('data-ra-layout') === null,
+  typeof globalThis.window.__dshRaBack,
+);
+
+// ---- 停用（控制器清理）：入口要收回，别让外壳问到一个已经停掉的页面
+const stopBack = applyBackController({ isLoopback: false, remoteLayout: 'phone' });
+await sleep(80);
+const installed = typeof globalThis.window.__dshRaBack?.count === 'function';
+stopBack();
+check(
+  '清理后收回入口',
+  installed && globalThis.window.__dshRaBack === undefined,
+  `装上了=${installed} 清理后=${typeof globalThis.window.__dshRaBack}`,
+);
+
+delete globalThis.document;
+delete globalThis.MutationObserver;
+delete globalThis.KeyboardEvent;
+
 console.log(results.join('\n'));
 const failed = results.filter((r) => r.startsWith('FAIL')).length;
 console.log(`\n${results.length - failed}/${results.length} passed`);
