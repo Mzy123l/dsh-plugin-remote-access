@@ -5,9 +5,11 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.util.TypedValue;
@@ -33,6 +35,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.window.OnBackInvokedDispatcher;
 
 /**
  * DSH 的安卓外壳：地址页（卡片） + 错误页 + 网页，外加两枚「融进页面」的小图标。
@@ -45,6 +48,9 @@ import android.widget.TextView;
  *
  * 为什么地址页必须能离线进：地址错了/电脑没开时网页里什么都显示不了，
  * 如果设置藏在网页里，就永远改不回来。
+ *
+ * 返回键由本类**整个接管**（见下面「返回键」那一段）：三块界面各有确定行为，
+ * 网页里还开着抽屉/右栏/设置面板时先把那些关掉，最后才是退出 App。
  */
 public class MainActivity extends Activity {
 
@@ -59,15 +65,34 @@ public class MainActivity extends Activity {
 
   private static final int REQ_FILE = 1001;
 
+  /** 问网页「还有几层浮层可关」时最多等多久；网页线程卡住也不能让返回键失灵 */
+  private static final long BACK_QUERY_TIMEOUT_MS = 400;
+
+  /** 问网页要关掉几层浮层。网页那半边没装/不认识这个入口时得到 "0"（电脑布局也报 0） */
+  private static final String JS_BACK_COUNT =
+      "(window.__dshRaBack && typeof window.__dshRaBack.count === 'function')"
+          + " ? String(window.__dshRaBack.count()) : '0'";
+
+  /** 让网页关掉最上面那层浮层；返回它是否真的关掉了 */
+  private static final String JS_BACK_CLOSE =
+      "(window.__dshRaBack && typeof window.__dshRaBack.closeTop === 'function')"
+          + " ? String(window.__dshRaBack.closeTop()) : 'false'";
+
   private FrameLayout root;
   private ScrollView setupView;
   private FrameLayout errorView;
   private FrameLayout webHost;
   private EditText hostInput;
-  /** 地址页左上角的返回：只在「已经连过、又点设置进来」的时候出现 */
+  /** 地址页左上角的返回：只在「网页还在、又点设置进来」的时候出现 */
   private ImageButton setupBack;
-  /** 是否已经载入过页面 —— 决定地址页要不要给「返回」 */
-  private boolean webLoaded = false;
+  /**
+   * 网页此刻**有没有一版真的渲染出来的页面**。返回键与地址页那个返回图标都看它：
+   * 主框架导航失败时它变回 false —— 那时 WebView 里已经没有能看的页面了，
+   * 不能再拿「回网页」当返回目标（否则会退回一张白页/错误页）。
+   */
+  private boolean webOk = false;
+  /** 本次导航的主框架失败过（onPageStarted → onReceivedError → onPageFinished 是三段，用它串起来） */
+  private boolean mainFrameError = false;
   private CheckBox tlsCheck;
   private TextView setupError;
   private TextView errorTitle;
@@ -76,6 +101,8 @@ public class MainActivity extends Activity {
   private ProgressBar progress;
   private WebView web;
   private ValueCallback<Uri[]> fileCallback;
+  /** 每次「问网页」都发一个新号；回答回来时号变了就说明这一问已经作废（超时 / 用户又按了一次） */
+  private int backQueryId = 0;
 
   private int bgColor;
   private int cardColor;
@@ -98,6 +125,7 @@ public class MainActivity extends Activity {
     buildSetupView();
     buildErrorView();
     buildWebView();
+    installBackHandler();
 
     SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
     String saved = prefs.getString(KEY_HOST, "");
@@ -186,11 +214,7 @@ public class MainActivity extends Activity {
 
     // 左上角返回：从网页点「设置」进来时才有意义（首次启动没有「回去」可回，所以那时不显示）
     setupBack = iconButton(R.drawable.ic_back, "返回");
-    setupBack.setOnClickListener(v -> {
-      setupView.setVisibility(View.GONE);
-      errorView.setVisibility(View.GONE);
-      webHost.setVisibility(View.VISIBLE);
-    });
+    setupBack.setOnClickListener(v -> showOnly(webHost)); // 与返回键同一条路：回网页，不重连
     setupBack.setVisibility(View.GONE);
     LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(dp(40), dp(40));
     backParams.bottomMargin = dp(6);
@@ -269,7 +293,7 @@ public class MainActivity extends Activity {
 
   private void showSetup(String message) {
     setupError.setText(message == null ? "" : message);
-    if (setupBack != null) setupBack.setVisibility(webLoaded ? View.VISIBLE : View.GONE);
+    if (setupBack != null) setupBack.setVisibility(webOk ? View.VISIBLE : View.GONE);
     setupView.setVisibility(View.VISIBLE);
     errorView.setVisibility(View.GONE);
     webHost.setVisibility(View.GONE);
@@ -388,15 +412,25 @@ public class MainActivity extends Activity {
       }
 
       @Override
+      public void onPageStarted(WebView view, String url, Bitmap favicon) {
+        // 每一段主框架导航开始时先清掉上一次的失败标记（onReceivedError 会再把它立起来）
+        mainFrameError = false;
+      }
+
+      @Override
       public void onPageFinished(WebView view, String url) {
         progress.setVisibility(View.GONE);
         loadHint.setVisibility(View.GONE);
+        // 这一版真的渲染出来了才算「网页还在」；失败的那一版不算（见 webOk 的说明）
+        if (!mainFrameError) webOk = true;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_WARMED, true).apply();
       }
 
       @Override
       public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
         if (request == null || !request.isForMainFrame()) return;
+        mainFrameError = true;
+        webOk = false; // WebView 里那一版页面已经没了：返回键不能再往它回
         showError(String.valueOf(request.getUrl()), error.getErrorCode(), error.getDescription());
       }
     });
@@ -535,7 +569,6 @@ public class MainActivity extends Activity {
     hostInput.setText(host);
     setupView.setVisibility(View.GONE);
     errorView.setVisibility(View.GONE);
-    webLoaded = true;
     webHost.setVisibility(View.VISIBLE);
     progress.setVisibility(View.VISIBLE);
     progress.setProgress(5);
@@ -543,19 +576,125 @@ public class MainActivity extends Activity {
     web.loadUrl((tls ? "https://" : "http://") + host + "/");
   }
 
-  @Override
-  public void onBackPressed() {
-    // 地址页开着、而且之前已经连上过：返回键就是「回到网页」，不用重新连
-    if (setupView != null && setupView.getVisibility() == View.VISIBLE && webLoaded && webHost != null) {
-      setupView.setVisibility(View.GONE);
-      webHost.setVisibility(View.VISIBLE);
+  // ---------------------------------------------------------------- 返回键
+
+  /**
+   * 返回键的完整路由 —— 本类**唯一**的返回入口：
+   * Android 13（API 33）起系统走 OnBackInvokedCallback，更早的版本只有 onBackPressed，
+   * 两条路都接到这里（清单里开了 enableOnBackInvokedCallback，所以 33+ 上不会重复处理）。
+   *
+   * 每一档都有确定行为，不再有「按了没反应」或「明明有东西开着却退出了」的中间态：
+   *   1) 地址页：从网页点「设置」进来的 → 回网页（不重连）；首次启动、或网页已经坏了 → 退出；
+   *   2) 错误页：→ 回地址页改地址（主框架失败之后 WebView 里已经没有一个能看的页面了，
+   *      「回网页」只会退回一张白页，所以那一档不做）；
+   *   3) 网页：先问网页「手机布局里还有没有该先关掉的浮层」（抽屉 / 右栏 / 设置面板）；
+   *   4) 网页没有浮层可关，才轮到「网页历史后退」；
+   *   5) 都没有 → 退出 App。
+   *
+   * 第 3 步为什么是异步的：网页里有没有浮层只有它自己知道（那些浮层是浏览器半区 client.js
+   * 施加的），WebView 不提供同步的询问入口。所以这里 evaluateJavascript 问一次，回调里再决定；
+   * 网页线程被卡住时用 BACK_QUERY_TIMEOUT_MS 兜底，别让返回键看起来失灵。
+   *
+   * 代价（有意接受的）：这一下返回键由我们裁决，系统就不再替我们做「滑回桌面」的预测式预览；
+   * 换来的是任何一层都有确定的返回行为。
+   */
+  private void handleBack() {
+    // 1) 地址页
+    if (setupView != null && setupView.getVisibility() == View.VISIBLE) {
+      if (webOk && webHost != null) showOnly(webHost); // 从网页点设置进来的：回去
+      else finish();                                   // 首次启动 / 网页已经坏了：没有可回的地方
       return;
     }
-    if (webHost != null && webHost.getVisibility() == View.VISIBLE && web != null && web.canGoBack()) {
+    // 2) 错误页：回地址页改地址（那一版网页已经没了，见上面第 2 条）
+    if (errorView != null && errorView.getVisibility() == View.VISIBLE) {
+      showSetup(null);
+      return;
+    }
+    // 3) 网页
+    if (webHost != null && webHost.getVisibility() == View.VISIBLE && web != null) {
+      askWebThenBack();
+      return;
+    }
+    finish();
+  }
+
+  /** 三块界面一次只显示一块 */
+  private void showOnly(View target) {
+    if (setupView != null) setupView.setVisibility(target == setupView ? View.VISIBLE : View.GONE);
+    if (errorView != null) errorView.setVisibility(target == errorView ? View.VISIBLE : View.GONE);
+    if (webHost != null) webHost.setVisibility(target == webHost ? View.VISIBLE : View.GONE);
+  }
+
+  /** 先问网页有没有浮层：有就让它关（这一下返回键就此用掉），没有才继续「网页历史 → 退出」 */
+  private void askWebThenBack() {
+    final int id = ++backQueryId;
+    final Runnable timeout = () -> settleBack(id, 0);
+    web.postDelayed(timeout, BACK_QUERY_TIMEOUT_MS);
+    try {
+      web.evaluateJavascript(JS_BACK_COUNT, value -> {
+        web.removeCallbacks(timeout);
+        settleBack(id, parseCount(value));
+      });
+    } catch (Exception e) {
+      web.removeCallbacks(timeout);
+      settleBack(id, 0);
+    }
+  }
+
+  /** 网页那半边的回答落地；这中间用户又按了返回（或已经超时）就把这次作废 */
+  private void settleBack(int id, int layers) {
+    if (id != backQueryId) return;
+    backQueryId++; // 作废本次（含上面那个还没跑的 timeout）
+    if (layers > 0) {
+      closeTopWebLayer();
+      return;
+    }
+    if (web != null && web.canGoBack()) {
       web.goBack();
       return;
     }
-    super.onBackPressed();
+    finish();
+  }
+
+  /** 让网页关掉最上面那层浮层（走它自己的关闭入口，与用户手点、手势收起同一条路） */
+  private void closeTopWebLayer() {
+    try {
+      web.evaluateJavascript(JS_BACK_CLOSE, null);
+    } catch (Exception ignored) {
+      // 网页自己没关掉就算了：下一次返回键还会再问一遍，不会卡死
+    }
+  }
+
+  /** evaluateJavascript 的回调给的是 JSON：数字、带引号的字符串，或者 "null" */
+  private static int parseCount(String raw) {
+    if (raw == null) return 0;
+    String text = raw.trim().replace("\"", "");
+    try {
+      return Math.max(0, Integer.parseInt(text));
+    } catch (NumberFormatException e) {
+      return 0;
+    }
+  }
+
+  /**
+   * 两条返回路径都装上。
+   * API 33 起系统只认 OnBackInvokedCallback（而且清单里已显式开启预测式返回），
+   * 低版本没有这个 API，走 onBackPressed —— 所以这里必须按版本分支，不能只留一条。
+   */
+  private void installBackHandler() {
+    if (Build.VERSION.SDK_INT < 33) return;
+    try {
+      getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+          OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
+    } catch (Throwable ignored) {
+      // 注册失败就退回 onBackPressed（系统的默认行为仍然在），不至于按了没反应
+    }
+  }
+
+  @Override
+  public void onBackPressed() {
+    // API 33+ 上不会走到这里（系统优先把返回交给上面注册的回调），这里是给更早版本留的那条路
+    handleBack();
   }
 
   @Override
