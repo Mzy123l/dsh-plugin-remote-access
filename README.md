@@ -70,8 +70,8 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main
 **[下载最新 APK](https://github.com/Mzy123l/dsh-plugin-remote-access/releases/latest)**
 （[全部 Release](https://github.com/Mzy123l/dsh-plugin-remote-access/releases) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
 
-> 链接指向 Releases 而不是某个固定文件名：APK 名形如 `dsh-remote-<版本>.apk`，每抬一次版本都会换名字，
-> 钉死某个文件名迟早会落后。要装具体某一版，进 Release 页挑。
+> 链接指向 Releases 而不是某个固定文件名：APK 名形如 `dsh-plugin-remote-access-<版本>.apk`，
+> 每抬一次版本都会换名字，钉死某个文件名迟早会落后。要装具体某一版，进 Release 页挑。
 
 App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
 
@@ -397,14 +397,15 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 ## 更新日志
 
 ### 1.3.0
-- **安卓外壳：返回键整个接管**（APK `1.1.2`）。以前它只在「网页能后退」时才动，其余情况一律退出：
+- **安卓外壳：返回键整个接管**（APK `1.3.0`）。以前它只在「网页能后退」时才动，其余情况一律退出：
   抽屉开着、设置面板开着、错误页上按返回，都会直接把 App 关掉。现在的顺序是
   **先关网页里的浮层（抽屉 / 右栏 / 设置面板）→ 再网页后退 → 最后退出**；
   地址页上按返回则回到网页（从网页点「设置」进来时），错误页上按返回回到地址页改地址。
   两条系统路径都接上了：Android 13+ 的 `OnBackInvokedCallback` 与旧版的 `onBackPressed`。
   网页那半边只需多答一句「还有几层能关的」（`window.__dshRaBack`，**只作用于手机布局**，
   本机页面与电脑布局都不参与）—— 普通浏览器里打开时它等于不存在。
-  ⚠️ **两端要配套**：APK `1.1.2` 起 + 插件 `1.3.0` 起。只换 APK、插件还是老版本时，
+  ⚠️ **两端要配套**：APK 与插件都从 **`1.3.0`** 起（仓库改名后两边共用一个版本号，
+  安装包叫 `dsh-plugin-remote-access-1.3.0.apk`）。只换 APK、插件还是老版本时，
   外壳问不到浮层，表现依旧是「抽屉开着按返回直接退出」（这一条是被真机踩出来的）。
 - **返回键也管左上角那两个全局面板**：「插件」与「自动化任务」（以及任何注册进
   `main` 槽位的全局面板）选中后正文就是它，返回键现在会先回会话 —— 状态读官方的
@@ -421,6 +422,9 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
   （以前连接一发起就算「连过」，于是连错地址时返回会退回一张白页）。
 - 文档：主 README 的 APK 下载入口改成指向 Releases 页，不再把版本号钉死在文件名里
   （APK 每抬一次版本就换名字，钉死迟早落后），并补上本节这条「两端要配套」。
+- **版本号对齐**：APK 的 `versionName` 由 `1.1.2` 改成 **`1.3.0`**（与插件同号，`versionCode` 仍是 8），
+  安装包与 Release tag 跟着仓库改名：`dsh-plugin-remote-access-1.3.0.apk` / `v1.3.0-android`
+  （改名前的 `dsh-remote-1.1.1.apk` / `v1.1.1-android` 保持原样，老链接照旧能下）。
 
 ### 1.2.0
 - **改名**：包名 `dsh-remote-access-cidr` → **`dsh-plugin-remote-access`**，仓库同为
