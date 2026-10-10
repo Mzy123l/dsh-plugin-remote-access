@@ -67,13 +67,18 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main
 
 不想在手机浏览器里手打地址的话，可以用配套的外壳 App：
 
-**[下载 dsh-remote-1.1.1.apk](https://github.com/Mzy123l/dsh-plugin-remote-access/releases/download/v1.1.1/dsh-remote-1.1.1.apk)**
-（[Release 页](https://github.com/Mzy123l/dsh-plugin-remote-access/releases) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+**[下载最新 APK](https://github.com/Mzy123l/dsh-plugin-remote-access/releases/latest)**
+（[全部 Release](https://github.com/Mzy123l/dsh-plugin-remote-access/releases) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+
+> 链接指向 Releases 而不是某个固定文件名：APK 名形如 `dsh-plugin-remote-access-<版本>.apk`，
+> 每抬一次版本都会换名字，钉死某个文件名迟早会落后。要装具体某一版，进 Release 页挑。
 
 App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
 
 - **首屏就是地址页**：只填 `IP或域名:端口`（**不用写协议**，例 `100.64.0.3:19388`），HTTPS 一个勾决定；
-- 连不上 / 填错 / 电脑没开时**自动退回地址页**，顶栏也永远有「设置」——**断网也改得回来**；
+- 连不上 / 填错 / 电脑没开时**自动退回地址页**，网页上左侧那枚小胶囊里永远有「设置」——**断网也改得回来**；
+- **返回键整个归外壳管**：先关网页里的抽屉 / 右栏 / 设置面板，再网页后退，最后才退出 App
+  （地址页、错误页上按返回也各有确定去处，不会「按了没反应」；细节见 [`android/README.md`](android/README.md#返回键)）；
 - 网页仍是电脑上那份 DSH：手机布局、`远程UI布局`、`UI 设置` 全由本插件的配置决定；
 - 只申请 `INTERNET` / `ACCESS_NETWORK_STATE`，自签（`CN=DSH Remote`），同签名的后续版本可直接覆盖安装。
 
@@ -248,6 +253,17 @@ DSH 的界面是为桌面三栏设计的。在 390px 宽的手机上，它的表
 所以**文件/终端那类右侧面板在手机上仍然打不开** —— 这属于 DSH 布局自身的策略，
 本插件只改样式、不动别人的布局计算，因此没有去绕它。
 
+### 手机布局 + 安卓外壳：返回键
+
+用配套的安卓 App（`android/`）时，系统返回键由外壳接管，顺序是
+**先关网页里的浮层 → 再网页后退 → 最后退出**。网页这一半只回答两个问题
+（`window.__dshRaBack` 的 `count()` / `closeTop()`），而且**只在手机布局下算数**：
+电脑布局里侧栏就是普通一列，没什么可「关掉」的；本机页面连这个入口都不装。
+关的方式仍然是替用户点它自己的入口 —— 官方浮层（设置面板、下拉菜单…）派发一次 Escape，
+抽屉点「收起侧边栏」，**左上角面板列表里的「插件 / 自动化任务」这类全局面板**走官方
+`layout.selectPanel(null)` 回会话；与手势、遮罩、手点图标走的是同一条路，我们不碰任何状态。
+细节与取舍见 [`android/README.md`](android/README.md#返回键)。
+
 ## 动态壁纸为什么常常是静态的
 
 装了「壁纸引擎」这类插件时，手机端经常只看到一张静态首帧。根因在**壁纸插件**那边，不在代理：
@@ -351,7 +367,11 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 **回环页面即使窗口只有 390px、配置又写着 `phone`，也不设 `data-ra-layout`、不注入任何样式**；
 远程页面则按 `phone`/`desktop`/`auto`（窄视口、触摸设备）分别给出正确判定；以及「UI 设置」那一组：
 按配置调用官方五个入口、`default` 显式套回官方默认值、**本机页面一个入口都不碰**、官方组件缺席时安静跳过、
-菜单默认收起且展开后是那五档。
+菜单默认收起且展开后是那五档；还有给安卓外壳的返回键入口（`window.__dshRaBack`）：
+手机布局下抽屉 / 官方浮层 / 全局面板分别算几层、`closeTop()` 关的是最上面那层且走它自己的入口
+（全局面板走官方 `layout.selectPanel(null)`）、电脑布局恒为 0、本机页面不装入口、控制器清理后入口收回、
+以及 layout 服务缺席（更老的 DSH）时不报错；还有手势归属：body 上挂着壁纸 `data-we-*` 锚点时
+首页照样能滑出面板，而壁纸卡片（`data-we-id`）与吉祥物（`touch-action: none`）仍然不让开。
 
 `check-config-schema.mjs` 覆盖设置页写盘的两道硬前提，并顺带对表 `client.js` 的表单字段与 `Config`。
 
@@ -364,7 +384,7 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 | 路径 | 说明 |
 |---|---|
 | `index.js` | 插件 Host 半区（零依赖，只用 `node:` 内置模块）：反向代理、访问门、401 说明页、热重载 |
-| `client.js` | 浏览器半区：设置页参数表单（含「UI 设置」子菜单）+ 只作用于远程页面的手机布局引擎 + 把官方那五项界面偏好套到远程页面 |
+| `client.js` | 浏览器半区：设置页参数表单（含「UI 设置」子菜单）+ 只作用于远程页面的手机布局引擎 + 把官方那五项界面偏好套到远程页面 + 给安卓外壳的返回键入口（手机布局下的浮层层数 / 关掉最上面那层） |
 | `cordis.patch.yml` | bundle 的 patch：插入插件行、固定选目录器 |
 | `package.json` | 清单（`dsh.bundle.patch` / `exports` / `icon` / `meta`） |
 | `locale/{zh,en}.json` | 插件页显示用的标题与说明 |
@@ -375,6 +395,36 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 | `LICENSE` | MIT |
 
 ## 更新日志
+
+### 1.3.0
+- **安卓外壳：返回键整个接管**（APK `1.3.0`）。以前它只在「网页能后退」时才动，其余情况一律退出：
+  抽屉开着、设置面板开着、错误页上按返回，都会直接把 App 关掉。现在的顺序是
+  **先关网页里的浮层（抽屉 / 右栏 / 设置面板）→ 再网页后退 → 最后退出**；
+  地址页上按返回则回到网页（从网页点「设置」进来时），错误页上按返回回到地址页改地址。
+  两条系统路径都接上了：Android 13+ 的 `OnBackInvokedCallback` 与旧版的 `onBackPressed`。
+  网页那半边只需多答一句「还有几层能关的」（`window.__dshRaBack`，**只作用于手机布局**，
+  本机页面与电脑布局都不参与）—— 普通浏览器里打开时它等于不存在。
+  ⚠️ **两端要配套**：APK 与插件都从 **`1.3.0`** 起（仓库改名后两边共用一个版本号，
+  安装包叫 `dsh-plugin-remote-access-1.3.0.apk`）。只换 APK、插件还是老版本时，
+  外壳问不到浮层，表现依旧是「抽屉开着按返回直接退出」（这一条是被真机踩出来的）。
+- **返回键也管左上角那两个全局面板**：「插件」与「自动化任务」（以及任何注册进
+  `main` 槽位的全局面板）选中后正文就是它，返回键现在会先回会话 —— 状态读官方的
+  `ctx.layout.panelInfo`、切换走 `layout.selectPanel(null)`，不猜 DOM、不加必需服务
+  （用 `ctx.get` 可选取用，老 DSH 取不到就少这一层）。**这一层是纯网页半区，不用重打 APK。**
+- **修：新会话首页左右滑不出面板**（聊天页却正常）。手势判定里把「带 `data-we*` 属性的元素」
+  一律当成横向归属方，而壁纸引擎那批锚点（`data-we-glass-page` / `-wallpaper` / `-parallax` /
+  `-adapter`…）是插件一启用就恒挂在 **`<body>`** 上的 CSS 门控锚点；首页 DOM 浅、起手点往上
+  几层就到 body，整页因此被吃掉，聊天页嵌套更深、14 层内走不到 body 才侥幸正常。
+  现在根节点（`body` / `html`）一律跳过，只认真正挂在元素上的交互标记；吉祥物照样让开
+  （它自带 `touch-action: none`），壁纸卡片这类带标记的元素也照样让开。
+- 顺手修掉 `android/README.md` 里过时的「顶栏」描述（那两枚图标早就是左侧的悬浮胶囊了），
+  并让地址页左上角那个返回图标与返回键改看**主框架有没有真的加载成功**
+  （以前连接一发起就算「连过」，于是连错地址时返回会退回一张白页）。
+- 文档：主 README 的 APK 下载入口改成指向 Releases 页，不再把版本号钉死在文件名里
+  （APK 每抬一次版本就换名字，钉死迟早落后），并补上本节这条「两端要配套」。
+- **版本号对齐**：APK 的 `versionName` 由 `1.1.2` 改成 **`1.3.0`**（与插件同号，`versionCode` 仍是 8），
+  安装包与 Release tag 跟着仓库改名：`dsh-plugin-remote-access-1.3.0.apk` / `v1.3.0-android`
+  （改名前的 `dsh-remote-1.1.1.apk` / `v1.1.1-android` 保持原样，老链接照旧能下）。
 
 ### 1.2.0
 - **改名**：包名 `dsh-remote-access-cidr` → **`dsh-plugin-remote-access`**，仓库同为

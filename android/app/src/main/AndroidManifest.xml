@@ -5,8 +5,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- usesCleartextTraffic：远程入口默认是 http://<Tailscale IP>:19388，必须放行明文 -->
+    <!-- enableOnBackInvokedCallback：返回键整个由 MainActivity 接管（见那里的「返回键」一段）。
+         Android 13+ 只有开了这个开关才会走我们注册的 OnBackInvokedCallback；不开就仍走
+         onBackPressed —— 两条路的逻辑是同一份，开着是为了让新版系统上的返回手势也归我们裁决。 -->
     <application
         android:allowBackup="true"
+        android:enableOnBackInvokedCallback="true"
         android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

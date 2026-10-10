@@ -885,8 +885,17 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             if (tag === 'INPUT' && el.type === 'range') return true;
             if (el.isContentEditable) return true;
             if (el.hasAttribute('draggable') && el.getAttribute('draggable') !== 'false') return true;
+            // 壁纸引擎的 data-we-* / data-wallpaper-* 有两类，判据必须分开：
+            //   · **页面级那批全挂在 <body> 上**（data-we-glass-page / -wallpaper / -parallax /
+            //     -adapter / -glass-chat …，插件一启用就恒在）—— 它们只是 CSS 门控锚点，
+            //     不是「会吃掉横向手势的元素」；
+            //   · 真正挂在元素上的交互标记（例如壁纸选择器的 data-we-id）才算归属方。
+            // 以前不分这两类：body 命中 → **首页**这种 DOM 浅的地方（起手点往上几层就到 body）
+            // 整页划不动，而聊天页嵌套更深、14 层内走不到 body，反而正常 —— 真机上就是
+            // 「新会话首页左右滑不出面板」。所以根节点一律跳过。
+            const isRoot = el === document.body || el === document.documentElement;
             const attrs = typeof el.getAttributeNames === 'function' ? el.getAttributeNames() : [];
-            if (attrs.some((n) => n.startsWith('data-we') || n.startsWith('data-wallpaper'))) return true;
+            if (!isRoot && attrs.some((n) => n.startsWith('data-we') || n.startsWith('data-wallpaper'))) return true;
             if (el.scrollWidth - el.clientWidth > 24) {
               const overflowX = getComputedStyle(el).overflowX;
               if (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'overlay') return true;
@@ -963,6 +972,97 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         window.addEventListener('touchend', onTouchEnd, { passive: true });
       } catch { /* 没有触摸 API 就算了 */ }
 
+      // ---------------------------------------------------------------- 返回键（手机布局里的浮层）
+      //
+      // 安卓外壳（android/）把系统返回键整个接管了，顺序是「先关网页里的浮层 → 再网页历史后退 → 最后退出」。
+      // 网页这一半只回答两个问题，**自己不写任何状态**：
+      //   · count()    —— 现在有几层该先关掉的东西（外壳据此决定这一下返回键归谁）；
+      //   · closeTop() —— 关掉最上面那层，返回是否真的关掉了。
+      // 关的方式仍然是「替用户点它自己的入口」：官方浮层派发一次合成 Escape（官方 Modal 基元的关闭
+      // 路径之一，而且它自己保证只有最上面那层响应；`[role=menu]` 的下拉菜单也吃这一套），
+      // 右栏与左抽屉点它们自己的「收起…」按钮，全局面板走官方 `layout.selectPanel(null)`
+      // —— 与手势、遮罩、手点左上角图标走的是同一条路。
+      // 为什么以 phoneLayoutNow() 为闸：这几样**只有手机布局**才叫浮层（电脑布局里侧栏就是普通一列，
+      // 没什么可「关掉」的）。外壳不在（普通浏览器里打开）时没人调用这两个函数，等于不存在。
+
+      /** 可见的官方浮层（[role=dialog][aria-modal] 或 [role=menu]）里最上面那个 */
+      function topOfficialOverlay() {
+        try {
+          const nodes = [...document.querySelectorAll('[role="dialog"][aria-modal="true"], [role="menu"]')];
+          for (let i = nodes.length - 1; i >= 0; i -= 1) if (isClickable(nodes[i])) return nodes[i];
+        } catch { /* 选择器不支持就当没有浮层 */ }
+        return null;
+      }
+
+      /**
+       * 主区是不是停在「插件 / 自动化任务」这类**全局面板**上（左上角那个面板列表选中的那个）。
+       *
+       * 这一层不猜 DOM，读的是官方自己那份状态：`ctx.layout.panelInfo` 的 `activePanelId`
+       * （null = 会话）。layout 是内置 UI 插件提供的服务，这里用 `ctx.get` **可选取** ——
+       * 取不到（更老的 DSH）就当没有这一层；绝不把它写进 inject：inject 里少一个必需服务，
+       * 整个插件会直接加载失败，代价太大。
+       */
+      function activeGlobalPanel() {
+        try {
+          const id = ctx.get?.('layout')?.panelInfo?.getSnapshot?.()?.activePanelId;
+          return id ? String(id) : null;
+        } catch {
+          return null;
+        }
+      }
+
+      /** 回会话：官方入口是 `layout.selectPanel(null)`，与手点左上角那个会话图标同一条路 */
+      function backToConversation() {
+        try {
+          const layout = ctx.get?.('layout');
+          if (!layout || typeof layout.selectPanel !== 'function') return false;
+          layout.selectPanel(null);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+
+      /** 手机布局下「返回键该先关掉」的层数，从上往下：官方浮层 → 右栏 → 左抽屉 → 全局面板 */
+      function backLayerCount() {
+        if (stopped || !phoneLayoutNow()) return 0;
+        let count = 0;
+        if (topOfficialOverlay()) count += 1;
+        if (rightPanelOpen()) count += 1;
+        if (document.documentElement.hasAttribute('data-ra-drawer')) count += 1;
+        if (activeGlobalPanel()) count += 1;
+        return count;
+      }
+
+      /** 关掉最上面那层；返回是否交出了一层（外壳吃掉这一下返回键） */
+      function closeTopBackLayer() {
+        if (stopped || !phoneLayoutNow()) return false;
+        if (topOfficialOverlay()) {
+          try {
+            // 合成事件没有 isTrusted，但官方那条 document 上的 Escape 监听不查它（真机上验过）；
+            // keyCode 一起给上，是为了兜住只认 keyCode 的老监听。
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              bubbles: true,
+              cancelable: true,
+            }));
+            return true;
+          } catch {
+            return false;
+          }
+        }
+        if (rightPanelOpen()) return clickLabel('收起右侧边栏');
+        if (document.documentElement.hasAttribute('data-ra-drawer')) return clickLabel('收起侧边栏');
+        if (activeGlobalPanel()) return backToConversation();
+        return false;
+      }
+
+      // 外壳的唯一入口。它只读这两个函数，既不改我们的 DOM 也不碰配置。
+      const backApi = { version: 1, count: backLayerCount, closeTop: closeTopBackLayer };
+      try { window.__dshRaBack = backApi; } catch { /* 忽略 */ }
+
       // 配置被改（本机设置页保存 / 另一台设备改了）→ 立刻生效，不必刷新
       const offs = [];
       try { offs.push(ctx.on('connection/reset', () => { attempt = 0; loadMode(); })); } catch { /* 忽略 */ }
@@ -973,6 +1073,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
 
       return () => {
         stopped = true;
+        // 收回给外壳的入口：停用之后它必须立刻变成「问不到东西」，而不是拿到一份过期的答案
+        try { if (window.__dshRaBack === backApi) delete window.__dshRaBack; } catch { /* 忽略 */ }
         if (retryTimer) window.clearTimeout(retryTimer);
         for (const off of offs) {
           try { off?.(); } catch { /* 忽略 */ }
