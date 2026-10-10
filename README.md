@@ -67,8 +67,11 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main
 
 不想在手机浏览器里手打地址的话，可以用配套的外壳 App：
 
-**[下载 dsh-remote-1.1.1.apk](https://github.com/Mzy123l/dsh-plugin-remote-access/releases/download/v1.1.1/dsh-remote-1.1.1.apk)**
-（[Release 页](https://github.com/Mzy123l/dsh-plugin-remote-access/releases) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+**[下载最新 APK](https://github.com/Mzy123l/dsh-plugin-remote-access/releases/latest)**
+（[全部 Release](https://github.com/Mzy123l/dsh-plugin-remote-access/releases) · 源码在 [`android/`](android/) · 说明见 [`android/README.md`](android/README.md)）
+
+> 链接指向 Releases 而不是某个固定文件名：APK 名形如 `dsh-remote-<版本>.apk`，每抬一次版本都会换名字，
+> 钉死某个文件名迟早会落后。要装具体某一版，进 Release 页挑。
 
 App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
 
@@ -403,8 +406,8 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 - 顺手修掉 `android/README.md` 里过时的「顶栏」描述（那两枚图标早就是左侧的悬浮胶囊了），
   并让地址页左上角那个返回图标与返回键改看**主框架有没有真的加载成功**
   （以前连接一发起就算「连过」，于是连错地址时返回会退回一张白页）。
-- 文档：主 README 的 APK 下载入口从钉死的 `dsh-remote-1.0.1.apk` 改成指向 Releases 页
-  （每抬一次版本就换文件名，钉死必然落后），并补上本节这条「两端要配套」。
+- 文档：主 README 的 APK 下载入口改成指向 Releases 页，不再把版本号钉死在文件名里
+  （APK 每抬一次版本就换名字，钉死迟早落后），并补上本节这条「两端要配套」。
 
 ### 1.2.0
 - **改名**：包名 `dsh-remote-access-cidr` → **`dsh-plugin-remote-access`**，仓库同为
