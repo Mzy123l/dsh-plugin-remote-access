@@ -722,14 +722,18 @@ function makeBackEl(tag, attrs = {}) {
     contains() { return false; },
   };
   for (const [k, v] of Object.entries(attrs)) if (k !== 'id') el._attrs.set(k, String(v));
+  // 手势判定里有 `el instanceof Element`：桩子得让造出来的元素真的是它的实例，
+  // 否则那一行会直接 break，任何归属判断都测不出来（假通过）。
+  if (typeof globalThis.Element === 'function') Object.setPrototypeOf(el, globalThis.Element.prototype);
   return el;
 }
 
-/** 造一个够布局控制器 + 返回键 API 用的 DOM；返回里面的关键元素，方便断言 */
-function installBackDom({ width = 390, drawerOpen = true } = {}) {
+/** 造一个够布局控制器 + 返回键 API + 手势用的 DOM；返回里面的关键元素，方便断言 */
+function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {} } = {}) {
+  globalThis.Element = class Element {}; // 手势判定的 `instanceof Element` 需要它
   const html = makeBackEl('html');
   const head = makeBackEl('head');
-  const body = makeBackEl('body');
+  const body = makeBackEl('body', bodyAttrs);
   html.appendChild(head);
   html.appendChild(body);
 
@@ -775,19 +779,39 @@ function installBackDom({ width = 390, drawerOpen = true } = {}) {
   });
   globalThis.window.setTimeout = setTimeout;
   globalThis.window.clearTimeout = clearTimeout;
-  globalThis.window.addEventListener = () => {};
-  globalThis.window.removeEventListener = () => {};
+  // 手势是自己挂在 window 上的三个监听：这里记下来，测试里手动喂合成事件
+  const listeners = new Map();
+  globalThis.window.addEventListener = (type, fn) => { listeners.set(type, fn); };
+  globalThis.window.removeEventListener = (type) => { listeners.delete(type); };
   globalThis.window.innerWidth = width;
   globalThis.window.innerHeight = 844;
-  return { html, body, frame, styles, dispatched, openDrawer, closeDrawer, makeBackEl };
+  // horizontalOwner 会读计算样式：桩子里只给「不命中」的默认值，测试要命中就写在元素上
+  globalThis.getComputedStyle = (el) => ({
+    overflowX: el?._overflowX ?? 'visible',
+    touchAction: el?._touchAction ?? 'auto',
+  });
+  const fire = (type, event) => {
+    const fn = listeners.get(type);
+    if (fn) fn(event);
+    return Boolean(fn);
+  };
+  return { html, body, frame, styles, dispatched, openDrawer, closeDrawer, makeBackEl, fire, listeners };
 }
 
-/** 只挂布局控制器，并把它的清理函数抓出来（返回 stop()） */
-function applyBackController({ isLoopback, remoteLayout }) {
+/** 只挂布局控制器，并把它的清理函数抓出来（返回 stop()，selectPanel 的调用记在 stop.calls 上） */
+function applyBackController({ isLoopback, remoteLayout, activePanel = null, withLayout = true }) {
   // ctx.effect 的契约：回调可以「返回一个清理函数」，停用时由宿主执行。
   // 插件里注册了不止一个 effect，所以这里要全收着，停用时按同样的规矩跑。
   const effects = [];
+  const calls = [];
   plugin.apply({
+    // 可选服务：插件只该用 ctx.get 取它（inject 里加必需服务会让加载直接失败）
+    get: (name) => (withLayout && name === 'layout'
+      ? {
+          panelInfo: { getSnapshot: () => ({ activePanelId: activePanel }) },
+          selectPanel: (id) => { calls.push(id); },
+        }
+      : undefined),
     configForms: {
       get: () => ({
         getSnapshot: () => ({ status: 'unavailable', writable: false, mode: 'memory', revision: undefined, value: undefined }),
@@ -811,7 +835,7 @@ function applyBackController({ isLoopback, remoteLayout }) {
     effect: (fn) => { effects.push(fn); },
     slots: { inject: (_n, cb) => cb(), register: () => () => {} },
   });
-  return () => {
+  const stop = () => {
     for (const fn of effects) {
       try {
         const cleanup = fn();
@@ -819,6 +843,8 @@ function applyBackController({ isLoopback, remoteLayout }) {
       } catch { /* 忽略 */ }
     }
   };
+  stop.calls = calls;
+  return stop;
 }
 
 // ---- 远程页面 + 手机布局：抽屉开着 → 1 层；官方浮层盖在上面 → 2 层，且先关浮层
@@ -866,7 +892,82 @@ check(
   `closed=${closedDrawer} 抽屉点击=${backDom.closeDrawer.clicks}`,
 );
 
-// ---- 电脑布局：网页这一半一律报 0（外壳那边就照旧走网页历史 / 退出）
+// ---- 主区停在「插件 / 自动化任务」这类全局面板上：返回键要能回会话
+//      （左上角面板列表选中的那个；状态读官方 ctx.layout.panelInfo，关它走 layout.selectPanel(null)）
+const panelDom = installBackDom({ drawerOpen: false });
+const panelCtl = applyBackController({ isLoopback: false, remoteLayout: 'phone', activePanel: 'plugins' });
+await sleep(80);
+check(
+  '全局面板（插件/自动化任务）：算 1 层',
+  globalThis.window.__dshRaBack?.count() === 1,
+  `count=${globalThis.window.__dshRaBack?.count()} 抽屉点击=${panelDom.closeDrawer.clicks}`,
+);
+const backToChat = globalThis.window.__dshRaBack?.closeTop();
+check(
+  '关这一层走官方入口 layout.selectPanel(null)（回会话），不是自己改状态、也不去点抽屉',
+  backToChat === true && panelCtl.calls.length === 1 && panelCtl.calls[0] === null && panelDom.closeDrawer.clicks === 0,
+  `closed=${backToChat} selectPanel=${JSON.stringify(panelCtl.calls)} 抽屉点击=${panelDom.closeDrawer.clicks}`,
+);
+
+// 会话面板（activePanelId = null）不算一层；layout 服务缺席时也不该炸
+const convCtl = applyBackController({ isLoopback: false, remoteLayout: 'phone', activePanel: null });
+await sleep(80);
+check(
+  '会话面板不算一层，closeTop() 不接手',
+  globalThis.window.__dshRaBack?.count() === 0 && globalThis.window.__dshRaBack?.closeTop() === false,
+  `count=${globalThis.window.__dshRaBack?.count()} selectPanel=${JSON.stringify(convCtl.calls)}`,
+);
+const noLayoutCtl = applyBackController({ isLoopback: false, remoteLayout: 'phone', withLayout: false });
+await sleep(80);
+check(
+  'layout 服务缺席（更老的 DSH）：不报错、层数照常为 0',
+  globalThis.window.__dshRaBack?.count() === 0 && globalThis.window.__dshRaBack?.closeTop() === false,
+  `selectPanel=${JSON.stringify(noLayoutCtl.calls)}`,
+);
+
+// ---- 手势归属：壁纸引擎的 data-we-* 页面级锚点挂在 <body> 上，不能因此让整页划不动
+//
+// 真机症状：**新会话首页**左右滑不出面板，聊天页却正常。原因是判定里把「带 data-we* 属性的
+// 元素」一律当成横向归属方，而 `data-we-glass-page` / `data-we-wallpaper` / `data-we-parallax`
+// 这批是插件一启用就恒挂在 body 上的 CSS 门控锚点；首页 DOM 浅（往上几层就到 body）→ 整页被吃掉，
+// 聊天页嵌套深、14 层内走不到 body 才侥幸正常。这里把三种起手点都喂一遍。
+function swipeRight(dom, target, from = 20, to = 110, y = 400) {
+  dom.fire('touchstart', { touches: [{ clientX: from, clientY: y }], target, cancelable: true, preventDefault() {} });
+  dom.fire('touchmove', { touches: [{ clientX: (from + to) / 2, clientY: y + 2 }], cancelable: true, preventDefault() {} });
+  dom.fire('touchend', { changedTouches: [{ clientX: to, clientY: y + 4 }] });
+}
+
+const gestureDom = installBackDom({ drawerOpen: false, bodyAttrs: { 'data-we-glass-page': 'on', 'data-we-wallpaper': 'on' } });
+applyBackController({ isLoopback: false, remoteLayout: 'phone', activePanel: null });
+await sleep(80);
+const plainTarget = gestureDom.makeBackEl('div'); // 首页上那种普通容器：往上几层就是 body
+gestureDom.body.appendChild(plainTarget);
+swipeRight(gestureDom, plainTarget);
+check(
+  '首页（body 上挂着壁纸 data-we-* 锚点）向右滑照样调出抽屉',
+  gestureDom.openDrawer.clicks === 1,
+  `打开侧边栏点击=${gestureDom.openDrawer.clicks}`,
+);
+
+const pickerCard = gestureDom.makeBackEl('div', { 'data-we-id': '42' }); // 壁纸选择器卡片：真的带交互标记
+gestureDom.body.appendChild(pickerCard);
+swipeRight(gestureDom, pickerCard);
+check(
+  '真正带交互标记的元素（壁纸卡片 data-we-id）仍然不让开',
+  gestureDom.openDrawer.clicks === 1,
+  `打开侧边栏点击=${gestureDom.openDrawer.clicks}`,
+);
+
+const mascot = gestureDom.makeBackEl('div'); // 吉祥物 .we-rope：靠 touch-action:none 保护
+mascot._touchAction = 'none';
+gestureDom.body.appendChild(mascot);
+swipeRight(gestureDom, mascot);
+check(
+  '吉祥物（touch-action:none，可拖拽）仍然不让开',
+  gestureDom.openDrawer.clicks === 1,
+  `打开侧边栏点击=${gestureDom.openDrawer.clicks}`,
+);
+
 const deskBackDom = installBackDom({ drawerOpen: true });
 applyBackController({ isLoopback: false, remoteLayout: 'desktop' });
 await sleep(80);
@@ -901,6 +1002,8 @@ check(
 delete globalThis.document;
 delete globalThis.MutationObserver;
 delete globalThis.KeyboardEvent;
+delete globalThis.Element;
+delete globalThis.getComputedStyle;
 
 console.log(results.join('\n'));
 const failed = results.filter((r) => r.startsWith('FAIL')).length;

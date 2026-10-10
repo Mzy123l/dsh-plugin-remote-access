@@ -885,8 +885,17 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             if (tag === 'INPUT' && el.type === 'range') return true;
             if (el.isContentEditable) return true;
             if (el.hasAttribute('draggable') && el.getAttribute('draggable') !== 'false') return true;
+            // 壁纸引擎的 data-we-* / data-wallpaper-* 有两类，判据必须分开：
+            //   · **页面级那批全挂在 <body> 上**（data-we-glass-page / -wallpaper / -parallax /
+            //     -adapter / -glass-chat …，插件一启用就恒在）—— 它们只是 CSS 门控锚点，
+            //     不是「会吃掉横向手势的元素」；
+            //   · 真正挂在元素上的交互标记（例如壁纸选择器的 data-we-id）才算归属方。
+            // 以前不分这两类：body 命中 → **首页**这种 DOM 浅的地方（起手点往上几层就到 body）
+            // 整页划不动，而聊天页嵌套更深、14 层内走不到 body，反而正常 —— 真机上就是
+            // 「新会话首页左右滑不出面板」。所以根节点一律跳过。
+            const isRoot = el === document.body || el === document.documentElement;
             const attrs = typeof el.getAttributeNames === 'function' ? el.getAttributeNames() : [];
-            if (attrs.some((n) => n.startsWith('data-we') || n.startsWith('data-wallpaper'))) return true;
+            if (!isRoot && attrs.some((n) => n.startsWith('data-we') || n.startsWith('data-wallpaper'))) return true;
             if (el.scrollWidth - el.clientWidth > 24) {
               const overflowX = getComputedStyle(el).overflowX;
               if (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'overlay') return true;
@@ -971,8 +980,9 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       //   · closeTop() —— 关掉最上面那层，返回是否真的关掉了。
       // 关的方式仍然是「替用户点它自己的入口」：官方浮层派发一次合成 Escape（官方 Modal 基元的关闭
       // 路径之一，而且它自己保证只有最上面那层响应；`[role=menu]` 的下拉菜单也吃这一套），
-      // 右栏与左抽屉点它们自己的「收起…」按钮 —— 与手势、遮罩走的是同一条路。
-      // 为什么以 phoneLayoutNow() 为闸：这三样**只有手机布局**才叫浮层（电脑布局里侧栏就是普通一列，
+      // 右栏与左抽屉点它们自己的「收起…」按钮，全局面板走官方 `layout.selectPanel(null)`
+      // —— 与手势、遮罩、手点左上角图标走的是同一条路。
+      // 为什么以 phoneLayoutNow() 为闸：这几样**只有手机布局**才叫浮层（电脑布局里侧栏就是普通一列，
       // 没什么可「关掉」的）。外壳不在（普通浏览器里打开）时没人调用这两个函数，等于不存在。
 
       /** 可见的官方浮层（[role=dialog][aria-modal] 或 [role=menu]）里最上面那个 */
@@ -984,13 +994,43 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         return null;
       }
 
-      /** 手机布局下「返回键该先关掉」的层数，从上往下：官方浮层 → 右栏 → 左抽屉 */
+      /**
+       * 主区是不是停在「插件 / 自动化任务」这类**全局面板**上（左上角那个面板列表选中的那个）。
+       *
+       * 这一层不猜 DOM，读的是官方自己那份状态：`ctx.layout.panelInfo` 的 `activePanelId`
+       * （null = 会话）。layout 是内置 UI 插件提供的服务，这里用 `ctx.get` **可选取** ——
+       * 取不到（更老的 DSH）就当没有这一层；绝不把它写进 inject：inject 里少一个必需服务，
+       * 整个插件会直接加载失败，代价太大。
+       */
+      function activeGlobalPanel() {
+        try {
+          const id = ctx.get?.('layout')?.panelInfo?.getSnapshot?.()?.activePanelId;
+          return id ? String(id) : null;
+        } catch {
+          return null;
+        }
+      }
+
+      /** 回会话：官方入口是 `layout.selectPanel(null)`，与手点左上角那个会话图标同一条路 */
+      function backToConversation() {
+        try {
+          const layout = ctx.get?.('layout');
+          if (!layout || typeof layout.selectPanel !== 'function') return false;
+          layout.selectPanel(null);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+
+      /** 手机布局下「返回键该先关掉」的层数，从上往下：官方浮层 → 右栏 → 左抽屉 → 全局面板 */
       function backLayerCount() {
         if (stopped || !phoneLayoutNow()) return 0;
         let count = 0;
         if (topOfficialOverlay()) count += 1;
         if (rightPanelOpen()) count += 1;
         if (document.documentElement.hasAttribute('data-ra-drawer')) count += 1;
+        if (activeGlobalPanel()) count += 1;
         return count;
       }
 
@@ -1015,6 +1055,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         }
         if (rightPanelOpen()) return clickLabel('收起右侧边栏');
         if (document.documentElement.hasAttribute('data-ra-drawer')) return clickLabel('收起侧边栏');
+        if (activeGlobalPanel()) return backToConversation();
         return false;
       }
 
