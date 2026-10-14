@@ -24,6 +24,17 @@ window.__ModuleLoader__.load({
 
     const NS = 'remote-access';
 
+    /**
+     * 本页客户端代码的版本（与 package.json 对齐；`tools/test-client.mjs` 有一条断言钉着它）。
+     *
+     * 为什么页面上要显示出来：手机这一端跑的代码是**服务端按请求发过来的**，插件更新之后
+     * 页面必须刷新才会换上新的一份 —— 只看「我把插件升级了」是看不出这件事的。
+     * 1.3.2 那次就撞在这上面：代码推上去了、版本号也对了，但手机上跑的还是上一份，
+     * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
+     * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
+     */
+    const CLIENT_VERSION = '1.3.3';
+
     // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [
       { key: 'enabled', type: 'boolean', label: '启用' },
@@ -1526,6 +1537,45 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const viaForms = snap.status === 'ready' && snap.writable === true;
           const source = viaForms ? snap.value : remote?.config;
 
+          /**
+           * 页脚那句自检：本页跑的是哪一份客户端代码，以及电脑那边的通知接口在不在。
+           *
+           * 只在远程页面探一次（本机页面不需要通知，也不该去打这个端点）。
+           * 这是「为什么手机上没弹通知」这类问题最省事的答案：代码旧了 / 宿主旧了 / 开关关了，
+           * 三种原因在这里一眼能分开 —— 不必再让人去猜是网络还是插件。
+           */
+          const [linkNote, setLinkNote] = React.useState('');
+          React.useEffect(() => {
+            if (viaForms || typeof window.fetch !== 'function') return undefined;
+            let alive = true;
+            (async () => {
+              try {
+                const res = await window.fetch('/__remote_access__/notify?wait=0', { cache: 'no-store' });
+                if (!alive) return;
+                if (res.status === 404) {
+                  setLinkNote('电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH');
+                  return;
+                }
+                if (res.status === 401 || res.status === 403) {
+                  setLinkNote('通知接口需要重新解锁：刷新本页、再输一次访问密码');
+                  return;
+                }
+                const data = await res.json().catch(() => null);
+                if (!alive) return;
+                if (!res.ok || data === null) {
+                  setLinkNote(`通知接口返回 HTTP ${res.status}`);
+                  return;
+                }
+                setLinkNote(data.enabled === false
+                  ? '电脑上关掉了「提问时通知手机」'
+                  : '电脑上的插件已支持提问通知 ✓');
+              } catch {
+                if (alive) setLinkNote('读不到电脑上的插件状态');
+              }
+            })();
+            return () => { alive = false; };
+          }, [viaForms]);
+
           React.useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), []);
 
           // 布局在「手机 ↔ 电脑」之间切换时（改了这一项、或横竖屏转了）让表单跟着重排
@@ -1803,6 +1853,12 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
               h('button', { type: 'button', style: buttonStyle, onClick: onSave, disabled: busy }, busy ? '保存中…' : '保存'),
               h('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: onReload }, '重新读取'),
               status ? h('span', { style: { opacity: 0.9 } }, status) : null,
+            ),
+            // 自检那行：本页代码的版本 + 电脑那端通知接口的状态（排「怎么没通知」时先看它）
+            h(
+              'div',
+              { style: { marginTop: 10, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
+              `本页客户端 ${CLIENT_VERSION}${linkNote ? ` · ${linkNote}` : ''}`,
             ),
           );
         }

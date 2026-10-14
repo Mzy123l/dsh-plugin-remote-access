@@ -94,6 +94,18 @@ check('注册进 settings.section（含 remote 两个面孔）',
   plugin.inject.includes('slots') && plugin.inject.includes('configForms') && plugin.inject.includes('remote.settings'),
   plugin.inject.join(','));
 
+// ---------------------------------------------------------------- 版本号自检
+//
+// client.js 里的 CLIENT_VERSION 是「手机上那一页跑的到底是哪一份代码」的唯一线索
+// （设置页底部会把它显示出来）。它要是跟 package.json 漂了，那行字就会骗人 —— 钉住。
+{
+  const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(clientPath), 'package.json'), 'utf8'));
+  const declared = /const CLIENT_VERSION = '([^']+)'/.exec(fs.readFileSync(clientPath, 'utf8'))?.[1];
+  check('client.js 的 CLIENT_VERSION 与 package.json 的版本一致',
+    declared !== undefined && declared === pkg.version,
+    `client.js=${declared} package.json=${pkg.version}`);
+}
+
 // ---------------------------------------------------------------- 场景一：手机页面（非回环）
 /** Host 侧「生效配置」，模拟配置真的存在 */
 let hostConfig = {
@@ -167,6 +179,34 @@ check('手机页面：0 值显示成空（好让占位符露出）',
   `${byKey(tree, 'port-i')?.props?.placeholder} / ${byKey(tree, 'maxConnections-i')?.props?.placeholder}`);
 check('JSON 信封被正确拆开（不是把 {ok,value} 当数据）',
   String(valueOf('denyCidrs')) === '', `denyCidrs=${JSON.stringify(valueOf('denyCidrs'))}`);
+
+// 页脚自检：本页跑的是哪一份客户端代码 + 电脑那边通知接口在不在（只远程页面探）。
+// 这条是「怎么没生效 / 怎么没通知」最省事的答案，所以它必须真的出现在页面上、且说得清下一步。
+const footerOf = () => flatten(tree)
+  .map((n) => (typeof n?.props?.children === 'string' ? n.props.children : ''))
+  .find((t) => t.includes('本页客户端'));
+check('手机页面：页脚报出本页客户端版本', String(footerOf()).includes('1.3.3'), String(footerOf()));
+// 重新挂载（连 hooks/deps 一起清）才能让那个只依赖 viaForms 的探测 effect 再跑一遍
+const remount = () => { react.resetAll(); tree = Panel(); };
+globalThis.window.fetch = async () => ({ status: 404, ok: false, json: async () => null });
+remount();
+await sleep(40);
+check(
+  '手机页面：宿主没有通知接口时，页脚说清「更新插件」（而不是含糊的「连不上」）',
+  String(footerOf()).includes('还没有通知接口') && String(footerOf()).includes('更新插件'),
+  String(footerOf()),
+);
+globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false } }) });
+remount();
+await sleep(40);
+check(
+  '手机页面：宿主支持时就报「已支持提问通知」',
+  String(footerOf()).includes('已支持提问通知'),
+  String(footerOf()),
+);
+delete globalThis.window.fetch;
+remount();
+await sleep(20);
 
 // 改一个字段 → 保存
 byKey(tree, 'port-i').props.onChange({ target: { value: '19389' } });

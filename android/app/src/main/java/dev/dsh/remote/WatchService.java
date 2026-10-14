@@ -58,6 +58,8 @@ public class WatchService extends Service {
   private static final int MAX_BODY_CHARS = 65536;
   /** 连不上多久就自己收工（电脑关着的时候没必要一直挂着） */
   private static final long GIVE_UP_MS = 5 * 60 * 1000L;
+  /** 「等用户去处理」的那两种失败（插件太旧 / 凭据过期）多久重试一次 */
+  private static final long NEED_ACTION_RETRY_MS = 60_000L;
   /** 轮询间隔：连着的时候长轮询本来就会挂住，这里只是防止「状态一直变」时打转 */
   private static final long LOOP_IDLE_MS = 300;
 
@@ -145,6 +147,34 @@ public class WatchService extends Service {
 
   // ---------------------------------------------------------------- 轮询
 
+  /**
+   * 一次轮询失败的原因。
+   *
+   * 为什么要分类，而不是一律说「连不上电脑上的 DSH」：真机踩过一次 —— 电脑上装的还是老插件
+   * （没有 `/__remote_access__/notify`，端点回 404），常驻通知却写着「连不上电脑上的 DSH」，
+   * 看起来像网络问题，实际上要去电脑上更新插件。**通知上那行字就是用户唯一的线索**，
+   * 所以这里把「插件太旧 / 凭据过期 / 真的连不上」分开说。
+   */
+  private static final class PollFailure extends Exception {
+    /** HTTP 状态码；0 = 根本没连上（DNS、超时、拒绝连接…） */
+    final int status;
+    /** 要不要按「等它回来」那样退避重试（网络类），而不是按「等用户去处理」那样慢慢重试 */
+    final boolean transient_;
+    /** 通知上给用户看的那句话 */
+    final String hint;
+
+    PollFailure(int status, String hint, boolean transient_, Throwable cause) {
+      super("HTTP " + status + (cause == null ? "" : ": " + cause), cause);
+      this.status = status;
+      this.hint = hint;
+      this.transient_ = transient_;
+    }
+  }
+
+  private static PollFailure unreachable(String why, Throwable cause) {
+    return new PollFailure(0, "连不上电脑上的 DSH，正在重试…", true, cause == null ? new Exception(why) : cause);
+  }
+
   private void loop() {
     long failedSince = 0;
     int failures = 0;
@@ -158,27 +188,46 @@ public class WatchService extends Service {
         sleep(LOOP_IDLE_MS);
       } catch (Exception err) {
         if (!running) return;
+        PollFailure failure = err instanceof PollFailure
+            ? (PollFailure) err
+            : new PollFailure(0, "读取电脑上的插件状态失败，正在重试…", true, err);
         failures += 1;
-        if (failedSince == 0) failedSince = System.currentTimeMillis();
-        Log.w(TAG, "轮询失败（第 " + failures + " 次）: " + err);
-        updateOngoing("连不上电脑上的 DSH，正在重试…");
-        if (System.currentTimeMillis() - failedSince > GIVE_UP_MS) {
-          Log.w(TAG, "连续失败超过 5 分钟，先撤了（下次打开 App 会再起来）");
-          stopSelf();
-          return;
+        Log.w(TAG, "轮询失败（第 " + failures + " 次，status=" + failure.status + "）: " + err);
+        updateOngoing(failure.hint);
+        if (failure.transient_) {
+          if (failedSince == 0) failedSince = System.currentTimeMillis();
+          // 电脑关着的时候没必要一直挂着；但「插件太旧 / 凭据过期」是等用户去处理，
+          // 所以那两种情况不退避、也不收工，慢慢重试就好（用户处理完不用再碰手机）。
+          if (System.currentTimeMillis() - failedSince > GIVE_UP_MS) {
+            Log.w(TAG, "连续失败超过 5 分钟，先撤了（下次打开 App 会再起来）");
+            stopSelf();
+            return;
+          }
+          sleep(Math.min(60_000L, 5_000L * failures));
+        } else {
+          failedSince = 0;
+          sleep(NEED_ACTION_RETRY_MS);
         }
-        sleep(Math.min(60_000L, 5_000L * failures));
       }
     }
   }
 
   /** 长轮询一次；返回宿主那份状态 JSON */
-  private JSONObject pollOnce() throws Exception {
+  private JSONObject pollOnce() throws PollFailure {
     int rev = lastRev;
-    URL url = new URL(base + "/__remote_access__/notify?rev=" + rev + "&wait=" + POLL_WAIT_SECONDS);
-    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+    HttpURLConnection conn;
     try {
-      conn.setRequestMethod("GET");
+      conn = (HttpURLConnection) new URL(base + "/__remote_access__/notify?rev=" + rev + "&wait=" + POLL_WAIT_SECONDS)
+          .openConnection();
+    } catch (Exception err) {
+      throw unreachable("地址不对: " + base, err);
+    }
+    try {
+      try {
+        conn.setRequestMethod("GET");
+      } catch (Exception err) {
+        throw unreachable("请求方法没设上", err);
+      }
       conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
       conn.setReadTimeout(READ_TIMEOUT_MS);
       conn.setRequestProperty("accept", "application/json");
@@ -186,12 +235,38 @@ public class WatchService extends Service {
       // 放行凭据就在 WebView 的 cookie 里（设了访问密码时是插件发的那张，否则是 DSH 自己的）
       String cookie = CookieManager.getInstance().getCookie(base + "/");
       if (cookie != null && !cookie.isEmpty()) conn.setRequestProperty("cookie", cookie);
-      int code = conn.getResponseCode();
-      if (code != 200) throw new IllegalStateException("HTTP " + code);
-      String text = readBody(conn.getInputStream());
-      JSONObject json = new JSONObject(text);
+      int code;
+      try {
+        code = conn.getResponseCode();
+      } catch (Exception err) {
+        throw unreachable("请求失败", err);
+      }
+      if (code == 404) {
+        throw new PollFailure(404, "电脑上的插件版本太旧（没有通知接口），去电脑上更新它", false, null);
+      }
+      if (code == 401 || code == 403) {
+        throw new PollFailure(code, "登录凭据已过期：打开 App 重新输一次访问密码", false, null);
+      }
+      if (code != 200) {
+        throw new PollFailure(code, "电脑上的插件回了 HTTP " + code + "，正在重试…", true, null);
+      }
+      String text;
+      try {
+        text = readBody(conn.getInputStream());
+      } catch (Exception err) {
+        throw unreachable("读响应失败", err);
+      }
+      JSONObject json;
+      try {
+        json = new JSONObject(text);
+      } catch (Exception err) {
+        // 端点答的不是 JSON：多半是上游那张 SPA 页面（插件太旧，请求被转给了 DSH 自己）
+        throw new PollFailure(code, "电脑上的插件没有通知接口（返回的不是 JSON），去更新它", false, err);
+      }
       if (json.optBoolean("ok", false)) lastRev = json.optInt("rev", lastRev);
       return json;
+    } catch (PollFailure failure) {
+      throw failure;
     } finally {
       try {
         conn.disconnect();
