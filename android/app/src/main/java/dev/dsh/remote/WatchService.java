@@ -557,9 +557,10 @@ public class WatchService extends Service {
           .setWhen(System.currentTimeMillis())
           .setShowWhen(true)
           .setTicker(text);
-      // 「发了但不弹」时的出口：厂商把横幅关掉（小米的「悬浮通知」、后台弹出界面…）只有用户能开，
-      // 所以这条通知上直接给一个跳到「模型提问」通道设置页的按钮。
-      builder.addAction(channelSettingsAction());
+      // 「发了但不弹」时的出口：只在**真的检测出问题**时才挂这个按钮 —— 通知权限没开，
+      // 或者「模型提问」通道的重要性被调低（小米的「悬浮通知/横幅通知」开关就映射成通道重要性）。
+      // 一切正常时它不该出现：一条通知上挂个用不着的按钮只是噪音，用户会问「这不是已经开了吗」。
+      if (!alertBlockedHint().isEmpty()) builder.addAction(channelSettingsAction());
       manager.notify(next, builder.build());
       choiceId = next;
       if (previous != 0 && previous != next) manager.cancel(previous);
