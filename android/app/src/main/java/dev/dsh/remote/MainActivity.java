@@ -749,6 +749,11 @@ public class MainActivity extends Activity {
   /**
    * 退到后台：网页真的渲染出来过（webOk）就把哨兵起来。
    * 屏幕熄灭、切到别的 App、按返回键退到后台都走这里 —— 这些正是「人不在看这个页面」的时刻。
+   *
+   * 为什么在这一档起前台服务：Android 12 起「在后台起前台服务」是被限制的，但刚离开用户可见状态
+   * 时系统仍给一小段允许窗口，`onStop` 正在这个窗口里（这也是「用户离开 App 后继续干活」的标准做法）。
+   * 万一还是被拒（厂商定制系统收紧过），`startWatchService` 会兜住并记一行日志 ——
+   * 结果是「这一台收不到提醒」，不该连带把 App 崩掉。
    */
   @Override
   protected void onStop() {
@@ -767,6 +772,7 @@ public class MainActivity extends Activity {
     askNotificationPermission();
   }
 
+  /** 起哨兵；重复调用是安全的（服务在跑就只是再走一遍 onStartCommand，用来重发那条常驻通知） */
   private void startWatchService() {
     try {
       startForegroundService(new Intent(this, WatchService.class));
