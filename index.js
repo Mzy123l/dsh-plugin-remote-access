@@ -107,7 +107,7 @@ try {
  * Host 的设置文档由 volatileForm / isVolatilePath 过滤，只服务「含 volatile 字段」的条目，
  * 没有 volatile 字段的条目根本不出现在设置文档里（configForms.set 会静默返回 false）。
  * 这不是「免重启」：Cordis 收到配置变化一律走 fiber.restart()，本插件会重新挂载。
- * 本插件 14 个字段都是运行期参数，所以全部标 volatile。
+ * 本插件的字段都是运行期参数，所以全部标 volatile。
  */
 const hot = (s) => (s && typeof s.volatile === 'function' ? s.volatile() : s);
 const withDesc = (s, text) => (s && typeof s.description === 'function' ? s.description(text) : s);
@@ -153,6 +153,15 @@ export const Config = Schema
       remoteLayout: field(
         Schema.string().default('auto'),
         '远程页面的界面布局：auto = 按视口自动判断，phone = 强制手机布局（横竖屏自适应），desktop = 与桌面一致。只作用于远程页面，本机界面不受影响',
+      ),
+      // 安卓外壳的状态栏通知（外壳自己在后台轮询 /__remote_access__/notify）
+      notifyOnChoice: field(
+        Schema.boolean().default(true),
+        '模型提问（ask_user_question）且没人回答时，让安卓 App 弹状态栏通知。关掉只是不再上报待答状态，App 那边也就不会再提醒',
+      ),
+      notifyOnlyWhenWindowHidden: field(
+        Schema.boolean().default(true),
+        '只在「电脑上的 DSH 窗口不可见」（收进托盘 / 最小化 / 页面已关）时才通知手机；关掉则只要 App 不在前台就通知',
       ),
 
       // 「UI 设置」一组：只作用于远程页面的官方界面偏好。官方在非回环页面上把设置通道降级成内存态
@@ -202,6 +211,9 @@ const DEFAULTS = {
   printUrl: true,
   accessCode: '',
   remoteLayout: 'auto',
+
+  notifyOnChoice: true,
+  notifyOnlyWhenWindowHidden: true,
 
   remoteTheme: 'default',
   remoteFontSize: 0,
@@ -276,6 +288,9 @@ function normalizeConfig(rawIn) {
   c.remoteLayout = ['auto', 'phone', 'desktop'].includes(String(unwrap(c.remoteLayout)))
     ? String(unwrap(c.remoteLayout))
     : 'auto';
+  // 通知这一组是布尔开关，非 false 即开（与其它布尔项同一口径，写错值不会悄悄改变行为）
+  c.notifyOnChoice = c.notifyOnChoice !== false;
+  c.notifyOnlyWhenWindowHidden = c.notifyOnlyWhenWindowHidden !== false;
   // 「UI 设置」一组：取值一律「出厂值优先」——不认识的值退回 'default'（= 不干预官方默认），
   // 而不是随便挑一个看起来合理的档位，免得配置里写错一个字就悄悄改了手机上的外观。
   const pickUiOne = (raw, allowed) => (allowed.includes(String(unwrap(raw))) ? String(unwrap(raw)) : 'default');
@@ -459,6 +474,11 @@ function resolveUpstream(ctx, cfg, note) {
 const UNLOCK_PATH = '/__remote_access__/unlock';
 const UNLOCK_COOKIE = 'dsh-ra-ok';
 
+/** 安卓外壳轮询「有没有选择在等我」的端点（由本插件的代理自己回答，不落到上游） */
+const NOTIFY_PATH = '/__remote_access__/notify';
+/** 本机 DSH 页面回报「窗口此刻可见吗」的端点（注册在上游 webServer 上，只有本机能直接打到） */
+const PRESENCE_PATH = '/__remote_access__/presence';
+
 /** 极简解锁页：只在手机上调一次，够用就好，不依赖任何外部资源 */
 function unlockPageHtml(hint) {
   return `<!doctype html>
@@ -596,18 +616,195 @@ function upstreamHeaders(headers, up, cfg, peer) {
   return h;
 }
 
+// ---------------------------------------------------------------- 待答选择（安卓外壳的状态栏通知）
+
+/** 桌面窗口可见性报告多久算过期：页面心跳 25s，而后台窗口的定时器会被系统节流，所以留足余量 */
+const DESKTOP_FRESH_MS = 150000;
+/** 一条通知里最多带几个选项标签（多了状态栏也显示不下） */
+const MAX_OPTION_LABELS = 4;
+
+/** 掐成一行短文本：通知里不需要换行，也不该把整篇计划塞进状态栏 */
+function notifyText(value, max) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
+}
+
+/**
+ * 「待答选择」中心：把宿主里正在等用户回答的提问记成一份可轮询的状态。
+ *
+ * 三件事都在这里：
+ *   1. track() —— 模型提问时（user-questions/request 瀑布）记一条，瀑布结束/被中止时清掉；
+ *   2. reportDesktop() —— 本机 DSH 页面回报「窗口可见吗」，用来判断电脑前有没有人看着；
+ *   3. subscribe() —— 给长轮询用：状态一变就叫醒所有挂着的请求。
+ *
+ * rev 是给长轮询用的版本号：外壳带着上次的 rev 来问，一样就挂住等变化，不一样就立刻回。
+ */
+export function createChoiceCenter(now = () => Date.now()) {
+  /** id → 一条待答选择（id 用工具调用的 callId，同一批提问不会重复记） */
+  const pending = new Map();
+  const waiters = new Set();
+  let rev = 0;
+  let desktopVisible = null; // null = 还没收到过任何回报
+  let desktopAt = 0;
+  let seq = 0;
+
+  function wake() {
+    if (waiters.size === 0) return;
+    const list = [...waiters];
+    waiters.clear();
+    for (const fn of list) {
+      try { fn(); } catch { /* 等待者自己的连接已经断了，随它去 */ }
+    }
+  }
+
+  function bump() {
+    rev += 1;
+    wake();
+  }
+
+  /**
+   * 记一条待答选择，返回清除函数（幂等）。
+   * request 是 AskUserQuestionRequestEvent：questions 至少一条；wait.callId 有就用它当 id。
+   */
+  function track(request) {
+    const questions = Array.isArray(request?.questions) ? request.questions : [];
+    if (questions.length === 0) return () => {};
+    const callId = request?.wait?.callId;
+    const id = callId === undefined || callId === null ? `q${++seq}` : String(callId);
+    const first = questions[0] ?? {};
+    pending.set(id, {
+      id,
+      at: now(),
+      header: notifyText(first.header, 80),
+      question: notifyText(first.question, 300),
+      options: (Array.isArray(first.options) ? first.options : [])
+        .map((option) => notifyText(option?.label, 60))
+        .filter(Boolean)
+        .slice(0, MAX_OPTION_LABELS),
+      count: questions.length,
+      timed: request?.wait?.timed === true,
+    });
+    bump();
+    let cleared = false;
+    const clear = () => {
+      if (cleared) return;
+      cleared = true;
+      if (pending.delete(id)) bump();
+    };
+    try { request?.signal?.addEventListener?.('abort', clear, { once: true }); } catch { /* 没有 signal 就靠瀑布结束 */ }
+    return clear;
+  }
+
+  /** 本机页面回报窗口可见性；报告过期（页面关了 / 电脑那边没在跑）时按「不可见」处理 */
+  function reportDesktop(visible) {
+    const next = visible === true;
+    const changed = desktopVisible !== next;
+    desktopVisible = next;
+    desktopAt = now();
+    if (changed) bump();
+  }
+
+  function desktopView() {
+    const known = desktopAt > 0 && now() - desktopAt < DESKTOP_FRESH_MS;
+    return { known, visible: known && desktopVisible === true, at: desktopAt };
+  }
+
+  /** 给外壳的那份 JSON：外壳只看 pending 与 desktop.visible 两个字段 */
+  function view(cfg) {
+    return {
+      ok: true,
+      rev,
+      at: now(),
+      enabled: cfg?.notifyOnChoice !== false,
+      onlyWhenWindowHidden: cfg?.notifyOnlyWhenWindowHidden !== false,
+      desktop: desktopView(),
+      pending: [...pending.values()].sort((a, b) => a.at - b.at),
+    };
+  }
+
+  return {
+    track,
+    reportDesktop,
+    view,
+    desktopView,
+    rev: () => rev,
+    pendingCount: () => pending.size,
+    subscribe(fn) {
+      waiters.add(fn);
+      return () => waiters.delete(fn);
+    },
+  };
+}
+
 /**
  * 起一个监听。
  * @param gate 访问门：`{ accessCode, cookieValue, banPath, authorize(req), banned(ip), ban(ip), withTicket(url, cookie), note }`
  *   —— 门只在 accessCode 非空时启用；为空时行为与以前完全一致（裸地址交给 DSH 自己 401）。
+ * @param choice 待答选择中心（`createChoiceCenter()`）；给了就接管 `NOTIFY_PATH`，不给就照旧全转给上游。
  */
-function startProxy(addr, cfg, up, note, onListening, gate) {
+function startProxy(addr, cfg, up, note, onListening, gate, choice) {
   let active = 0;
 
   const deny = (res, code, text) => {
     res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(text);
   };
+
+  /**
+   * 安卓外壳的「待答选择」长轮询：走我们自己的鉴权，回答完就结束，不落到上游。
+   *
+   * 语义（对着外壳那一端写死的）：
+   *   GET /__remote_access__/notify?rev=<上次的版本号>&wait=<秒>
+   *     * rev 与当前不同 → 立刻回当前状态；
+   *     * rev 相同 → 挂住最多 wait 秒，状态一变就回（外壳因此不用空转轮询）。
+   * 没授权（没带票、也没带放行 cookie）一律 401：这里会带上「模型在问什么」，不能白给。
+   */
+  function handleNotify(req, res) {
+    if (req.method !== 'GET') {
+      deny(res, 405, '405 method not allowed\n');
+      return;
+    }
+    if (!gate.authorize(req)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      return;
+    }
+    let answered = false;
+    const send = () => {
+      if (answered) return;
+      answered = true;
+      try {
+        if (res.destroyed || res.writableEnded) return;
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(choice.view(cfg)));
+      } catch { try { res.destroy(); } catch { /* 已经断了 */ } }
+    };
+
+    let wait = 0;
+    let since = NaN;
+    try {
+      const url = new URL(String(req.url), 'http://127.0.0.1');
+      wait = Math.min(30, Math.max(0, Math.floor(Number(url.searchParams.get('wait')) || 0)));
+      since = Number(url.searchParams.get('rev'));
+    } catch { /* URL 坏了就当普通请求，立刻回一份当前状态 */ }
+
+    if (wait <= 0 || !Number.isFinite(since) || since !== choice.rev()) {
+      send();
+      return;
+    }
+    const timer = setTimeout(send, wait * 1000);
+    timer.unref?.();
+    const stop = choice.subscribe(() => {
+      clearTimeout(timer);
+      stop();
+      send();
+    });
+    req.on('close', () => {
+      clearTimeout(timer);
+      stop();
+      answered = true; // 对端走了，别再往这条连接里写
+    });
+  }
 
   const server = http.createServer((req, res) => {
     // 边界护栏：这个回调里的任何同步异常都会变成 uncaughtException 并**带走整个 DSH 宿主**
@@ -629,6 +826,12 @@ function startProxy(addr, cfg, up, note, onListening, gate) {
     if (!peerAllowed(peer, cfg) || gate.banned(peer)) {
       note('debug', `拒绝 ${peer} → 403（不在允许网段、命中黑名单，或在拉黑名单里）`);
       deny(res, 403, '403 forbidden: peer not allowed\n');
+      return;
+    }
+
+    // 待答选择端点：由我们自己回答（带了鉴权），不问上游 —— 上游不知道这个协议
+    if (choice && String(req.url).split('?')[0] === NOTIFY_PATH) {
+      handleNotify(req, res);
       return;
     }
 
@@ -981,6 +1184,8 @@ export function apply(ctx, config) {
   let cookieValue = ''; // start() 里从持久化密钥读出来
   let bans = new Set();
   let bansCheckedAt = 0;
+  /** 待答选择 + 电脑窗口可见性：安卓外壳靠它决定要不要弹状态栏通知 */
+  const choice = createChoiceCenter();
 
   function render() {
     return [
@@ -998,6 +1203,16 @@ export function apply(ctx, config) {
           : '(无)'
       }`,
       `放行密钥: ${secretPathOf(cfg)}（改密码不会踢人；想让所有设备重新输密码就删掉它）`,
+      `待答选择: ${
+        cfg.notifyOnChoice
+          ? `${choice.pendingCount()} 条（安卓 App 在后台时会收到状态栏通知）`
+          : '通知已关闭（notifyOnChoice=false）'
+      }`,
+      `电脑窗口: ${(() => {
+        const d = choice.desktopView();
+        if (!d.known) return '未知（本机页面没回报过 → 手机端一律按不可见处理）';
+        return `${d.visible ? '可见' : '不可见'}（${new Date(d.at).toISOString()} 回报）`;
+      })()}`,
       '',
       '--- 生效配置 ---',
       JSON.stringify({ ...cfg, accessCode: cfg.accessCode ? '***' : '' }, null, 2),
@@ -1053,6 +1268,118 @@ export function apply(ctx, config) {
         'profile 里以 link: 安装的插件，必须在自己的 package.json 的 peerDependencies 里' +
         '列出要从 DSH 安装目录借用的包（DSH 的 routeLinked 只对声明过的裸名放行）；改完需重启 DSH。',
     );
+  }
+
+  // ---------------------------------------------------------------- 待答选择与窗口可见性
+  // 这一对是给安卓 App 的状态栏通知用的，两个来源都在宿主：
+  //   * 模型提问 —— user-questions/request 是 host 侧的瀑布事件，我们挂一个「只观察不抢答」的监听：
+  //     永远把 next() 交下去（真正回答的是官方那条 Web 回答者或回环上的客户端），只在它左右记一笔；
+  //   * 电脑窗口可见吗 —— 本机页面的 client.js 往 PRESENCE_PATH POST 自己的 document.visibilityState。
+  //     为什么必须由页面自己报：窗口收进托盘 / 最小化只有渲染进程知道，宿主看不到 Electron 的窗口状态。
+
+  try {
+    if (typeof ctx?.on === 'function') {
+      // prepend 是必须的，不是「顺手」：这是条瀑布事件，官方那条转发监听（dsh-api-remotes）会把请求
+      // 交给浏览器端持有 —— 有客户端接住时它**不会**调 next()，排在它后面的监听根本轮不到执行。
+      // 而「手机在后台看着、没人回答」恰恰是我们要通知的场景，所以必须挂在最外层：
+      // 每次都先经我们记一笔，再把 next() 原样交下去（我们不抢答、不改结果）。
+      ctx.on('user-questions/request', (request, next) => {
+        let clear = () => {};
+        try {
+          clear = choice.track(request);
+          const waiting = choice.pendingCount();
+          if (cfg.notifyOnChoice && waiting > 0) {
+            note(
+              'info',
+              `模型发出选择（${waiting} 条待答）：${notifyText(request?.questions?.[0]?.question, 80)}`,
+            );
+          }
+        } catch { clear = () => {}; }
+        let done;
+        try {
+          done = Promise.resolve(typeof next === 'function' ? next() : undefined);
+        } catch (err) {
+          clear();
+          throw err;
+        }
+        // 不管回答、超时还是被取消，都要把这条待答撤下来 —— 否则手机会一直响着一条已经没人等的问题
+        done.then(clear, clear);
+        return done;
+      }, { prepend: true });
+      note('debug', '已挂上 user-questions/request（最外层）：模型提问时记一条待答选择');
+    } else {
+      note('debug', '这个上下文没有 ctx.on，模型提问不会记成待答选择（手机端也就收不到通知）');
+    }
+  } catch (err) {
+    note('warn', `挂「待答选择」监听失败: ${err?.message}`);
+  }
+
+  /**
+   * 本机页面回报窗口可见性的路由。
+   *
+   * 为什么走上游 webServer 而不是本插件自己的代理：只有本机那一页能直接打到 webServer（回环），
+   * 而它是唯一知道窗口可见性的页面；手机那一端要的数据则在下一条路上（NOTIFY_PATH）。
+   * 为什么要求 application/json：跨站表单只能发 text/plain 之类，发不出 JSON；
+   * 要求 JSON 就等于要求一次 CORS 预检 —— 而我们不答预检，网页里的一次跨站 POST 因此打不进来。
+   */
+  function handlePresence(req, res) {
+    const done = (code, text) => {
+      try {
+        res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(text ?? '');
+      } catch { try { res.destroy(); } catch { /* 已经断了 */ } }
+    };
+    if (req.method !== 'POST') {
+      done(405, '405 method not allowed\n');
+      return;
+    }
+    if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+      done(415, '415 unsupported media type: send application/json\n');
+      return;
+    }
+    readSmallBody(req, 1024).then((body) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        done(400, '400 bad request: body is not JSON\n');
+        return;
+      }
+      if (!parsed || typeof parsed.visible !== 'boolean') {
+        done(400, '400 bad request: expected {"visible": true|false}\n');
+        return;
+      }
+      choice.reportDesktop(parsed.visible);
+      note('debug', `本机页面回报窗口可见性: ${parsed.visible ? '可见' : '不可见'}`);
+      done(204, '');
+    }).catch(() => done(400, '400 bad request\n'));
+  }
+
+  try {
+    const webServer = typeof ctx.get === 'function' ? ctx.get('webServer') : undefined;
+    if (webServer && typeof webServer.register === 'function') {
+      ctx.effect(() => webServer.register({
+        kind: 'exact',
+        path: PRESENCE_PATH,
+        handler: (req, res) => {
+          // 与代理同一条纪律：这里的同步异常一样会变成 uncaughtException 带走宿主
+          try {
+            handlePresence(req, res);
+          } catch (err) {
+            note('error', `处理窗口可见性回报时抛出异常（已兜住）: ${err?.message}`);
+            try { res.destroy(); } catch { /* 已经断了 */ }
+          }
+        },
+      }), 'remote-access: 窗口可见性回报');
+      note('debug', `已注册 ${PRESENCE_PATH}：本机页面用它回报窗口可见性`);
+    } else {
+      note(
+        'debug',
+        '拿不到 webServer，本机页面没法回报窗口可见性 —— 手机端一律按「窗口不可见」处理（照常通知）',
+      );
+    }
+  } catch (err) {
+    note('warn', `注册窗口可见性路由失败: ${err?.message}`);
   }
 
   // ---------------------------------------------------------------- 拉黑
@@ -1242,7 +1569,7 @@ export function apply(ctx, config) {
             urls.push(mintUrl(ticket, boundAddr, port));
             if (cfg.printUrl) note('info', `远程访问网址: ${urls[urls.length - 1]}`);
             flush();
-          }, gate),
+          }, gate, choice),
         );
       } catch (err) {
         note('error', `启动 ${addr} 失败: ${err?.message}`);

@@ -999,6 +999,138 @@ check(
   `装上了=${installed} 清理后=${typeof globalThis.window.__dshRaBack}`,
 );
 
+// ---------------------------------------------------------------- 窗口可见性上报（只在本机页面）
+//
+// 这是「电脑只有托盘时才通知手机」那一半的网页侧：本机页面的 client.js 必须把
+// document.visibilityState 报给宿主。三条要验的：只在本机页面上报、变化时报、
+// 心跳在、清理后彻底安静（否则停用的插件还在偷偷发请求）。
+
+const presencePosts = [];
+const presenceTimers = new Map();
+let presenceTimerSeq = 0;
+let presenceVisibilityListener = null;
+/** 收集 ctx.effect 接手到的清理函数：插件停用时宿主会调它们 */
+const presenceDisposers = [];
+
+function installPresenceEnv({ withFetch = true } = {}) {
+  globalThis.document = {
+    documentElement: { getAttribute: () => null, setAttribute() {}, removeAttribute() {}, hasAttribute: () => false },
+    head: { appendChild() {} },
+    body: { appendChild() {} },
+    visibilityState: 'visible',
+    createElement: () => ({ dataset: {}, setAttribute() {}, appendChild() {} }),
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener: (type, fn) => { if (type === 'visibilitychange') presenceVisibilityListener = fn; },
+    removeEventListener: (type) => { if (type === 'visibilitychange') presenceVisibilityListener = null; },
+  };
+  globalThis.MutationObserver = class { observe() {} disconnect() {} };
+  globalThis.window.setTimeout = setTimeout;
+  globalThis.window.clearTimeout = clearTimeout;
+  if (withFetch) {
+    globalThis.window.fetch = (url, init) => {
+      presencePosts.push({ url, init });
+      return Promise.resolve({ ok: true });
+    };
+  } else {
+    delete globalThis.window.fetch;
+  }
+  globalThis.window.setInterval = (fn, ms) => {
+    const id = ++presenceTimerSeq;
+    presenceTimers.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.window.clearInterval = (id) => presenceTimers.delete(id);
+}
+
+/** 只挂「窗口可见性上报」那一段：其余控制器在本机页面上都是空清理，不会干扰这里的断言 */
+function applyPresence({ isLoopback }) {
+  plugin.apply({
+    configForms: {
+      get: () => ({
+        getSnapshot: () => ({ status: 'unavailable', writable: false, mode: 'memory', revision: undefined, value: undefined }),
+        subscribe: () => () => {},
+        mutate: async () => false,
+      }),
+      describe: () => ({ load: async () => {} }),
+    },
+    remote: {
+      $host: { home: undefined, isLoopback },
+      settings: {
+        describe: async () => ({ ok: true, value: { writable: true, hasDocument: true, namespaces: [] } }),
+        mutate: async () => ({ ok: false, error: { message: 'n/a' } }),
+      },
+      $on: () => () => {},
+    },
+    on: () => () => {},
+    // 真 Cordis 的 ctx.effect：立刻跑一遍回调，并接管它返回的清理函数
+    effect: (fn) => {
+      const dispose = fn();
+      if (typeof dispose === 'function') presenceDisposers.push(dispose);
+    },
+    slots: { inject: (_n, cb) => cb(), register: () => () => {} },
+  });
+}
+
+installPresenceEnv();
+presenceDisposers.length = 0;
+applyPresence({ isLoopback: true });
+check(
+  '窗口可见性：本机页面进页面就报一次（此刻可见）',
+  presencePosts.length === 1 &&
+    presencePosts[0].url === '/__remote_access__/presence' &&
+    JSON.parse(presencePosts[0].init.body).visible === true &&
+    presencePosts[0].init.headers['content-type'] === 'application/json',
+  JSON.stringify(presencePosts[0] ?? {}).slice(0, 110),
+);
+check('窗口可见性：上报带 25 秒心跳（页面被关掉后宿主那份报告会过期）',
+  [...presenceTimers.values()].some((t) => t.ms === 25000), `${presenceTimers.size} 个定时器`);
+globalThis.document.visibilityState = 'hidden';
+presenceVisibilityListener?.();
+check(
+  '窗口可见性：窗口藏起来时报 hidden（宿主据此决定要不要通知手机）',
+  presencePosts.length === 2 && JSON.parse(presencePosts[1].init.body).visible === false,
+  `${presencePosts.length} 次上报`,
+);
+
+// 停用插件（模拟宿主回收 effect）：监听与心跳都要收回，否则停用的页面还在偷偷发请求
+const postsBeforeDispose = presencePosts.length;
+for (const dispose of presenceDisposers.splice(0)) {
+  try { dispose(); } catch { /* 忽略 */ }
+}
+globalThis.document.visibilityState = 'visible';
+presenceVisibilityListener?.();
+await sleep(30);
+check(
+  '窗口可见性：清理后彻底安静（监听收回、心跳停掉）',
+  presencePosts.length === postsBeforeDispose && presenceTimers.size === 0,
+  `清理后又发了 ${presencePosts.length - postsBeforeDispose} 次，剩 ${presenceTimers.size} 个定时器`,
+);
+
+// 远程页面（手机）绝不上报：那是「手机自己可见吗」，该由外壳 App 回答，不能混进「电脑窗口」的判断
+const postsBeforeRemote = presencePosts.length;
+applyPresence({ isLoopback: false });
+await sleep(60);
+check(
+  '窗口可见性：远程（手机）页面一个请求都不发',
+  presencePosts.length === postsBeforeRemote && presenceTimers.size === 0,
+  `${presencePosts.length - postsBeforeRemote} 个请求`,
+);
+
+// 没有 fetch 的环境（更老的 WebView）：安静跳过，不抛异常
+installPresenceEnv({ withFetch: false });
+try {
+  applyPresence({ isLoopback: true });
+  check('窗口可见性：没有 fetch 时安静跳过（不抛异常）', presencePosts.length === postsBeforeRemote && presenceTimers.size === 0);
+} catch (err) {
+  check('窗口可见性：没有 fetch 时安静跳过（不抛异常）', false, String(err?.message ?? err));
+}
+for (const dispose of presenceDisposers.splice(0)) {
+  try { dispose(); } catch { /* 忽略 */ }
+}
+installPresenceEnv();
+
 delete globalThis.document;
 delete globalThis.MutationObserver;
 delete globalThis.KeyboardEvent;

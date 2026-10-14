@@ -3,6 +3,12 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 后台哨兵：App 退到后台时用一条前台服务盯着「模型有没有在等你选择」。
+         POST_NOTIFICATIONS 是 Android 13 起发通知的前提（首次退到后台时问一次）；
+         FOREGROUND_SERVICE(_SPECIAL_USE) 是 Android 9 / 14 起前台服务的前提。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- usesCleartextTraffic：远程入口默认是 http://<Tailscale IP>:19388，必须放行明文 -->
     <!-- enableOnBackInvokedCallback：返回键整个由 MainActivity 接管（见那里的「返回键」一段）。
@@ -29,6 +35,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 后台哨兵：长轮询宿主插件的 /__remote_access__/notify，有选择在等就弹状态栏通知。
+             类型 specialUse：这不是导航/媒体/定位那几类里的任何一类，只是「App 退到后台后
+             替它把一条长轮询挂住」；Android 14 要求这种用途显式声明并给出理由（下面的 property）。 -->
+        <service
+            android:name=".WatchService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps one long-poll to the paired DSH host so a pending model question can be announced in the status bar while the app is in the background." />
+        </service>
     </application>
 
 </manifest>

@@ -42,6 +42,10 @@ window.__ModuleLoader__.load({
         ],
       },
       { key: 'accessCode', type: 'password', label: '访问密码', placeholder: '4-12位数字或字母' },
+      // 安卓外壳的状态栏通知：宿主只负责回答「有没有选择在等 / 电脑窗口可见吗」，
+      // 弹不弹、弹什么由 App 自己决定（它才知道自己在不在前台）
+      { key: 'notifyOnChoice', type: 'boolean', label: '提问时通知手机' },
+      { key: 'notifyOnlyWhenWindowHidden', type: 'boolean', label: '仅窗口不可见时通知' },
       {
         key: 'remoteLayout',
         type: 'select',
@@ -1091,6 +1095,64 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       };
     }
 
+    // ---------------------------------------------------------------- 电脑窗口可见性上报（只在本机页面）
+    //
+    // 手机要不要弹状态栏通知，还差一个只有渲染进程才知道的事实：**电脑前有没有人正看着 DSH**。
+    // 窗口收进托盘 / 最小化 / 页面被关掉时，Electron 那边的窗口状态拿不到，但页面的
+    // document.visibilityState 会变成 hidden —— 所以由本机页面自己在变化时报一次，
+    // 宿主记下「可见 / 不可见」，安卓外壳轮询时一并取走。
+    //
+    // 三条约定：
+    //   1. 只在本机（回环）页面上报 —— 与手机布局同一个开关（ctx.remote.$host.isLoopback）。
+    //      远程页面报的是「手机自己可见吗」，那件事由外壳 App 自己回答，不该混进这个判断。
+    //   2. 只发一个布尔值、一个固定路径；端点不在（老版本 DSH / 插件没启用）时安静失败。
+    //   3. 带 25 秒心跳：页面被关掉或电脑关机后，宿主那份报告会过期，自动退回「不可见」，
+    //      于是手机照常收到通知 —— 失效方向是「多提醒一次」，不是「该提醒时没提醒」。
+    const PRESENCE_URL = '/__remote_access__/presence';
+    const PRESENCE_HEARTBEAT_MS = 25000;
+
+    /**
+     * 启动窗口可见性上报。返回清理函数；**非回环页面直接返回空清理**。
+     * @param ctx - 客户端根上下文（用 ctx.remote.$host.isLoopback 判断页面在哪一端）
+     */
+    function startPresenceReporter(ctx) {
+      const noop = () => {};
+      if (typeof document === 'undefined') return noop;
+      let loopback = false;
+      try { loopback = ctx?.remote?.$host?.isLoopback === true; } catch { loopback = false; }
+      if (!loopback) return noop;
+      if (typeof window === 'undefined' || typeof window.fetch !== 'function') return noop;
+
+      let stopped = false;
+      let timer = null;
+      const send = () => {
+        if (stopped) return;
+        const visible = document.visibilityState !== 'hidden';
+        try {
+          const request = window.fetch(PRESENCE_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ visible }),
+            cache: 'no-store',
+          });
+          // 路由不存在（老 DSH）或插件没启用时会 404/405：那是预期内的，别把噪音丢进控制台
+          if (request && typeof request.catch === 'function') request.catch(() => {});
+        } catch { /* fetch 本身不可用就算了 */ }
+      };
+      const onVisibility = () => send();
+
+      document.addEventListener('visibilitychange', onVisibility);
+      try { timer = window.setInterval(send, PRESENCE_HEARTBEAT_MS); } catch { timer = null; }
+      send();
+
+      return () => {
+        if (stopped) return;
+        stopped = true;
+        try { if (timer !== null) window.clearInterval(timer); } catch { /* 忽略 */ }
+        try { document.removeEventListener('visibilitychange', onVisibility); } catch { /* 忽略 */ }
+      };
+    }
+
     // ---------------------------------------------------------------- UI 设置（只在远程页面生效）
     //
     // 官方的「通用设置」里有五项界面偏好。它们在**非回环页面**上是「本页有效、刷新即还原」：
@@ -1334,9 +1396,11 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         // 远程页面才有布局改造；本机页面这里直接是个空清理函数（「不动本地」的开关就在这一行）
         const stopLayout = startLayoutController(ctx);
         const stopUi = startUiSettingsController(ctx);
+        // 反过来：只有本机页面才上报窗口可见性（安卓外壳靠它决定要不要弹通知）
+        const stopPresence = startPresenceReporter(ctx);
         try {
           if (typeof ctx.effect === 'function') ctx.effect(() => stopLayout);
-          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); });
+          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); stopPresence(); });
         } catch { /* 忽略 */ }
 
         /**

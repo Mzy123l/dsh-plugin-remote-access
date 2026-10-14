@@ -5,9 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode } = await import(
-  new URL('../index.js', import.meta.url).href
-);
+const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter } =
+  await import(new URL('../index.js', import.meta.url).href);
 
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '   ' + extra : ''}`);
@@ -43,13 +42,18 @@ const upPort = upstream.address().port;
 const statusFile = path.join(os.tmpdir(), `ra-test-${Date.now()}.txt`);
 const logs = [];
 const makeCtx = (extra = {}) => {
-  const { configEditor, ...rest } = extra;
+  const { configEditor, webServer, ...rest } = extra;
   return {
     logger: { info: (m) => logs.push(m), warn: (m) => logs.push('WARN ' + m), error: (m) => logs.push('ERR ' + m) },
     connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-    effect: () => {},
+    // 真 Cordis 的 ctx.effect 会立刻跑一遍回调并接管它返回的清理函数；桩子也要跑，
+    // 否则「在 effect 里注册资源」的代码（窗口可见性路由）在测试里等于没挂上。
+    effect: (fn) => {
+      try { fn(); } catch { /* 忽略 */ }
+    },
     // 插件是用 ctx.get('configEditor') 取服务的（cordis 的访问器），所以这里要装成 get()
-    get: (name) => (name === 'configEditor' ? configEditor : undefined),
+    get: (name) =>
+      name === 'configEditor' ? configEditor : name === 'webServer' ? webServer : undefined,
     ...rest,
   };
 };
@@ -817,9 +821,205 @@ check(
 dispose15();
 lateUpstream.close();
 
+// ---- 场景 16：待答选择中心（单元）----
+// 时间可控：报告过期、rev 递增这些都得在假时钟上验，不能靠 sleep 150 秒。
+let fakeNow = 1_000_000;
+const center = createChoiceCenter(() => fakeNow);
+check('待答中心：初始没有待答选择，也没收到过窗口报告', center.pendingCount() === 0 && center.desktopView().known === false);
+const clearA = center.track({
+  questions: [{ id: 'a', header: '方案', question: '要用哪个方案？', options: [{ label: '甲' }, { label: '乙' }, { label: '丙' }] }],
+  wait: { callId: 'call-a', timed: false },
+});
+const viewA = center.view({ notifyOnChoice: true, notifyOnlyWhenWindowHidden: true });
+check(
+  '待答中心：记下问题正文与选项',
+  viewA.pending.length === 1 &&
+    viewA.pending[0].question === '要用哪个方案？' &&
+    viewA.pending[0].options.join('|') === '甲|乙|丙',
+  JSON.stringify(viewA.pending[0] ?? {}).slice(0, 90),
+);
+check('待答中心：同一次提问按 callId 去重', (() => {
+  const again = center.track({ questions: [{ id: 'a', question: '要用哪个方案？' }], wait: { callId: 'call-a' } });
+  const size = center.pendingCount();
+  again();
+  return size === 1;
+})());
+clearA();
+check('待答中心：清除函数幂等，清完就没有待答', center.pendingCount() === 0 && (clearA(), center.pendingCount() === 0));
+
+center.reportDesktop(false);
+check('待答中心：窗口报告「不可见」', center.desktopView().known === true && center.desktopView().visible === false);
+center.reportDesktop(true);
+check('待答中心：窗口报告「可见」', center.desktopView().visible === true);
+fakeNow += 200000; // 超过 DESKTOP_FRESH_MS（150 秒）
+check('待答中心：报告过期 → 退回「不知道」（手机端照常通知）', center.desktopView().known === false);
+
+const wakeSeen = [];
+const offWake = center.subscribe(() => wakeSeen.push(center.rev()));
+const revBefore = center.rev();
+let resolveQuestion;
+const questionDone = new Promise((r) => { resolveQuestion = r; });
+const clearB = center.track({ questions: [{ id: 'b', question: '继续吗？' }], wait: { callId: 'call-b' } });
+check('待答中心：状态一变就叫醒挂着的长轮询', wakeSeen.length === 1 && center.rev() > revBefore, `rev ${revBefore} → ${center.rev()}`);
+center.subscribe(() => {}); // 第二个订阅者
+offWake();
+resolveQuestion();
+clearB();
+check('待答中心：订阅可以退订，退订后不再被叫醒', wakeSeen.length === 1);
+check('待答中心：开关原样透给外壳', (() => {
+  const off = center.view({ notifyOnChoice: false, notifyOnlyWhenWindowHidden: false });
+  return off.enabled === false && off.onlyWhenWindowHidden === false;
+})());
+void questionDone;
+
+// ---- 场景 17：/__remote_access__/notify（安卓外壳轮询的那个端点）----
+const notifyFile = path.join(os.tmpdir(), `ra-notify-${Date.now()}.txt`);
+let presenceHandler = null;
+let questionListener = null;
+let questionListenerPrepend = null;
+const notifyCtx = makeCtx({
+  webServer: {
+    register: (route) => {
+      if (route?.path === '/__remote_access__/presence') presenceHandler = route.handler;
+      return () => { presenceHandler = null; };
+    },
+  },
+  on: (event, listener, options) => {
+    if (event === 'user-questions/request') {
+      questionListener = listener;
+      questionListenerPrepend = options?.prepend === true;
+    }
+  },
+});
+const dispose16 = apply(notifyCtx, {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${upPort}`,
+  urlFile: notifyFile,
+  logLevel: 'debug',
+});
+await sleep(400);
+const notifyStatus = readUrl(notifyFile);
+const notifyPort = notifyStatus.url ? Number(new URL(notifyStatus.url).port) : 0;
+const notifyToken = notifyStatus.url ? new URL(notifyStatus.url).searchParams.get('token') : '';
+check('通知端点：默认挂上了 user-questions/request 监听', typeof questionListener === 'function');
+check(
+  '通知端点：这条监听挂在最外层（prepend）—— 官方转发会持有请求且不调 next()，排在后面就轮不到',
+  questionListenerPrepend === true,
+  String(questionListenerPrepend),
+);
+check('通知端点：默认注册了窗口可见性路由', typeof presenceHandler === 'function');
+
+const notifyPath = (extra = '') => `/__remote_access__/notify${extra}`;
+const unauthorized = await call(notifyPort, { path: notifyPath() });
+check('通知端点：没授权 → 401（这里会带上「模型在问什么」，不能白给）', unauthorized.status === 401, `HTTP ${unauthorized.status}`);
+const first = await call(notifyPort, { path: notifyPath(`?token=${notifyToken}`) });
+let notifyJson = null;
+try { notifyJson = JSON.parse(first.body); } catch { /* 下面断言会说是空的 */ }
+check(
+  '通知端点：带票 → JSON 状态（没有待答、窗口未知）',
+  first.status === 200 && notifyJson?.ok === true && notifyJson.pending.length === 0 && notifyJson.desktop.known === false,
+  `HTTP ${first.status} ${first.body.slice(0, 80)}`,
+);
+check(
+  '通知端点：只允许 GET',
+  (await call(notifyPort, { method: 'POST', path: notifyPath(`?token=${notifyToken}`), body: 'x' })).status === 405,
+);
+
+// 模型提问 → 端点立刻能看到；回答（瀑布结束）→ 立刻消失
+let resolveAsk;
+const askDone = new Promise((r) => { resolveAsk = r; });
+const waterfallResult = questionListener(
+  {
+    questions: [
+      { id: 'q1', header: '选方案', question: '要用哪个方案？', options: [{ label: '甲' }, { label: '乙' }] },
+      { id: 'q2', question: '顺便确认一下？' },
+    ],
+    wait: { callId: 'call-1', timed: false },
+    signal: new AbortController().signal,
+  },
+  () => askDone,
+);
+check('通知端点：监听不抢答（把 next() 的结果原样交回瀑布）', typeof waterfallResult?.then === 'function');
+const withPending = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}`) })).body);
+check(
+  '通知端点：模型提问 → pending 里带出正文 / 选项 / 题目条数',
+  withPending.pending.length === 1 &&
+    withPending.pending[0].question === '要用哪个方案？' &&
+    withPending.pending[0].header === '选方案' &&
+    withPending.pending[0].options.join('|') === '甲|乙' &&
+    withPending.pending[0].count === 2,
+  JSON.stringify(withPending.pending[0] ?? {}).slice(0, 110),
+);
+
+// 长轮询：带着当前 rev 挂住 → 状态一变立刻回（不等满 wait）
+const pollStart = Date.now();
+const longPoll = call(notifyPort, { path: notifyPath(`?token=${notifyToken}&rev=${withPending.rev}&wait=5`) });
+await sleep(150);
+resolveAsk({ answers: [] });
+const polled = await longPoll;
+const pollMs = Date.now() - pollStart;
+const polledJson = JSON.parse(polled.body);
+check(
+  '通知端点：长轮询挂住，状态一变立刻回（rev 也往前走）',
+  polled.status === 200 && polledJson.rev > withPending.rev && pollMs < 2000,
+  `用时 ${pollMs}ms，rev ${withPending.rev} → ${polledJson.rev}`,
+);
+const afterAnswer = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}`) })).body);
+check('通知端点：回答之后待答清空（手机上的通知该消失）', afterAnswer.pending.length === 0);
+
+// 窗口可见性：本机页面 POST 上来，端点里就能看到（这也是「电脑只有托盘」的判据）
+const presenceServer = http.createServer((req, res) => presenceHandler(req, res));
+await new Promise((r) => presenceServer.listen(0, '127.0.0.1', r));
+const presencePort = presenceServer.address().port;
+const postPresence = (body, headers = { 'content-type': 'application/json' }) =>
+  call(presencePort, { method: 'POST', path: '/__remote_access__/presence', headers, body });
+check('窗口可见性：收下页面回报（204）', (await postPresence('{"visible":false}')).status === 204);
+const hidden = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}`) })).body);
+check(
+  '窗口可见性：窗口不可见 → 端点报 visible=false 且 known=true（手机该响）',
+  hidden.desktop.known === true && hidden.desktop.visible === false,
+  JSON.stringify(hidden.desktop),
+);
+check('窗口可见性：窗口可见 → 端点报 visible=true（手机不该响）', await (async () => {
+  await postPresence('{"visible":true}');
+  const view = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}`) })).body);
+  return view.desktop.visible === true;
+})());
+check('窗口可见性：要 JSON 类型（挡住跨站表单 POST）', (await postPresence('{"visible":true}', { 'content-type': 'text/plain' })).status === 415);
+check('窗口可见性：GET 不收', (await call(presencePort, { path: '/__remote_access__/presence' })).status === 405);
+check('窗口可见性：body 不是 JSON → 400', (await postPresence('visible=true')).status === 400);
+check('窗口可见性：字段类型不对 → 400', (await postPresence('{"visible":"yes"}')).status === 400);
+
+// 关掉开关：外壳仍能轮询，但会看到 enabled=false（它据此完全不打扰用户）
+const dispose17 = apply(notifyCtx, {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${upPort}`,
+  urlFile: notifyFile,
+  logLevel: 'debug',
+  notifyOnChoice: false,
+  notifyOnlyWhenWindowHidden: false,
+});
+await sleep(400);
+const offStatus = readUrl(notifyFile);
+const offPort = offStatus.url ? Number(new URL(offStatus.url).port) : 0;
+const offToken = offStatus.url ? new URL(offStatus.url).searchParams.get('token') : '';
+const offJson = JSON.parse((await call(offPort, { path: `/__remote_access__/notify?token=${offToken}` })).body);
+check(
+  '通知开关：关掉后端点如实回答 enabled=false / onlyWhenWindowHidden=false',
+  offJson.enabled === false && offJson.onlyWhenWindowHidden === false,
+  JSON.stringify(offJson).slice(0, 90),
+);
+dispose17();
+dispose16();
+presenceServer.close();
+
 authUpstream.close();
 
-for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile, lateFile]) {
+for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile, lateFile, notifyFile]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
 }
 

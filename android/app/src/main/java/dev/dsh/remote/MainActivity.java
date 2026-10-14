@@ -50,20 +50,26 @@ import android.window.OnBackInvokedDispatcher;
  * 如果设置藏在网页里，就永远改不回来。
  *
  * 返回键由本类**整个接管**（见下面「返回键」那一段）：三块界面各有确定行为，
- * 网页里还开着抽屉/右栏/设置面板时先把那些关掉，最后才是退出 App。
+ * 网页里还开着抽屉/右栏/设置面板时先把那些关掉，最后**退到后台**（而不是退出 App）——
+ * 因为退到后台才有「模型在电脑上提问、手机在状态栏提醒你」这件事（WatchService）。
+ *
+ * 退到后台时起来的那条前台服务（WatchService）就是通知的来源：它在后台长轮询宿主插件的
+ * `/__remote_access__/notify`，只在「模型在等你选择 + 你不在看 App + 电脑窗口不可见」时响。
  */
 public class MainActivity extends Activity {
 
-  private static final String PREFS = "dsh_remote";
-  private static final String KEY_HOST = "host";
-  private static final String KEY_TLS = "tls";
-  private static final String KEY_WARMED = "warmed";
+  static final String PREFS = "dsh_remote";
+  static final String KEY_HOST = "host";
+  static final String KEY_TLS = "tls";
+  static final String KEY_WARMED = "warmed";
+  private static final String KEY_ASKED_NOTIFY = "asked_notify";
 
   /** host[:port]：字母数字点横线 + 可选端口；不收协议、路径、空格 */
   private static final java.util.regex.Pattern HOST_RE =
       java.util.regex.Pattern.compile("^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?(:\\d{1,5})?$");
 
   private static final int REQ_FILE = 1001;
+  private static final int REQ_NOTIFY = 1002;
 
   /** 问网页「还有几层浮层可关」时最多等多久；网页线程卡住也不能让返回键失灵 */
   private static final long BACK_QUERY_TIMEOUT_MS = 400;
@@ -584,12 +590,12 @@ public class MainActivity extends Activity {
    * 两条路都接到这里（清单里开了 enableOnBackInvokedCallback，所以 33+ 上不会重复处理）。
    *
    * 每一档都有确定行为，不再有「按了没反应」或「明明有东西开着却退出了」的中间态：
-   *   1) 地址页：从网页点「设置」进来的 → 回网页（不重连）；首次启动、或网页已经坏了 → 退出；
+   *   1) 地址页：从网页点「设置」进来的 → 回网页（不重连）；首次启动、或网页已经坏了 → 退到后台；
    *   2) 错误页：→ 回地址页改地址（主框架失败之后 WebView 里已经没有一个能看的页面了，
    *      「回网页」只会退回一张白页，所以那一档不做）；
    *   3) 网页：先问网页「手机布局里还有没有该先关掉的浮层」（抽屉 / 右栏 / 设置面板）；
    *   4) 网页没有浮层可关，才轮到「网页历史后退」；
-   *   5) 都没有 → 退出 App。
+   *   5) 都没有 → **退到后台**（不是退出 App，见 pushToBack）。
    *
    * 第 3 步为什么是异步的：网页里有没有浮层只有它自己知道（那些浮层是浏览器半区 client.js
    * 施加的），WebView 不提供同步的询问入口。所以这里 evaluateJavascript 问一次，回调里再决定；
@@ -602,7 +608,7 @@ public class MainActivity extends Activity {
     // 1) 地址页
     if (setupView != null && setupView.getVisibility() == View.VISIBLE) {
       if (webOk && webHost != null) showOnly(webHost); // 从网页点设置进来的：回去
-      else finish();                                   // 首次启动 / 网页已经坏了：没有可回的地方
+      else pushToBack();                               // 首次启动 / 网页已经坏了：没有可回的地方
       return;
     }
     // 2) 错误页：回地址页改地址（那一版网页已经没了，见上面第 2 条）
@@ -615,7 +621,20 @@ public class MainActivity extends Activity {
       askWebThenBack();
       return;
     }
-    finish();
+    pushToBack();
+  }
+
+  /**
+   * 退到后台，而不是退出 App。
+   *
+   * 为什么改掉「返回键 = 退出」：退出之后 App 就什么都不知道了，而这条外壳的一件正事恰恰是
+   * 「人不在电脑前时，模型一提问就在状态栏提醒你」—— 那件事要求 App 还活着（见 WatchService）。
+   * 真正的「退出」仍然留着：从最近任务里把它划掉即可（系统会连服务一起收掉）。
+   *
+   * 在最近任务列表里它仍然是一个可以切回来的条目，不改变用户对「回到刚才那一页」的预期。
+   */
+  private void pushToBack() {
+    moveTaskToBack(true);
   }
 
   /** 三块界面一次只显示一块 */
@@ -653,7 +672,7 @@ public class MainActivity extends Activity {
       web.goBack();
       return;
     }
-    finish();
+    pushToBack();
   }
 
   /** 让网页关掉最上面那层浮层（走它自己的关闭入口，与用户手点、手势收起同一条路） */
@@ -707,5 +726,91 @@ public class MainActivity extends Activity {
   protected void onResume() {
     super.onResume();
     if (web != null) web.onResume();
+  }
+
+  // ---------------------------------------------------------------- 后台哨兵（状态栏通知）
+
+  /**
+   * 界面在前台：把哨兵停掉。
+   * 为什么在前台反而不跑：问题就在眼前，再在状态栏上重复一遍只是噪音；而且这样那条常驻通知
+   * 也只在「App 在后台待命」的时候才存在，用户看得见它是干嘛的。
+   */
+  @Override
+  protected void onStart() {
+    super.onStart();
+    WatchService.activityVisible = true;
+    try {
+      stopService(new Intent(this, WatchService.class));
+    } catch (Throwable ignored) {
+      // 停不掉也只是多一条常驻通知，不影响使用
+    }
+  }
+
+  /**
+   * 退到后台：网页真的渲染出来过（webOk）就把哨兵起来。
+   * 屏幕熄灭、切到别的 App、按返回键退到后台都走这里 —— 这些正是「人不在看这个页面」的时刻。
+   */
+  @Override
+  protected void onStop() {
+    super.onStop();
+    WatchService.activityVisible = false;
+    if (!webOk) return;
+    String host = hostInput == null ? "" : hostInput.getText().toString().trim();
+    if (host.isEmpty()) return;
+    startWatchService();
+  }
+
+  /** 用户按 Home / 返回 / 最近任务离开界面时问一次通知权限（此时界面还在前台，弹框才弹得出来） */
+  @Override
+  public void onUserLeaveHint() {
+    super.onUserLeaveHint();
+    askNotificationPermission();
+  }
+
+  private void startWatchService() {
+    try {
+      startForegroundService(new Intent(this, WatchService.class));
+    } catch (Throwable err) {
+      // Android 12+ 在后台起前台服务可能被系统拒绝；通知没了，但不该把 App 崩掉
+      android.util.Log.w("DshRemote", "起后台哨兵失败: " + err);
+    }
+  }
+
+  /**
+   * Android 13（API 33）起，通知要用户点头才发得出来。第一次退到后台时问一次；
+   * 用户点了「不允许」就不再烦他（想开可以去系统设置里打开）。
+   */
+  private void askNotificationPermission() {
+    if (Build.VERSION.SDK_INT < 33) return;
+    try {
+      if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+          == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+        return;
+      }
+    } catch (Throwable ignored) {
+      return;
+    }
+    SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+    if (prefs.getBoolean(KEY_ASKED_NOTIFY, false)) return;
+    prefs.edit().putBoolean(KEY_ASKED_NOTIFY, true).apply();
+    try {
+      requestPermissions(new String[] { android.Manifest.permission.POST_NOTIFICATIONS }, REQ_NOTIFY);
+    } catch (Throwable ignored) {
+      // 请求不出去就只是没有通知，功能其余部分照旧
+    }
+  }
+
+  @Override
+  public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    if (requestCode == REQ_NOTIFY) {
+      // 授权之后要把前台服务重起一遍：Android 13 起被拒时那条常驻通知不会自己补发
+      if (grantResults != null && grantResults.length > 0
+          && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED
+          && !WatchService.activityVisible && webOk) {
+        startWatchService();
+      }
+      return;
+    }
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults);
   }
 }
