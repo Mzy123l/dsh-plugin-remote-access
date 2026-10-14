@@ -8,9 +8,11 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.graphics.drawable.Icon;
 import android.media.RingtoneManager;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.Settings;
 import android.util.Log;
 import android.webkit.CookieManager;
 
@@ -84,6 +86,8 @@ public class WatchService extends Service {
   private String dismissedId = "";
   /** 当前那条「等你选择」的通知用的是哪个 id；0 = 现在没有 */
   private int choiceId = 0;
+  /** App 的 versionName（懒查一次） */
+  private String cachedVersion = null;
   /** 常驻通知当前那行文案：一样就不重复刷 */
   private String ongoingText = "";
 
@@ -241,10 +245,15 @@ public class WatchService extends Service {
   /** 长轮询一次；返回宿主那份状态 JSON */
   private JSONObject pollOnce() throws PollFailure {
     int rev = lastRev;
+    // 顺带把自己的「通知环境」报给宿主（App 版本 / 通知开没开 / 「模型提问」通道的重要性）：
+    // 这样设置页底部那行自检能直接写清「手机端为什么弹不出来」，宿主状态文件里也留一份证据。
+    String query = "?rev=" + rev + "&wait=" + POLL_WAIT_SECONDS
+        + "&av=" + urlEncode(appVersion())
+        + "&n=" + (notificationsEnabled() ? 1 : 0)
+        + "&ch=" + choiceChannelImportance();
     HttpURLConnection conn;
     try {
-      conn = (HttpURLConnection) new URL(base + "/__remote_access__/notify?rev=" + rev + "&wait=" + POLL_WAIT_SECONDS)
-          .openConnection();
+      conn = (HttpURLConnection) new URL(base + "/__remote_access__/notify" + query).openConnection();
     } catch (Exception err) {
       throw unreachable("地址不对: " + base, err);
     }
@@ -321,6 +330,68 @@ public class WatchService extends Service {
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
     }
+  }
+
+  // ---------------------------------------------------------------- 通知环境（自检）
+
+  /** App 的 versionName；问一次就缓存（PackageManager 每次都要走一遍 Binder） */
+  private String appVersion() {
+    if (cachedVersion != null) return cachedVersion;
+    try {
+      cachedVersion = String.valueOf(getPackageManager().getPackageInfo(getPackageName(), 0).versionName);
+    } catch (Throwable err) {
+      cachedVersion = "";
+    }
+    return cachedVersion;
+  }
+
+  private static String urlEncode(String text) {
+    try {
+      return java.net.URLEncoder.encode(text == null ? "" : text, "UTF-8");
+    } catch (Exception err) {
+      return "";
+    }
+  }
+
+  /** 通知总开关（Android 13+ 就是 POST_NOTIFICATIONS） */
+  private boolean notificationsEnabled() {
+    try {
+      NotificationManager manager = getSystemService(NotificationManager.class);
+      return manager == null || manager.areNotificationsEnabled();
+    } catch (Throwable err) {
+      return true; // 问不出来就别误报
+    }
+  }
+
+  /** 「模型提问」通道当前的重要性；查不到返回 0 */
+  private int choiceChannelImportance() {
+    try {
+      NotificationManager manager = getSystemService(NotificationManager.class);
+      NotificationChannel channel = manager == null ? null : manager.getNotificationChannel(CHANNEL_CHOICE);
+      return channel == null ? 0 : channel.getImportance();
+    } catch (Throwable err) {
+      return 0;
+    }
+  }
+
+  /**
+   * 手机上「明明发了通知却弹不出来」的两个**可检测**原因；没问题时返回空串。
+   *
+   * 检测得到的是通知权限与通道重要性；检测不到的是厂商那一层（小米的「悬浮通知/横幅通知」开关、
+   * 「后台弹出界面」权限、勿扰模式）——那些只能靠用户去系统设置里打开，所以这里给一条
+   * 「点这条去改」的入口（通知上的按钮直接跳到该通道的设置页）。
+   */
+  private String alertBlockedHint() {
+    try {
+      if (!notificationsEnabled()) return "手机没给 DSH 通知权限，弹不出来 —— 点这条去打开";
+      int importance = choiceChannelImportance();
+      if (importance > 0 && importance < NotificationManager.IMPORTANCE_HIGH) {
+        return "「模型提问」通道重要性被调低了（现在 " + importance + "），横幅弹不出来 —— 点这条去改";
+      }
+    } catch (Throwable ignored) {
+      // 查不出来就不说
+    }
+    return "";
   }
 
   // ---------------------------------------------------------------- 该不该响
@@ -423,21 +494,26 @@ public class WatchService extends Service {
   }
 
   private void updateOngoing(String text) {
-    if (text.equals(ongoingText)) return;
-    ongoingText = text;
+    String hint = alertBlockedHint();
+    String line = hint.isEmpty() ? text : hint;
+    if (line.equals(ongoingText)) return;
+    ongoingText = line;
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) return;
     try {
-      manager.notify(ID_ONGOING, new Notification.Builder(this, CHANNEL_ONGOING)
+      Notification.Builder builder = new Notification.Builder(this, CHANNEL_ONGOING)
           .setSmallIcon(R.drawable.ic_notify_watch)
           .setContentTitle("DSH 后台待命")
-          .setContentText(text)
+          .setContentText(line)
+          .setStyle(new Notification.BigTextStyle().bigText(line))
           .setContentIntent(openApp())
           .setOngoing(true)
           .setOnlyAlertOnce(true)
           .setShowWhen(false)
-          .setCategory(Notification.CATEGORY_SERVICE)
-          .build());
+          .setCategory(Notification.CATEGORY_SERVICE);
+      // 弹不出来时，这条常驻通知本身就是入口：点按钮直接跳到「模型提问」通道的设置页
+      if (!hint.isEmpty()) builder.addAction(channelSettingsAction());
+      manager.notify(ID_ONGOING, builder.build());
     } catch (Throwable err) {
       Log.w(TAG, "更新常驻通知失败: " + err);
     }
@@ -465,7 +541,7 @@ public class WatchService extends Service {
     int previous = choiceId;
     int next = previous == ID_CHOICE_A ? ID_CHOICE_B : ID_CHOICE_A;
     try {
-      Notification notification = new Notification.Builder(this, CHANNEL_CHOICE)
+      Notification.Builder builder = new Notification.Builder(this, CHANNEL_CHOICE)
           .setSmallIcon(R.drawable.ic_notify_choice)
           .setContentTitle(title)
           .setContentText(text)
@@ -480,9 +556,11 @@ public class WatchService extends Service {
           .setVisibility(Notification.VISIBILITY_PUBLIC)
           .setWhen(System.currentTimeMillis())
           .setShowWhen(true)
-          .setTicker(text)
-          .build();
-      manager.notify(next, notification);
+          .setTicker(text);
+      // 「发了但不弹」时的出口：厂商把横幅关掉（小米的「悬浮通知」、后台弹出界面…）只有用户能开，
+      // 所以这条通知上直接给一个跳到「模型提问」通道设置页的按钮。
+      builder.addAction(channelSettingsAction());
+      manager.notify(next, builder.build());
       choiceId = next;
       if (previous != 0 && previous != next) manager.cancel(previous);
     } catch (Throwable err) {
@@ -530,5 +608,20 @@ public class WatchService extends Service {
     open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
     return PendingIntent.getActivity(
         this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+  }
+
+  /**
+   * 「去改通知设置」那个按钮：直接落到「模型提问」通道的设置页。
+   * 厂商那层开关（小米的「悬浮通知 / 横幅通知」、后台弹出界面）就在那一页里，用户找起来最快。
+   */
+  private Notification.Action channelSettingsAction() {
+    Intent intent = new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+        .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())
+        .putExtra(Settings.EXTRA_CHANNEL_ID, CHANNEL_CHOICE)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    PendingIntent pending = PendingIntent.getActivity(
+        this, 2, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    return new Notification.Action.Builder(
+        Icon.createWithResource(this, R.drawable.ic_notify_choice), "去开启横幅", pending).build();
   }
 }

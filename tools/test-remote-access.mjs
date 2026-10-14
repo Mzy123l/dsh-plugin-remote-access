@@ -927,6 +927,32 @@ check(
   (await call(notifyPort, { method: 'POST', path: notifyPath(`?token=${notifyToken}`), body: 'x' })).status === 405,
 );
 
+// 外壳自报的通知环境：设置页底部那行自检与状态文件都靠它（「通知发了却不弹横幅」只有手机知道）
+const revBeforeReport = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}`) })).body).rev;
+const reported = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}&wait=0&av=1.3.5&n=1&ch=4`) })).body);
+check(
+  '外壳自报：端点回显 App 版本 / 通知开没开 / 通道重要性',
+  reported.phone?.app === '1.3.5' && reported.phone.notifications === true && reported.phone.importance === 4,
+  JSON.stringify(reported.phone ?? null),
+);
+check(
+  '外壳自报：不推进 rev（外壳每次轮询都报一次，推进 rev 就成了自己叫醒自己的死循环）',
+  reported.rev === revBeforeReport,
+  `rev ${revBeforeReport} → ${reported.rev}`,
+);
+const stillThere = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}`) })).body);
+check(
+  '外壳自报：设置页那次探测（不带 av）不会把它清空',
+  stillThere.phone?.app === '1.3.5',
+  JSON.stringify(stillThere.phone ?? null),
+);
+const lowChannel = JSON.parse((await call(notifyPort, { path: notifyPath(`?token=${notifyToken}&wait=0&av=1.3.5&n=1&ch=2`) })).body);
+check(
+  '外壳自报：通道被调低时如实回显（页脚据此说「横幅弹不出来」）',
+  lowChannel.phone?.importance === 2,
+  JSON.stringify(lowChannel.phone ?? null),
+);
+
 // 模型提问 → 端点立刻能看到；回答（瀑布结束）→ 立刻消失
 let resolveAsk;
 const askDone = new Promise((r) => { resolveAsk = r; });

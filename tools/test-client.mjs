@@ -198,12 +198,22 @@ check(
   String(footerOf()).includes('还没有通知接口') && String(footerOf()).includes('更新插件'),
   String(footerOf()),
 );
-globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false } }) });
+globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false }, phone: { app: pkgVersion, notifications: true, importance: 4 } }) });
 remount();
 await sleep(40);
 check(
-  '手机页面：宿主支持时就报「已支持提问通知」',
-  String(footerOf()).includes('已支持提问通知'),
+  '手机页面：宿主支持时报「已支持提问通知」，并带上手机端自报的横幅状态',
+  String(footerOf()).includes('已支持提问通知') &&
+    String(footerOf()).includes(`手机端 App ${pkgVersion}`) &&
+    String(footerOf()).includes('横幅通道=高'),
+  String(footerOf()),
+);
+globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false }, phone: { app: pkgVersion, notifications: true, importance: 2 } }) });
+remount();
+await sleep(40);
+check(
+  '手机页面：横幅通道被调低时，页脚直接说「弹不出来」',
+  String(footerOf()).includes('横幅通道=2') && String(footerOf()).includes('弹不出来'),
   String(footerOf()),
 );
 delete globalThis.window.fetch;

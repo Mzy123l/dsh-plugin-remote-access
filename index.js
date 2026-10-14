@@ -647,6 +647,9 @@ export function createChoiceCenter(now = () => Date.now()) {
   let desktopVisible = null; // null = 还没收到过任何回报
   let desktopAt = 0;
   let seq = 0;
+  /** 外壳最近一次自报的通知环境（App 版本 / 通知开没开 / 通道重要性），以及去重用的指纹 */
+  let phoneSeen = null;
+  let phoneLine = '';
 
   function wake() {
     if (waiters.size === 0) return;
@@ -709,7 +712,24 @@ export function createChoiceCenter(now = () => Date.now()) {
     return { known, visible: known && desktopVisible === true, at: desktopAt };
   }
 
-  /** 给外壳的那份 JSON：外壳只看 pending 与 desktop.visible 两个字段 */
+  /**
+   * 外壳自报的「它那边的通知环境」：App 版本、通知开没开、「模型提问」通道的重要性。
+   *
+   * 为什么要让手机报上来：**「通知发出来了但不弹横幅」这种问题发生在手机那一端**，
+   * 宿主和网页都看不见 —— 而设置页底部那行自检正是回答它的地方。报上来还顺带解决另一件事：
+   * 一眼能看出手机上跑的 APK 到底是哪一版（「我装了新版」与「装上了」并不总是一回事）。
+   * 注意**不要**因为这份报告去动 rev：外壳每次轮询都会报一次，动 rev 就成了自己叫醒自己的死循环。
+   */
+  function reportPhone(report) {
+    if (!report || !report.app) return false;
+    const line = `${report.app}|${report.notifications}|${report.importance}`;
+    const changed = line !== phoneLine;
+    phoneLine = line;
+    phoneSeen = { ...report, at: now() };
+    return changed;
+  }
+
+  /** 给外壳的那份 JSON：外壳只看 pending 与 desktop.visible；phone 是它自己报上来的回显 */
   function view(cfg) {
     return {
       ok: true,
@@ -718,6 +738,7 @@ export function createChoiceCenter(now = () => Date.now()) {
       enabled: cfg?.notifyOnChoice !== false,
       onlyWhenWindowHidden: cfg?.notifyOnlyWhenWindowHidden !== false,
       desktop: desktopView(),
+      phone: phoneSeen,
       pending: [...pending.values()].sort((a, b) => a.at - b.at),
     };
   }
@@ -725,6 +746,8 @@ export function createChoiceCenter(now = () => Date.now()) {
   return {
     track,
     reportDesktop,
+    reportPhone,
+    phone: () => phoneSeen,
     view,
     desktopView,
     rev: () => rev,
@@ -754,9 +777,12 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
    * 安卓外壳的「待答选择」长轮询：走我们自己的鉴权，回答完就结束，不落到上游。
    *
    * 语义（对着外壳那一端写死的）：
-   *   GET /__remote_access__/notify?rev=<上次的版本号>&wait=<秒>
+   *   GET /__remote_access__/notify?rev=<上次的版本号>&wait=<秒>&av=<App版本>&n=<0|1>&ch=<通道重要性>
    *     * rev 与当前不同 → 立刻回当前状态；
-   *     * rev 相同 → 挂住最多 wait 秒，状态一变就回（外壳因此不用空转轮询）。
+   *     * rev 相同 → 挂住最多 wait 秒，状态一变就回（外壳因此不用空转轮询）；
+   *     * av / n / ch 是外壳顺带自报的通知环境（App 版本、通知开没开、「模型提问」通道的重要性）：
+   *       设置页底部那行自检要显示它，状态文件里也留一份 —— 「发了通知却不弹横幅」发生在手机那端，
+   *       宿主本该看不见，这是让它看得见的唯一办法。
    * 没授权（没带票、也没带放行 cookie）一律 401：这里会带上「模型在问什么」，不能白给。
    */
   function handleNotify(req, res) {
@@ -786,6 +812,24 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
       const url = new URL(String(req.url), 'http://127.0.0.1');
       wait = Math.min(30, Math.max(0, Math.floor(Number(url.searchParams.get('wait')) || 0)));
       since = Number(url.searchParams.get('rev'));
+      // 只有外壳会带 av；设置页那次探测（浏览器里 fetch 的）不带，别用它把记录清空
+      const app = url.searchParams.get('av') ?? '';
+      if (app) {
+        const changed = choice.reportPhone({
+          app,
+          notifications: url.searchParams.get('n') !== '0',
+          importance: Number(url.searchParams.get('ch') ?? '0') || 0,
+        });
+        if (changed) {
+          const seen = choice.phone();
+          const ok = seen.notifications && seen.importance >= 4;
+          note(
+            'info',
+            `外壳自报：App ${seen.app}，通知${seen.notifications ? '已开' : '未开'}，` +
+              `「模型提问」通道重要性=${seen.importance}${ok ? '' : '（这个状态下横幅弹不出来：见 README 的厂商那一节）'}`,
+          );
+        }
+      }
     } catch { /* URL 坏了就当普通请求，立刻回一份当前状态 */ }
 
     if (wait <= 0 || !Number.isFinite(since) || since !== choice.rev()) {
@@ -1212,6 +1256,15 @@ export function apply(ctx, config) {
         const d = choice.desktopView();
         if (!d.known) return '未知（本机页面没回报过 → 手机端一律按不可见处理）';
         return `${d.visible ? '可见' : '不可见'}（${new Date(d.at).toISOString()} 回报）`;
+      })()}`,
+      `手机端: ${(() => {
+        const p = choice.phone();
+        if (!p) return '还没自报过（外壳每次轮询都会带一份）';
+        const banner = p.notifications && p.importance >= 4;
+        return (
+          `App ${p.app}，通知${p.notifications ? '已开' : '未开'}，横幅通道重要性=${p.importance}` +
+          `${banner ? '' : '（横幅弹不出来）'}（${new Date(p.at).toISOString()} 自报）`
+        );
       })()}`,
       '',
       '--- 生效配置 ---',

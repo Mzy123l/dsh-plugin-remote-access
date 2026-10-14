@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.3.4';
+    const CLIENT_VERSION = '1.3.5';
 
     // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [
@@ -1566,9 +1566,21 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                   setLinkNote(`通知接口返回 HTTP ${res.status}`);
                   return;
                 }
-                setLinkNote(data.enabled === false
+                const host = data.enabled === false
                   ? '电脑上关掉了「提问时通知手机」'
-                  : '电脑上的插件已支持提问通知 ✓');
+                  : '电脑上的插件已支持提问通知 ✓';
+                // 外壳自报的那份通知环境（它每次轮询都会带一份上来）。
+                // 「通知发了却不弹横幅」这种问题发生在手机那一端，宿主看不见 —— 这行字就是答案。
+                const phone = data.phone;
+                let phoneNote = '';
+                if (phone && phone.app) {
+                  const bannerOk = phone.notifications && phone.importance >= 4;
+                  phoneNote = bannerOk
+                    ? ` · 手机端 App ${phone.app}：通知已开、横幅通道=高 ✓`
+                    : ` · 手机端 App ${phone.app}：通知${phone.notifications ? '已开' : '没开'}` +
+                      `、横幅通道=${phone.importance}（横幅弹不出来 → 去系统设置里打开 DSH 的通知/横幅）`;
+                }
+                setLinkNote(host + phoneNote);
               } catch {
                 if (alive) setLinkNote('读不到电脑上的插件状态');
               }
