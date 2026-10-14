@@ -976,6 +976,80 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         window.addEventListener('touchend', onTouchEnd, { passive: true });
       } catch { /* 没有触摸 API 就算了 */ }
 
+      // ---------------------------------------------------------------- 会话行：点一条就把抽屉收掉
+      //
+      // 手机上「左侧工作区列表」就是抽屉：点一条会话，DSH 切过去了，抽屉却还盖在正文上，
+      // 得再点一次遮罩才看得见刚选中的会话 —— 于是「选会话」成了两步。所以这里替用户
+      // **多点一下它自己的「收起侧边栏」**：与遮罩、手势、返回键走的是同一条路（不改任何状态）。
+      //
+      // 顺带按住另一件事：DSH 在**会话切换时会把光标塞进输入框**
+      // （`dsh-client-ui-conversation` 里那个 `useEffect(…, [sessionId])` 调的 focusDraftEditor）。
+      // 电脑上这是好意（切完就能直接打字），手机上一执行就弹出软键盘，把刚选中的会话盖掉一半。
+      // 我们不改它那份逻辑，只在这一下之后的一小段窗口里让输入框**不可聚焦**（inert），
+      // 窗口一过立刻恢复 —— 用户自己点输入框照常能打字，也不影响任何别处的焦点行为。
+      const SESSION_FOCUS_GUARD_MS = 400;
+
+      let focusGuardTimer = null;
+
+      /** DSH 的输入框宿主（`data-composer-input` 是它自己给那个 contenteditable 的标记） */
+      const composerInput = () => document.querySelector('[data-composer-input]');
+
+      /** 这一小段窗口里不让输入框拿到焦点 */
+      function guardComposerFocus() {
+        const input = composerInput();
+        try { if (input) input.inert = true; } catch { /* 老 WebView 没有 inert，下面那手兜底 */ }
+        if (focusGuardTimer !== null) {
+          try { window.clearTimeout(focusGuardTimer); } catch { /* 忽略 */ }
+        }
+        focusGuardTimer = window.setTimeout(() => {
+          focusGuardTimer = null;
+          try { if (input) input.inert = false; } catch { /* 忽略 */ }
+        }, SESSION_FOCUS_GUARD_MS);
+      }
+
+      /** inert 不被支持（或它没拦住）时的兜底：窗口里谁把焦点塞进输入框，就把它交回去 */
+      function onComposerFocusIn(event) {
+        if (focusGuardTimer === null) return;
+        const target = event?.target;
+        if (!target || typeof target.closest !== 'function') return;
+        if (!target.closest('[data-composer-input]')) return;
+        try { target.blur?.(); } catch { /* 忽略 */ }
+      }
+
+      /**
+       * 文档级（冒泡）地认「点了一条会话」。
+       *
+       * 为什么挂在 document 的冒泡阶段而不是侧栏的捕获阶段：点的这一下必须**先**走完 DSH 自己的
+       * 处理（它才算把会话切过去），我们再去点「收起侧边栏」；捕获阶段抢在前面的话，抽屉一收，
+       * 那一行可能已经被卸载，DSH 的 onClick 就轮不到执行了（会话反而没切过去）。
+       *
+       * 三道闸门缺一不可：
+       *   1. 只在手机布局下（电脑布局里侧栏是普通一列，点完本来就看得到正文）；
+       *   2. 抽屉得开着（不然这一下只是页面上的普通点击）；
+       *   3. 点的得是**会话行**本身：行里那几个按钮（…菜单 / 置顶 / 归档）是行操作、自己
+       *      stopPropagation 到不了这里；工作区分组行是 `workspace:…`，点它只是展开收起。
+       */
+      function onDocumentClick(event) {
+        if (stopped || !phoneNow()) return;
+        if (!document.documentElement.hasAttribute('data-ra-drawer')) return;
+        const target = event?.target;
+        if (!target || typeof target.closest !== 'function') return;
+        const row = target.closest('[data-row-key]');
+        if (!row || !row.closest('[data-ra-sidebar]')) return;
+        if (!String(row.getAttribute('data-row-key') ?? '').startsWith('session:')) return;
+        // 行里那几个按钮（…菜单 / 置顶 / 归档）是**行操作**，不是「选了这条会话」。DSH 自己在
+        // 那一段上 stopPropagation，正常根本到不了这里；再挡一次是为了它哪天不再拦时，
+        // 用户点个菜单不会连抽屉一起收掉、会话也切过去。
+        if (target.closest('button')) return;
+        guardComposerFocus();
+        clickLabel('收起侧边栏');
+      }
+
+      try {
+        document.addEventListener('click', onDocumentClick);
+        document.addEventListener('focusin', onComposerFocusIn, true);
+      } catch { /* 没有 DOM 事件 API 就算了 */ }
+
       // ---------------------------------------------------------------- 返回键（手机布局里的浮层）
       //
       // 安卓外壳（android/）把系统返回键整个接管了，顺序是「先关网页里的浮层 → 再网页历史后退 → 最后退出」。
@@ -1090,6 +1164,19 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           window.removeEventListener('touchstart', onTouchStart);
           window.removeEventListener('touchmove', onTouchMove);
           window.removeEventListener('touchend', onTouchEnd);
+        } catch { /* 忽略 */ }
+        // 会话行那两下：监听要收回；万一停用时正卡在「按住焦点」的窗口里，输入框也要放开
+        try {
+          document.removeEventListener('click', onDocumentClick);
+          document.removeEventListener('focusin', onComposerFocusIn, true);
+        } catch { /* 忽略 */ }
+        if (focusGuardTimer !== null) {
+          try { window.clearTimeout(focusGuardTimer); } catch { /* 忽略 */ }
+          focusGuardTimer = null;
+        }
+        try {
+          const input = composerInput();
+          if (input) input.inert = false;
         } catch { /* 忽略 */ }
         try { observer?.disconnect(); } catch { /* 忽略 */ }
       };

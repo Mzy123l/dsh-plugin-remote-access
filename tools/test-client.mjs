@@ -750,6 +750,8 @@ function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {} } = {})
 
   const styles = [];
   const dispatched = [];
+  // 文档级监听（插件用它认「点了一条会话」与输入框抢焦点）：这里按类型存起来，测试里手动喂事件
+  const docListeners = new Map();
   const doc = {
     documentElement: html,
     head,
@@ -766,7 +768,11 @@ function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {} } = {})
       return [html, ...descendants(html)].find((e) => matchesSelector(e, sel)) ?? null;
     },
     querySelectorAll: (sel) => [html, ...descendants(html)].filter((e) => matchesSelector(e, sel)),
-    addEventListener() {},
+    addEventListener: (type, fn) => {
+      if (!docListeners.has(type)) docListeners.set(type, new Set());
+      docListeners.get(type).add(fn);
+    },
+    removeEventListener: (type, fn) => { docListeners.get(type)?.delete(fn); },
     dispatchEvent: (ev) => { dispatched.push(ev); return true; },
   };
   globalThis.document = doc;
@@ -795,7 +801,14 @@ function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {} } = {})
     if (fn) fn(event);
     return Boolean(fn);
   };
-  return { html, body, frame, styles, dispatched, openDrawer, closeDrawer, makeBackEl, fire, listeners };
+  /** 喂一次文档级事件（冒泡阶段与捕获阶段共用这一份表） */
+  const fireDoc = (type, event) => {
+    const set = docListeners.get(type);
+    if (!set) return 0;
+    for (const fn of [...set]) fn(event);
+    return set.size;
+  };
+  return { html, body, frame, styles, dispatched, openDrawer, closeDrawer, makeBackEl, fire, fireDoc, docListeners, listeners };
 }
 
 /** 只挂布局控制器，并把它的清理函数抓出来（返回 stop()，selectPanel 的调用记在 stop.calls 上） */
@@ -997,6 +1010,118 @@ check(
   '清理后收回入口',
   installed && globalThis.window.__dshRaBack === undefined,
   `装上了=${installed} 清理后=${typeof globalThis.window.__dshRaBack}`,
+);
+
+// ---------------------------------------------------------------- 场景七：点会话行 → 立刻收起抽屉 + 不聚焦输入框
+//
+// 手机布局里「左侧工作区列表」就是抽屉：点一条会话，DSH 切过去、抽屉却还盖着正文，
+// 而且它会在切换时把光标塞进输入框（电脑上的好意，手机上直接弹键盘）。
+// 这一段验两件事：抽屉被收起（走它自己的「收起侧边栏」），输入框在那一下之后拿不到焦点。
+
+/** 造一份「侧栏 + 一条会话行 + 一行工作区 + 一个输入框」的 DOM；返回关键元素与派发函数 */
+function installSessionRowDom({ drawerOpen = true, loopback = false, remoteLayout = 'phone' } = {}) {
+  const dom = installBackDom({ width: 390, drawerOpen });
+  const sidebar = dom.makeBackEl('div', { 'data-ra-sidebar': '' });
+  const sessionRow = dom.makeBackEl('div', { 'data-row-key': 'session:abc', role: 'treeitem' });
+  const sessionTitle = dom.makeBackEl('span');
+  const rowActionButton = dom.makeBackEl('button', { 'aria-label': '会话操作' });
+  const workspaceRow = dom.makeBackEl('div', { 'data-row-key': 'workspace:key1' });
+  const composer = dom.makeBackEl('div', { 'data-composer-input': '' });
+  const blurs = [];
+  composer.inert = false; // 真 DOM 里没设过 inert 时是 false，桩子也得是这个初值
+  composer.blur = () => { blurs.push(1); };
+  sidebar.appendChild(sessionRow);
+  sidebar.appendChild(workspaceRow);
+  sessionRow.appendChild(sessionTitle);
+  sessionRow.appendChild(rowActionButton);
+  dom.body.appendChild(sidebar);
+  dom.body.appendChild(composer);
+  const stop = applyBackController({ isLoopback: loopback, remoteLayout });
+  return { ...dom, sidebar, sessionRow, sessionTitle, rowActionButton, workspaceRow, composer, blurs, stop };
+}
+
+const rowDom = installSessionRowDom();
+await sleep(80);
+check(
+  '会话行：手机布局下装了文档级监听（click + focusin）',
+  rowDom.docListeners.get('click')?.size === 1 && rowDom.docListeners.get('focusin')?.size === 1,
+  `click=${rowDom.docListeners.get('click')?.size ?? 0} focusin=${rowDom.docListeners.get('focusin')?.size ?? 0}`,
+);
+rowDom.fireDoc('click', { target: rowDom.sessionTitle });
+check(
+  '会话行：点一条会话 → 立刻收起抽屉（走它自己的「收起侧边栏」）',
+  rowDom.closeDrawer.clicks === 1 && rowDom.openDrawer.clicks === 0,
+  `收起=${rowDom.closeDrawer.clicks} 打开=${rowDom.openDrawer.clicks}`,
+);
+check('会话行：同一时刻输入框被按住（inert），键盘弹不出来', rowDom.composer.inert === true, String(rowDom.composer.inert));
+
+// 兜底那一手：inert 不管用的 WebView 上，窗口内谁把焦点塞进输入框就交回去
+rowDom.fireDoc('focusin', { target: rowDom.composer });
+rowDom.fireDoc('focusin', { target: rowDom.sessionTitle }); // 别的元素不管
+check('会话行：窗口内输入框抢到焦点 → 立刻 blur（别的元素不碰）', rowDom.blurs.length === 1, `blur ${rowDom.blurs.length} 次`);
+
+await sleep(450);
+check('会话行：窗口一过，输入框恢复可聚焦（用户自己点它照常能打字）', rowDom.composer.inert === false, String(rowDom.composer.inert));
+rowDom.fireDoc('focusin', { target: rowDom.composer });
+check('会话行：窗口过了就不再管焦点', rowDom.blurs.length === 1, `blur ${rowDom.blurs.length} 次`);
+
+// 行内按钮（…菜单 / 置顶 / 归档）不是「选了这条会话」
+rowDom.fireDoc('click', { target: rowDom.rowActionButton });
+check(
+  '会话行：点行内按钮不收抽屉（那是行操作，不是选会话）',
+  rowDom.closeDrawer.clicks === 1,
+  `收起=${rowDom.closeDrawer.clicks}`,
+);
+// 工作区分组行只是展开/收起，也不是「选了会话」
+rowDom.fireDoc('click', { target: rowDom.workspaceRow });
+check('会话行：点工作区分组行不收抽屉', rowDom.closeDrawer.clicks === 1, `收起=${rowDom.closeDrawer.clicks}`);
+
+// 抽屉本来就是收着的：这一下只是页面上的普通点击
+const closedRowDom = installSessionRowDom({ drawerOpen: false });
+await sleep(80);
+closedRowDom.fireDoc('click', { target: closedRowDom.sessionTitle });
+check(
+  '会话行：抽屉没开时什么都不做（不重复点收起、也不按住输入框）',
+  closedRowDom.closeDrawer.clicks === 0 && closedRowDom.composer.inert === false,
+  `收起=${closedRowDom.closeDrawer.clicks} inert=${closedRowDom.composer.inert}`,
+);
+
+// 电脑布局：侧栏是普通一列，点完本来就看得到正文 —— 不该替用户收任何东西
+const deskRowDom = installSessionRowDom({ remoteLayout: 'desktop' });
+await sleep(80);
+deskRowDom.fireDoc('click', { target: deskRowDom.sessionTitle });
+check(
+  '会话行：电脑布局下不接管（不收抽屉、不动输入框）',
+  deskRowDom.closeDrawer.clicks === 0 && deskRowDom.composer.inert === false,
+  `收起=${deskRowDom.closeDrawer.clicks} inert=${deskRowDom.composer.inert}`,
+);
+
+// 本机页面：连控制器都不装（「本机不动」这条硬约束）
+const localRowDom = installSessionRowDom({ loopback: true });
+await sleep(80);
+localRowDom.fireDoc('click', { target: localRowDom.sessionTitle });
+check(
+  '会话行：本机页面一个监听都不装（点会话行什么都不发生）',
+  localRowDom.closeDrawer.clicks === 0 &&
+    localRowDom.composer.inert === false &&
+    (localRowDom.docListeners.get('click')?.size ?? 0) === 0,
+  `收起=${localRowDom.closeDrawer.clicks} 监听=${localRowDom.docListeners.get('click')?.size ?? 0}`,
+);
+
+// 停用：监听收回，被按住的输入框放开
+const stopRowDom = installSessionRowDom();
+await sleep(80);
+stopRowDom.fireDoc('click', { target: stopRowDom.sessionTitle });
+const wasHeld = stopRowDom.composer.inert === true;
+stopRowDom.stop();
+stopRowDom.fireDoc('click', { target: stopRowDom.sessionTitle });
+check(
+  '会话行：停用后监听收回、输入框放开',
+  wasHeld &&
+    stopRowDom.composer.inert === false &&
+    (stopRowDom.docListeners.get('click')?.size ?? 0) === 0 &&
+    (stopRowDom.docListeners.get('focusin')?.size ?? 0) === 0,
+  `按住了=${wasHeld} inert=${stopRowDom.composer.inert} 监听=${stopRowDom.docListeners.get('click')?.size ?? 0}`,
 );
 
 // ---------------------------------------------------------------- 窗口可见性上报（只在本机页面）
