@@ -125,15 +125,16 @@ keyPassword=...
 
 ## 发布
 
-现成的包在 Releases 里（tag 形如 `v<versionName>-android`；应用名 **DSH**，图标是自适应图标 + 各密度 PNG）。换版本时：
+现成的包在 Releases 里（tag 形如 `v<versionName>`；应用名 **DSH**，图标是自适应图标 + 各密度 PNG）。换版本时：
 
 1. `android/app/build.gradle` 里抬 `versionCode` / `versionName`（`versionCode` 必须比上一版大，否则覆盖安装会被拒）；
 2. 构建、签名，把 APK 传上去；
 3. 签名文件与口令放在**仓库外**，别提交。
 
 命名约定（跟仓库改名一起对齐过）：**APK 的 `versionName` 与插件版本是同一个号**（仓库改名后从 `1.3.0` 起），
-安装包叫 `dsh-plugin-remote-access-<versionName>.apk`，Release tag 叫 `v<versionName>-android`
-（更早的 `dsh-remote-1.1.1.apk` / `v1.1.1-android` 是改名前的旧名字，下载链接早就改成指向 Releases 页，不受影响）。
+安装包叫 `dsh-plugin-remote-access-<versionName>.apk`，Release tag 叫 `v<versionName>`
+（实际发过的就是 `v1.3.1` / `v1.3.0` / `v1.1.1` / `v1.1.0` / `v1.0.1`；更早的 `dsh-remote-1.1.1.apk`
+是改名前的旧文件名，下载链接早就改成指向 Releases 页，不受影响）。
 
 当前这一版是 **1.3.1**（`versionCode` 9）：返回键退到后台 + 模型提问时的状态栏通知。
 `versionCode` 从此每次都必须比上一版大，否则覆盖安装会被拒。

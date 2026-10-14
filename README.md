@@ -460,6 +460,8 @@ node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验
 - 新增权限：`POST_NOTIFICATIONS` / `FOREGROUND_SERVICE(_SPECIAL_USE)`（都是这条通知链路必需）。
   APK 仍是同一把自签钥匙（`CN=DSH Remote`），可直接覆盖安装（`versionCode` 8 → 9）。
 - 状态文件多两行诊断：`待答选择` 与 `电脑窗口`（后者看得出「谁在什么时候回报过可见性」）。
+- 文档：Release tag 实际是 `v<版本号>`（`v1.3.1` 等），早先几处写成 `v<版本号>-android` 与事实不符，已改；
+  包名/仓库改名后**已发过的 tag 不动**（`v1.3.0` / `v1.1.1` / `v1.1.0` / `v1.0.1` 照旧能下）。
 - 测试：Host 侧补 28 条（待答中心、通知端点、长轮询、窗口可见性路由、开关透传、
   「必须挂最外层」这条 prepend 约定），客户端补 6 条（只在本机页面上报、心跳、清理、老 WebView 安静跳过）。
 
