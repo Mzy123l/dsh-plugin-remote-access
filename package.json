@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-remote-access",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "type": "module",
   "description": "Expose this machine's DSH web GUI to a chosen CIDR range (e.g. Tailscale), with an optional numeric access code, a phone layout that only affects remote pages, and the official UI preferences stored in this plugin's own config.",
   "license": "MIT",

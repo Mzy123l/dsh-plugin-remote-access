@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.3.3';
+    const CLIENT_VERSION = '1.3.4';
 
     // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [

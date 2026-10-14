@@ -98,14 +98,16 @@ check('注册进 settings.section（含 remote 两个面孔）',
 //
 // client.js 里的 CLIENT_VERSION 是「手机上那一页跑的到底是哪一份代码」的唯一线索
 // （设置页底部会把它显示出来）。它要是跟 package.json 漂了，那行字就会骗人 —— 钉住。
+/** package.json 里的版本：下面几处断言都拿它比，免得每抬一版就来改测试 */
+let pkgVersion = '';
 {
   const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(clientPath), 'package.json'), 'utf8'));
+  pkgVersion = pkg.version;
   const declared = /const CLIENT_VERSION = '([^']+)'/.exec(fs.readFileSync(clientPath, 'utf8'))?.[1];
   check('client.js 的 CLIENT_VERSION 与 package.json 的版本一致',
     declared !== undefined && declared === pkg.version,
     `client.js=${declared} package.json=${pkg.version}`);
 }
-
 // ---------------------------------------------------------------- 场景一：手机页面（非回环）
 /** Host 侧「生效配置」，模拟配置真的存在 */
 let hostConfig = {
@@ -185,7 +187,7 @@ check('JSON 信封被正确拆开（不是把 {ok,value} 当数据）',
 const footerOf = () => flatten(tree)
   .map((n) => (typeof n?.props?.children === 'string' ? n.props.children : ''))
   .find((t) => t.includes('本页客户端'));
-check('手机页面：页脚报出本页客户端版本', String(footerOf()).includes('1.3.3'), String(footerOf()));
+check('手机页面：页脚报出本页客户端版本', String(footerOf()).includes(pkgVersion), `期望含 ${pkgVersion}，实际 ${String(footerOf())}`);
 // 重新挂载（连 hooks/deps 一起清）才能让那个只依赖 viaForms 的探测 effect 再跑一遍
 const remount = () => { react.resetAll(); tree = Panel(); };
 globalThis.window.fetch = async () => ({ status: 404, ok: false, json: async () => null });

@@ -8,6 +8,7 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.media.RingtoneManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
@@ -44,8 +45,13 @@ public class WatchService extends Service {
 
   /** 前台服务自己的常驻通知（Android 要求前台服务必须挂着一条通知） */
   static final int ID_ONGOING = 1001;
-  /** 「模型在等你选择」那条会响的通知 */
-  static final int ID_CHOICE = 1002;
+  /**
+   * 「模型在等你选择」那条会弹横幅的通知：**两个 id 轮流用**。
+   * 为什么不用一个固定 id：更新同一条通知时系统不保证再弹一次横幅，而「下一条问题」
+   * 必须是一次真正的新通知才会弹出来 —— 轮着用就等于每次都新建一条。
+   */
+  static final int ID_CHOICE_A = 1002;
+  static final int ID_CHOICE_B = 1003;
 
   static final String CHANNEL_ONGOING = "dsh-watch";
   static final String CHANNEL_CHOICE = "dsh-choice";
@@ -76,6 +82,8 @@ public class WatchService extends Service {
   private String shownFingerprint = "";
   /** 被用户划掉的那条问题的 id：同一条不再提醒，答完/换问题自动清掉 */
   private String dismissedId = "";
+  /** 当前那条「等你选择」的通知用的是哪个 id；0 = 现在没有 */
+  private int choiceId = 0;
   /** 常驻通知当前那行文案：一样就不重复刷 */
   private String ongoingText = "";
 
@@ -86,14 +94,31 @@ public class WatchService extends Service {
     super.onCreate();
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) return;
-    // 两条通道分别对应两种打扰程度：常驻那条不能响（否则每次回后台都震一下）
+    // 两条通道分别对应两种打扰程度，这一对必须分得干净：
+    //   · 后台待命（IMPORTANCE_LOW）：前台服务按规定必须挂着一条通知。它**只**说明「我在后台盯着」，
+    //     不该响、不该震、更不该从顶上弹出来 —— 否则每次退回后台都像来了条消息。
+    //   · 模型提问（IMPORTANCE_HIGH）：这才是要「弹出来」的那条。Android 上从屏幕顶部弹出（横幅 /
+    //     heads-up）的**唯一**开关就是通道重要性 HIGH，再配合通知本身的高优先级与响铃震动。
+    //     用户看到的「只在状态栏里静静躺着」的那条，几乎都是上一条，而不是这一条。
     NotificationChannel watch = new NotificationChannel(
         CHANNEL_ONGOING, "后台待命", NotificationManager.IMPORTANCE_LOW);
-    watch.setDescription("App 退到后台时保持连接，好在模型提问时提醒你");
+    watch.setDescription("App 退到后台时保持连接（这一条不会弹，只在这里说明它在盯着）");
     watch.setShowBadge(false);
+    watch.enableVibration(false);
+    watch.setSound(null, null);
+
     NotificationChannel choice = new NotificationChannel(
         CHANNEL_CHOICE, "模型提问", NotificationManager.IMPORTANCE_HIGH);
-    choice.setDescription("模型需要你选择时提醒（形如「要用哪个方案？」）");
+    choice.setDescription("模型需要你选择时，从屏幕顶部弹出提醒（像收到一条消息）");
+    choice.setShowBadge(true);
+    choice.enableVibration(true);
+    // 显式给上默认提示音：HIGH 通道本来就带，但写出来意图明确，也方便以后改成别的
+    try {
+      choice.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION), null);
+    } catch (Throwable ignored) {
+      // 拿不到默认铃声就靠通道默认值
+    }
+
     manager.createNotificationChannel(watch);
     manager.createNotificationChannel(choice);
   }
@@ -135,7 +160,8 @@ public class WatchService extends Service {
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager != null) {
       manager.cancel(ID_ONGOING);
-      manager.cancel(ID_CHOICE);
+      manager.cancel(ID_CHOICE_A);
+      manager.cancel(ID_CHOICE_B);
     }
     super.onDestroy();
   }
@@ -417,20 +443,48 @@ public class WatchService extends Service {
     }
   }
 
+  /**
+   * 发那条「模型在等你选择」的通知 —— 它必须**从屏幕顶部弹出来**（横幅 / heads-up），
+   * 像收到一条微信那样，而不是静静躺进状态栏。
+   *
+   * Android 上要弹出横幅得同时满足几件事，这里一件件落实（缺一件就只剩状态栏一个图标）：
+   *   1. 通道重要性必须是 IMPORTANCE_HIGH（在 onCreate 里建，用户若手动调低就只能去系统设置改回）；
+   *   2. 通知本身声明为高优先级、响铃 + 震动（26 以后看通道，但写出来对老系统与厂商 ROM 更稳）；
+   *   3. **必须是一条新通知**：更新同 id 的旧通知时，系统不保证再弹一次 ——
+   *      所以每条问题轮流用两个 id 发（下一条问题 = 一次真正的「新通知」），旧的那条顺手撤掉；
+   *   4. 分类是 CATEGORY_MESSAGE、可见性 PUBLIC，让它按「消息」而不是「后台服务」来对待；
+   *   5. 不能是常驻/仅提示一次（setOngoing(false)、setOnlyAlertOnce(false)）。
+   *
+   * 还剩两件代码管不了的：用户把「模型提问」通道关成静音/关了「横幅」开关（国产 ROM 里常见），
+   * 或者开着勿扰。这两种情况在 README 的排查一节里写清楚了。
+   */
   private void notifyChoice(String title, String text) {
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) return;
+    // 换一个新 id：同时撤销上一条，保证系统把它当成「新消息」弹一次横幅
+    int previous = choiceId;
+    int next = previous == ID_CHOICE_A ? ID_CHOICE_B : ID_CHOICE_A;
     try {
-      manager.notify(ID_CHOICE, new Notification.Builder(this, CHANNEL_CHOICE)
+      Notification notification = new Notification.Builder(this, CHANNEL_CHOICE)
           .setSmallIcon(R.drawable.ic_notify_choice)
           .setContentTitle(title)
           .setContentText(text)
           .setStyle(new Notification.BigTextStyle().bigText(text))
           .setContentIntent(openApp())
           .setAutoCancel(true)
+          .setOngoing(false)
+          .setOnlyAlertOnce(false)
           .setCategory(Notification.CATEGORY_MESSAGE)
-          .setPriority(Notification.PRIORITY_HIGH)
-          .build());
+          .setPriority(Notification.PRIORITY_MAX)
+          .setDefaults(Notification.DEFAULT_ALL)
+          .setVisibility(Notification.VISIBILITY_PUBLIC)
+          .setWhen(System.currentTimeMillis())
+          .setShowWhen(true)
+          .setTicker(text)
+          .build();
+      manager.notify(next, notification);
+      choiceId = next;
+      if (previous != 0 && previous != next) manager.cancel(previous);
     } catch (Throwable err) {
       Log.w(TAG, "发通知失败: " + err);
     }
@@ -440,16 +494,27 @@ public class WatchService extends Service {
     shownFingerprint = "";
     dismissedId = "";
     NotificationManager manager = getSystemService(NotificationManager.class);
-    if (manager != null) manager.cancel(ID_CHOICE);
+    if (manager == null) {
+      choiceId = 0;
+      return;
+    }
+    try {
+      manager.cancel(ID_CHOICE_A);
+      manager.cancel(ID_CHOICE_B);
+    } catch (Throwable ignored) {
+      // 取消失败无所谓：下一次状态变化还会再撤一次
+    }
+    choiceId = 0;
   }
 
   /** 那条「等你选择」的通知还在不在（用户划掉了就要允许再发一次） */
   private boolean choiceActive() {
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) return false;
+    if (choiceId == 0) return false;
     try {
       for (android.service.notification.StatusBarNotification active : manager.getActiveNotifications()) {
-        if (active.getId() == ID_CHOICE) return true;
+        if (active.getId() == choiceId) return true;
       }
     } catch (Throwable err) {
       return true; // 问不出来就当它还在，避免反复重发
