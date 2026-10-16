@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter } =
+const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter, contentRevOf, cacheSkipReason, describeAgentError } =
   await import(new URL('../index.js', import.meta.url).href);
 
 const results = [];
@@ -877,6 +877,9 @@ const notifyFile = path.join(os.tmpdir(), `ra-notify-${Date.now()}.txt`);
 let presenceHandler = null;
 let questionListener = null;
 let questionListenerPrepend = null;
+/** 「一轮结束」那两个监听：agent/status（running ↔ idle）与 agent/error */
+let agentStatusListener = null;
+let agentErrorListener = null;
 const notifyCtx = makeCtx({
   webServer: {
     register: (route) => {
@@ -889,6 +892,9 @@ const notifyCtx = makeCtx({
       questionListener = listener;
       questionListenerPrepend = options?.prepend === true;
     }
+    // 「一轮结束」那两个事件：宿主侧只观察、不改行为，测试里把监听收起来手动喂
+    if (event === 'agent/status') agentStatusListener = listener;
+    if (event === 'agent/error') agentErrorListener = listener;
   },
 });
 const dispose16 = apply(notifyCtx, {
@@ -1043,7 +1049,676 @@ dispose17();
 dispose16();
 presenceServer.close();
 
+// ---------------------------------------------------------------- 一轮结束的通知（正常 / 异常）
+//
+// 事件来自 DSH 自己，不是猜的：`agent/status` 的 running→idle 就是「这一轮跑完了」，
+// `agent/error` 带着错误对象。这里用假 agent 手动喂（`id === session.id` 才算主 agent），钉住：
+//   正常结束会记一条、异常结束带分类、子 agent 不打扰、idle 有防抖、结束会推 rev（长轮询立刻回）。
+const finishFile = path.join(os.tmpdir(), `ra-finish-${Date.now()}.txt`);
+let finishStatusListener = null;
+let finishErrorListener = null;
+const finishCtx = makeCtx({
+  on: (event, listener) => {
+    if (event === 'agent/status') finishStatusListener = listener;
+    if (event === 'agent/error') finishErrorListener = listener;
+  },
+});
+const disposeFinish = apply(finishCtx, {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${upPort}`,
+  urlFile: finishFile,
+  logLevel: 'debug',
+});
+await sleep(400);
+const finishUrl = readUrl(finishFile).url;
+const finishPort = Number(new URL(finishUrl).port);
+const finishToken = new URL(finishUrl).searchParams.get('token');
+const readFinish = async () =>
+  JSON.parse((await call(finishPort, { path: `/__remote_access__/notify?token=${finishToken}` })).body);
+
+const mainAgent = { id: 'sess-1', session: { id: 'sess-1' } };
+const subAgent = { id: 'sub-9', session: { id: 'sess-1' } };
+check(
+  '一轮结束：装上了 agent/status 与 agent/error 两个监听',
+  typeof finishStatusListener === 'function' && typeof finishErrorListener === 'function',
+);
+// 子 agent（子任务）跑完不该打扰用户：它有自己的 id，不等于 session.id
+finishStatusListener?.({ agent: subAgent, status: 'running' });
+finishStatusListener?.({ agent: subAgent, status: 'idle' });
+await sleep(2300);
+check(
+  '一轮结束：子 agent 跑完不通知（只有主 agent 才算「这一轮」）',
+  (await readFinish()).finish === null,
+  JSON.stringify((await readFinish()).finish),
+);
+// 正常一轮：running → idle；idle 不立刻落地（2 秒防抖，因为 running→maintenance 也会映射成 idle）
+finishStatusListener?.({ agent: mainAgent, status: 'running' });
+await sleep(50);
+finishStatusListener?.({ agent: mainAgent, status: 'idle' });
+check(
+  '一轮结束：idle 有 2 秒防抖（不把中间态的 maintenance 当成「跑完了」）',
+  (await readFinish()).finish === null,
+  JSON.stringify((await readFinish()).finish),
+);
+await sleep(2300);
+const afterDone = await readFinish();
+check(
+  '一轮结束：正常跑完 → 记一条 ok=true（外壳据此弹「跑完了」）',
+  afterDone.finish && afterDone.finish.ok === true && afterDone.finish.id === 1 && afterDone.finish.ms >= 2000,
+  JSON.stringify(afterDone.finish),
+);
+// 长轮询：结束也要推 rev，否则外壳要等下一轮才看到 —— 那就不是通知了
+const finishPoll = call(finishPort, {
+  path: `/__remote_access__/notify?token=${finishToken}&rev=${afterDone.rev}&wait=5`,
+});
+await sleep(150);
+finishStatusListener?.({ agent: mainAgent, status: 'running' });
+await sleep(50);
+finishErrorListener?.({
+  agent: mainAgent,
+  turn: 1,
+  step: 2,
+  error: Object.assign(new Error('insufficient balance'), { code: 'ACCOUNT_QUOTA' }),
+});
+finishStatusListener?.({ agent: mainAgent, status: 'idle' });
+await sleep(2300);
+const finishPolled = JSON.parse((await finishPoll).body);
+check(
+  '一轮结束：结束会推 rev（长轮询立刻回）',
+  finishPolled.finish && finishPolled.finish.id === 2,
+  JSON.stringify(finishPolled.finish),
+);
+check(
+  '一轮结束：余额/额度不足翻成一句人话（不是把英文栈甩给用户）',
+  finishPolled.finish.ok === false && finishPolled.finish.reason.includes('余额') && finishPolled.finish.message.length > 0,
+  JSON.stringify(finishPolled.finish),
+);
+
+const finishStatusLine = (readUrl(finishFile).text.match(/^一轮结束: .*$/m) ?? ['(没有这一行)'])[0];
+check(
+  '一轮结束：状态文件里写明最近一次的结论（异常 + 分类）',
+  finishStatusLine.includes('异常结束') && finishStatusLine.includes('余额'),
+  finishStatusLine,
+);
+
+// 「一条消息弹两次」的第一个来源：idle 会重复出现（中间态 maintenance、以及紧接着又跑一轮）。
+// 规矩是「一次 running 只兑现一次结束」—— 没有 running 过的 idle 一律忽略。
+const idBeforeExtraIdle = finishPolled.finish.id;
+finishStatusListener?.({ agent: mainAgent, status: 'idle' });
+finishStatusListener?.({ agent: mainAgent, status: 'idle' });
+await sleep(2400);
+const afterExtraIdle = await readFinish();
+check(
+  '一轮结束：没有 running 过的 idle 不报（中间态不会弹出第二条）',
+  afterExtraIdle.finish.id === idBeforeExtraIdle,
+  `id ${idBeforeExtraIdle} → ${afterExtraIdle.finish.id}`,
+);
+// 一次完整的一轮：running → idle →（多余的 idle）只兑现一条
+finishStatusListener?.({ agent: mainAgent, status: 'running' });
+finishStatusListener?.({ agent: mainAgent, status: 'idle' });
+await sleep(2300);
+const afterOneCycle = (await readFinish()).finish;
+finishStatusListener?.({ agent: mainAgent, status: 'idle' });
+await sleep(2300);
+const afterSecondIdle = (await readFinish()).finish;
+check(
+  '一轮结束：一次 running 只兑现一次结束（running → idle → idle 只多一条）',
+  afterOneCycle.id === idBeforeExtraIdle + 1 && afterSecondIdle.id === afterOneCycle.id,
+  `id ${idBeforeExtraIdle} → ${afterOneCycle.id} → ${afterSecondIdle.id}`,
+);
+const finishBoot = (await readFinish()).boot;
+check(
+  '一轮结束：载荷带宿主实例标记 boot（外壳用它 + id 去重，跨 DSH 重启不会误判成新的一条）',
+  typeof finishBoot === 'string' && finishBoot.length >= 4,
+  JSON.stringify(finishBoot),
+);
+check(
+  '错误分类：模型输出格式错 / 网络 / 限流 / 凭据 / 上下文 / 服务端 各归各类',
+  describeAgentError({ code: 'MALFORMED_RESPONSE', message: 'bad json' }).reason.includes('格式') &&
+    describeAgentError({ code: 'ECONNREFUSED' }).reason.includes('网络') &&
+    describeAgentError({ code: 'RATE_LIMIT' }).reason.includes('限流') &&
+    describeAgentError({ code: 'INVALID_CREDENTIAL' }).reason.includes('凭据') &&
+    describeAgentError({ code: 'CONTEXT_WINDOW_EXCEEDED' }).reason.includes('上下文') &&
+    describeAgentError({ code: 'SERVER', message: 'HTTP 503' }).reason.includes('服务端'),
+  [
+    describeAgentError({ code: 'MALFORMED_RESPONSE' }).reason,
+    describeAgentError({ code: 'ECONNREFUSED' }).reason,
+    describeAgentError({ code: 'RATE_LIMIT' }).reason,
+    describeAgentError({ code: 'INVALID_CREDENTIAL' }).reason,
+    describeAgentError({ code: 'CONTEXT_WINDOW_EXCEEDED' }).reason,
+    describeAgentError({ code: 'SERVER' }).reason,
+  ].join(' | '),
+);
+check(
+  '错误分类：认不出来的错误老实说「出错」并带上原文（不编造分类）',
+  describeAgentError(new Error('something weird happened')).reason === '出错' &&
+    describeAgentError(new Error('something weird happened')).detail.includes('something weird'),
+  JSON.stringify(describeAgentError(new Error('something weird happened'))),
+);
+// 关掉这个开关 → 端点如实回答（外壳据此不弹；原有的「提问」不受影响）
+const disposeFinishOff = apply(finishCtx, {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${upPort}`,
+  urlFile: finishFile,
+  notifyOnFinish: false,
+});
+await sleep(400);
+const offFinishUrl = readUrl(finishFile).url;
+const offFinish = JSON.parse(
+  (await call(Number(new URL(offFinishUrl).port), {
+    path: `/__remote_access__/notify?token=${new URL(offFinishUrl).searchParams.get('token')}`,
+  })).body,
+);
+check(
+  '一轮结束：开关关掉时端点如实回答 enabledFinish=false（enabled 仍是 true）',
+  offFinish.enabledFinish === false && offFinish.enabled === true,
+  JSON.stringify({ enabled: offFinish.enabled, enabledFinish: offFinish.enabledFinish }),
+);
+disposeFinishOff();
+disposeFinish();
+try { fs.rmSync(finishFile, { force: true }); } catch { /* 忽略 */ }
+
 authUpstream.close();
+
+// ---------------------------------------------------------------- 手机端缓存（1.3.8）
+//
+// 这一节的判据都是「通用 HTTP 事实」：方法与状态码、上游给没给缓存头 / 校验器、响应类型白名单。
+// 这里刻意**不提任何插件名**：壁纸只是「上游什么都不发的静态大文件」的一个例子。
+//
+// 假上游按上游真实行为分三类：
+//   · 内容寻址（rev= / 哈希文件名）—— 上游发 immutable，或干脆什么都不发；
+//   · 上游自己给了校验器（ETag/Last-Modified）—— 我们只补新鲜期，不改它的校验器；
+//   · 什么都不给的大静态文件 —— 我们补新鲜期 + 自铸弱校验器，并用首/尾片段核对。
+const cacheFile = path.join(os.tmpdir(), `ra-cache-${Date.now()}.txt`);
+/** 壁纸那类大文件的内容；`version` 一变就换内容，用来验「换了图但字节数一模一样」 */
+let bigVersion = 'A';
+const bigBody = (fill) => Buffer.alloc(300 * 1024, fill);
+let cacheUpstreamHits = 0;
+
+const serveRange = (req, res, body, contentType, extraHeaders = {}) => {
+  const range = req.headers.range;
+  const headers = { 'content-type': contentType, 'accept-ranges': 'bytes', ...extraHeaders };
+  if (!range) {
+    res.writeHead(200, { ...headers, 'content-length': String(body.length) });
+    res.end(body);
+    return;
+  }
+  const m = /bytes=(\d*)-(\d*)/.exec(range);
+  let start = m && m[1] ? Number(m[1]) : 0;
+  let end = m && m[2] ? Math.min(Number(m[2]), body.length - 1) : body.length - 1;
+  if (m && !m[1] && m[2]) {
+    start = Math.max(0, body.length - Number(m[2]));
+    end = body.length - 1;
+  }
+  res.writeHead(206, {
+    ...headers,
+    'content-range': `bytes ${start}-${end}/${body.length}`,
+    'content-length': String(end - start + 1),
+  });
+  res.end(body.subarray(start, end + 1));
+};
+
+const cacheUpstream = http.createServer((req, res) => {
+  cacheUpstreamHits += 1;
+  const path0 = String(req.url).split('?')[0];
+  if (path0 === '/assets/index-5SrrfWpU.js') {
+    // Vite 哈希产物：上游一个缓存头都不发（实测如此）
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+    res.end('console.log(1)');
+    return;
+  }
+  if (path0.startsWith('/plugins/')) {
+    // DSH 自己给聚合包发的就是 immutable —— 我们不许改它、也不许再加一个头
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=31536000, immutable' });
+    res.end('plugin-bundle');
+    return;
+  }
+  if (path0 === '/wallpaper/big.jpg') {
+    serveRange(req, res, bigBody(bigVersion), 'image/jpeg');
+    return;
+  }
+  if (path0 === '/wallpaper/small.png') {
+    res.writeHead(200, { 'content-type': 'image/png' });
+    res.end(Buffer.alloc(3 * 1024, 7));
+    return;
+  }
+  if (path0 === '/wallpaper/validated.jpg') {
+    res.writeHead(200, { 'content-type': 'image/jpeg', etag: '"upstream-1"', 'last-modified': 'Wed, 01 Oct 2026 00:00:00 GMT' });
+    res.end(Buffer.alloc(1024, 3));
+    return;
+  }
+  if (path0 === '/wallpaper/never.jpg') {
+    res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' });
+    res.end(Buffer.alloc(1024, 4));
+    return;
+  }
+  if (path0 === '/wallpaper/never-big.jpg') {
+    // 壁纸那类「实时抓帧」的真实样子：几 MB、上游明确 no-store —— 每次进页面都要重传
+    const body = Buffer.alloc(200 * 1024, 9);
+    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store', 'content-length': String(body.length) });
+    res.end(body);
+    return;
+  }
+  if (path0 === '/api/state') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    res.end('{"state":"live"}');
+    return;
+  }
+  if (path0 === '/api/tiny.bin') {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    res.end(Buffer.alloc(1024, 5));
+    return;
+  }
+  if (path0 === '/data/big.bin') {
+    // 真实的大二进制（.pkg / .tex 这类）都会带 Content-Length —— 我们靠它判断值不值得缓存
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(100 * 1024) });
+    res.end(Buffer.alloc(100 * 1024, 6));
+    return;
+  }
+  if (path0 === '/wallpaper/frame-chunked.png') {
+    // 与真实抓帧逐字一致：createReadStream 直接 pipe（**分块传输、没有 content-length**）+ no-store
+    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+    res.end(Buffer.alloc(300 * 1024, 11));
+    return;
+  }
+  if (path0 === '/wallpaper/tiny-live.gif') {
+    // 每秒钟来一次的实时小端点（没有长度、no-store）：不能被 override 顺手缓存
+    res.writeHead(200, { 'content-type': 'image/gif', 'cache-control': 'no-store' });
+    res.end(Buffer.alloc(120, 12));
+    return;
+  }
+  if (path0 === '/audio/track.mp3') {
+    // 媒体元素的分段取：客户端发 Range: bytes=0-，上游回覆盖整份的 206（浏览器永远不缓存它）
+    const body = Buffer.alloc(120 * 1024, 13);
+    if (req.headers.range) {
+      res.writeHead(206, {
+        'content-type': 'audio/mpeg',
+        'accept-ranges': 'bytes',
+        'content-range': `bytes 0-${body.length - 1}/${body.length}`,
+        'content-length': String(body.length),
+      });
+      res.end(body);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'audio/mpeg', 'accept-ranges': 'bytes', 'content-length': String(body.length) });
+    res.end(body);
+    return;
+  }
+  res.writeHead(404, { 'content-type': 'text/plain' });
+  res.end('nope');
+});
+await new Promise((r) => cacheUpstream.listen(0, '127.0.0.1', r));
+const cacheUpPort = cacheUpstream.address().port;
+
+const disposeCache = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${cacheUpPort}`,
+  urlFile: cacheFile,
+  logLevel: 'debug',
+});
+await sleep(400);
+const cacheStatus = readUrl(cacheFile);
+const cachePort = cacheStatus.url ? Number(new URL(cacheStatus.url).port) : 0;
+const cacheToken = cacheStatus.url ? new URL(cacheStatus.url).searchParams.get('token') : '';
+
+/** 只关心「头 + 正文长度」的请求 */
+const callRaw = (p, headers = {}) =>
+  new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port: cachePort, method: 'GET', path: p, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', (e) => resolve({ status: 0, headers: {}, body: Buffer.from('ERR ' + e.message) }));
+    req.end();
+  });
+
+// 内容寻址：URL 里的哈希就是内容身份 → 一年不用再问（这是原来只认 /plugins//assets/ 前缀的通用化）
+const viteAsset = await callRaw('/assets/index-5SrrfWpU.js?token=' + cacheToken);
+check(
+  '缓存：哈希文件名的静态产物 → immutable（上游本来什么都不发）',
+  String(viteAsset.headers['cache-control'] ?? '').includes('immutable'),
+  String(viteAsset.headers['cache-control'] ?? '(无)'),
+);
+check(
+  '缓存：普通文件名不算内容哈希（client.js 这种不许被钉一年）',
+  contentRevOf('/plugins/dsh-plugin-remote-access/client.js') === '' &&
+    contentRevOf('/assets/vendor-BNsW4eBh.css') === 'name:BNsW4eBh' &&
+    contentRevOf('/plugins/??a/client.js,b/client.js&rev=3c6a5cf08bfc') === 'rev:3c6a5cf08bfc',
+);
+
+// 上游已有自己的口径 → 一个字都不改（这是「尊重上游」那条纪律）
+const pluginBundle = await callRaw('/plugins/whatever/client.js?rev=deadbeef01&token=' + cacheToken);
+check(
+  '缓存：上游已发 immutable 的聚合包 → 原样透传，不加第二个头',
+  pluginBundle.headers['cache-control'] === 'public, max-age=31536000, immutable',
+  String(pluginBundle.headers['cache-control'] ?? '(无)'),
+);
+
+// 无校验器的大静态文件：补新鲜期 + 自铸弱校验器（壁纸就是这一类）
+const big1 = await callRaw('/wallpaper/big.jpg?token=' + cacheToken);
+const bigEtag = String(big1.headers.etag ?? '');
+check(
+  '缓存：上游什么都不给的大图 → 补新鲜期（private + max-age + SWR）',
+  String(big1.headers['cache-control'] ?? '').includes('max-age=600') &&
+    String(big1.headers['cache-control'] ?? '').includes('stale-while-revalidate') &&
+    String(big1.headers['cache-control'] ?? '').startsWith('private'),
+  String(big1.headers['cache-control'] ?? '(无)'),
+);
+check(
+  '缓存：同时铸一个弱校验器（我们自己发的，带 dshra- 前缀）',
+  /^W\/"dshra-\d+-\w+-\w+(-\w+)?"$/.test(bigEtag),
+  bigEtag,
+);
+check('缓存：正文照常发给手机（没被缓存层吃掉）', big1.body.length === 300 * 1024, `${big1.body.length} 字节`);
+
+// 手机拿着这个校验器回来 → 只读几 KB 片段就能回 304（零字节）
+const hitsBefore = cacheUpstreamHits;
+const bigAgain = await callRaw(`/wallpaper/big.jpg?token=${cacheToken}`, { 'if-none-match': bigEtag });
+check(
+  '缓存：条件请求命中 → 304 且零字节（这就是「不再重传」的关键一步）',
+  bigAgain.status === 304 && bigAgain.body.length === 0,
+  `HTTP ${bigAgain.status} / ${bigAgain.body.length} 字节`,
+);
+check(
+  '缓存：判定只用「头部 + 首/尾片段」的探针（读的是 206 片段，不是整份）',
+  cacheUpstreamHits - hitsBefore <= 3,
+  `上游被打了 ${cacheUpstreamHits - hitsBefore} 次`,
+);
+
+// 换了壁纸、但字节数一模一样 → 首/尾片段指纹必须发现它变了（弱长度校验会漏掉这一种）
+bigVersion = 'B';
+const bigChanged = await callRaw(`/wallpaper/big.jpg?token=${cacheToken}`, { 'if-none-match': bigEtag });
+check(
+  '缓存：换了图但长度一模一样 → 不会误判成 304（首/尾片段指纹）',
+  bigChanged.status === 200 && String(bigChanged.headers.etag ?? '') !== bigEtag,
+  `HTTP ${bigChanged.status} / ${bigChanged.headers.etag}`,
+);
+
+// 小资源：缓冲整份算精确校验器（不发探针）
+const small1 = await callRaw('/wallpaper/small.png?token=' + cacheToken);
+const smallEtag = String(small1.headers.etag ?? '');
+const small2 = await callRaw(`/wallpaper/small.png?token=${cacheToken}`, { 'if-none-match': smallEtag });
+check(
+  '缓存：小图片缓冲整份算精确校验器，条件请求同样回 304',
+  small1.body.length === 3 * 1024 && small2.status === 304 && small2.body.length === 0,
+  `HTTP ${small2.status} / ${small2.body.length} 字节`,
+);
+
+// 上游自己有校验器 → 只补新鲜期，校验器仍然是上游那一份（条件请求继续由上游回答）
+const validated = await callRaw('/wallpaper/validated.jpg?token=' + cacheToken);
+check(
+  '缓存：上游已有 ETag/Last-Modified → 只补新鲜期，校验器原样保留',
+  validated.headers.etag === '"upstream-1"' &&
+    String(validated.headers['cache-control'] ?? '').includes('max-age=600'),
+  `${validated.headers.etag} / ${validated.headers['cache-control']}`,
+);
+
+// 上游说 no-store → 尊重它（壁纸插件对「随时可能变」的那些端点是这么写的）
+const never = await callRaw('/wallpaper/never.jpg?token=' + cacheToken);
+check(
+  '缓存：上游 no-store 的资源一个字都不改',
+  never.headers['cache-control'] === 'no-store' && never.headers.etag === undefined,
+  String(never.headers['cache-control'] ?? '(无)'),
+);
+
+// 默认关的那个开关：连 no-store 的大媒体也缓存（壁纸抓帧就是这个场景，一次几 MB）
+const neverBig = await callRaw('/wallpaper/never-big.jpg?token=' + cacheToken);
+const neverBigJson = JSON.parse((await call(cachePort, { path: `/__remote_access__/cache?token=${cacheToken}` })).body);
+check(
+  '缓存：默认不碰 no-store（哪怕它是 200 KB 的大图）',
+  neverBig.headers['cache-control'] === 'no-store' && neverBig.headers.etag === undefined,
+  `${neverBig.headers['cache-control']} / etag=${neverBig.headers.etag ?? '(无)'}`,
+);
+check(
+  '流量账：大且没带缓存口径的那一行会写明原因（排查时唯一能直接读懂的一列）',
+  (neverBigJson.traffic.top.find((row) => row.key === 'GET /wallpaper/never-big.jpg')?.reason ?? '').includes('no-store'),
+  JSON.stringify(neverBigJson.traffic.top.find((row) => row.key === 'GET /wallpaper/never-big.jpg') ?? null),
+);
+check(
+  '缓存原因：Range / no-store / JSON 各说各的原因（不是一句含糊的「没缓存」）',
+  cacheSkipReason({ url: '/a.jpg', status: 200, method: 'GET', headers: { 'content-type': 'image/jpeg' }, cfg: {}, range: 'bytes=0-' }).includes('Range') &&
+    cacheSkipReason({ url: '/a.jpg', status: 200, method: 'GET', headers: { 'content-type': 'image/jpeg', 'cache-control': 'no-store' }, cfg: {} }).includes('no-store') &&
+    cacheSkipReason({ url: '/api/x', status: 200, method: 'GET', headers: { 'content-type': 'application/json' }, cfg: {} }).includes('JSON') &&
+    cacheSkipReason({ url: '/x', status: 200, method: 'POST', headers: {}, cfg: {} }).includes('POST'),
+);
+
+// 打开开关后：同一个 no-store 大图会被补上新鲜期 + 弱校验器，条件请求也能 304
+const disposeCacheForce = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${cacheUpPort}`,
+  urlFile: cacheFile,
+  cacheOverrideNoStore: true,
+});
+await sleep(400);
+const forcePort = Number(new URL(readUrl(cacheFile).url).port);
+const forceToken = new URL(readUrl(cacheFile).url).searchParams.get('token');
+const forceRaw = (p, headers = {}) =>
+  new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port: forcePort, method: 'GET', path: p, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', (e) => resolve({ status: 0, headers: {}, body: Buffer.from('ERR ' + e.message) }));
+    req.end();
+  });
+const forced = await forceRaw('/wallpaper/never-big.jpg?token=' + forceToken);
+const forcedEtag = String(forced.headers.etag ?? '');
+check(
+  '缓存：开了「no-store 的大媒体也缓存」后，大图带上新鲜期与弱校验器',
+  String(forced.headers['cache-control'] ?? '').includes('max-age=600') &&
+    /^W\/"dshra-/.test(forcedEtag) &&
+    forced.body.length === 200 * 1024,
+  `${forced.headers['cache-control']} / ${forcedEtag}`,
+);
+const forcedAgain = await forceRaw(`/wallpaper/never-big.jpg?token=${forceToken}`, { 'if-none-match': forcedEtag });
+check(
+  '缓存：这类资源同样能靠片段指纹回 304（不用把整份再传一遍）',
+  forcedAgain.status === 304 && forcedAgain.body.length === 0,
+  `HTTP ${forcedAgain.status} / ${forcedAgain.body.length} 字节`,
+);
+
+// 真实抓帧的形态：**分块传输、没有 content-length**（上一版就是卡在这里一次都没生效）
+const forcedChunked = await forceRaw('/wallpaper/frame-chunked.png?token=' + forceToken);
+const forcedChunkedEtag = String(forcedChunked.headers.etag ?? '');
+check(
+  '缓存：没有 content-length 的分块抓帧也能缓存（按探针首段判大小，不靠长度头）',
+  String(forcedChunked.headers['cache-control'] ?? '').includes('max-age=600') &&
+    /^W\/"dshra-/.test(forcedChunkedEtag) &&
+    forcedChunked.body.length === 300 * 1024,
+  `${forcedChunked.headers['cache-control']} / ${forcedChunkedEtag} / ${forcedChunked.body.length} 字节`,
+);
+const forcedChunkedAgain = await forceRaw(`/wallpaper/frame-chunked.png?token=${forceToken}`, { 'if-none-match': forcedChunkedEtag });
+check(
+  '缓存：分块抓帧的条件请求同样回 304',
+  forcedChunkedAgain.status === 304 && forcedChunkedAgain.body.length === 0,
+  `HTTP ${forcedChunkedAgain.status} / ${forcedChunkedAgain.body.length} 字节`,
+);
+// 每秒来一次的实时小端点：不能被 override 顺手缓存（那是在缓存一个「当前值」）
+const tinyLive = await forceRaw('/wallpaper/tiny-live.gif?token=' + forceToken);
+check(
+  '缓存：override 不碰实时小响应（120 字节、没有长度）',
+  tinyLive.headers['cache-control'] === 'no-store' && tinyLive.headers.etag === undefined,
+  `${tinyLive.headers['cache-control']} / etag=${tinyLive.headers.etag ?? '(无)'}`,
+);
+const forceJson = JSON.parse((await call(forcePort, { path: `/__remote_access__/cache?token=${forceToken}` })).body);
+check(
+  '缓存：自检端点在开关打开时如实报 overrideNoStore / overrideRange / honorsNoStore',
+  forceJson.policy.overrideNoStore === true &&
+    forceJson.policy.overrideRange === false &&
+    forceJson.policy.honorsNoStore === false &&
+    forceJson.stats.override >= 1,
+  JSON.stringify(forceJson.policy),
+);
+disposeCacheForce();
+
+// ---------------------------------------------------------------- 整段 Range 当整份（cacheFullRange）
+//
+// 媒体元素取大文件时发 `Range: bytes=0-`，上游回覆盖整份的 206 —— 而浏览器**永远不缓存 206**，
+// 于是每次进页面都重下整段（实测壁纸音轨 3.8 MB × 2）。这个开关把这一种改写成整份 200。
+const halfRange = await callRaw(`/audio/track.mp3?token=${cacheToken}`, { range: 'bytes=0-' });
+check(
+  '缓存：默认不动带 Range 的请求（206 原样透传，一个字都不改）',
+  halfRange.status === 206 && halfRange.headers['cache-control'] === undefined && halfRange.headers.etag === undefined,
+  `HTTP ${halfRange.status} / cc=${halfRange.headers['cache-control'] ?? '(无)'}`,
+);
+
+const disposeFullRange = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${cacheUpPort}`,
+  urlFile: cacheFile,
+  cacheFullRange: true,
+});
+await sleep(400);
+const fullPort = Number(new URL(readUrl(cacheFile).url).port);
+const fullToken = new URL(readUrl(cacheFile).url).searchParams.get('token');
+const fullRaw = (p, headers = {}) =>
+  new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port: fullPort, method: 'GET', path: p, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', (e) => resolve({ status: 0, headers: {}, body: Buffer.from('ERR ' + e.message) }));
+    req.end();
+  });
+const wholeAudio = await fullRaw('/audio/track.mp3?token=' + fullToken, { range: 'bytes=0-' });
+check(
+  '缓存：开了「整段 Range 当整份」后，206 改写成可缓存的 200（字节一模一样）',
+  wholeAudio.status === 200 &&
+    wholeAudio.headers['content-range'] === undefined &&
+    String(wholeAudio.headers['cache-control'] ?? '').includes('max-age=600') &&
+    wholeAudio.headers.etag !== undefined &&
+    wholeAudio.body.length === 120 * 1024,
+  `HTTP ${wholeAudio.status} / cc=${wholeAudio.headers['cache-control']} / ${wholeAudio.body.length} 字节`,
+);
+const wholeAudioAgain = await fullRaw('/audio/track.mp3?token=' + fullToken, {
+  range: 'bytes=0-',
+  'if-none-match': String(wholeAudio.headers.etag),
+});
+check(
+  '缓存：改写后的整份同样能 304（第二次进页面零字节）',
+  wholeAudioAgain.status === 304 && wholeAudioAgain.body.length === 0,
+  `HTTP ${wholeAudioAgain.status} / ${wholeAudioAgain.body.length} 字节`,
+);
+// 只取中间一段（比如拖动进度）绝不能被当成整份
+const partial = await fullRaw('/audio/track.mp3?token=' + fullToken, { range: 'bytes=100-200' });
+check(
+  '缓存：不是「从 0 到结尾」的分段一律原样透传（拖动定位不受影响）',
+  partial.status === 206,
+  `HTTP ${partial.status}`,
+);
+disposeFullRange();
+
+// 接口与未知二进制不碰：JSON 只有内容寻址才敢动；小的 octet-stream 多半是接口
+const apiState = await callRaw('/api/state?token=' + cacheToken);
+const tinyBin = await callRaw('/api/tiny.bin?token=' + cacheToken);
+check(
+  '缓存：JSON 接口与小块二进制不加任何缓存头（不做通用 HTTP 缓存）',
+  apiState.headers['cache-control'] === undefined &&
+    apiState.headers.etag === undefined &&
+    tinyBin.headers['cache-control'] === undefined &&
+    tinyBin.headers.etag === undefined,
+);
+// 大块二进制（.pkg / .tex 这类未知类型）才值得缓存
+const bigBin = await callRaw('/data/big.bin?token=' + cacheToken);
+check(
+  '缓存：大块未知二进制（≥64 KB）照常补新鲜期 + 校验器',
+  String(bigBin.headers['cache-control'] ?? '').includes('max-age=600') && bigBin.headers.etag !== undefined,
+  `${bigBin.headers['cache-control']} / ${bigBin.headers.etag}`,
+);
+
+// Range 请求一律不碰：那是 <video> 在拖进度，206 不该被当成一份完整副本
+const ranged = await callRaw(`/wallpaper/big.jpg?token=${cacheToken}`, { range: 'bytes=0-1023' });
+check(
+  '缓存：带 Range 的请求原样透传（不给 206 加任何缓存口径）',
+  ranged.status === 206 &&
+    ranged.headers['cache-control'] === undefined &&
+    ranged.headers.etag === undefined &&
+    ranged.body.length === 1024,
+  `HTTP ${ranged.status} / cc=${ranged.headers['cache-control'] ?? '(无)'}`,
+);
+
+// 关掉开关 → 一律不插手（用户随时可以退回去）
+const disposeCacheOff = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${cacheUpPort}`,
+  urlFile: cacheFile,
+  cacheEnabled: false,
+});
+await sleep(400);
+const offCachePort = Number(new URL(readUrl(cacheFile).url).port);
+const offCacheToken = new URL(readUrl(cacheFile).url).searchParams.get('token');
+const offAsset = await new Promise((resolve) => {
+  const req = http.request({ host: '127.0.0.1', port: offCachePort, method: 'GET', path: `/assets/index-5SrrfWpU.js?token=${offCacheToken}` }, (res) => {
+    res.resume();
+    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers }));
+  });
+  req.end();
+});
+check(
+  '缓存：cacheEnabled=false 时一个头都不加（开关真的能退回去）',
+  offAsset.headers['cache-control'] === undefined,
+  String(offAsset.headers['cache-control'] ?? '(无)'),
+);
+disposeCacheOff();
+
+// 自检端点：设置页「缓存」子菜单展开时读它
+const cacheNoAuth = await call(cachePort, { path: '/__remote_access__/cache' });
+const cacheJson = JSON.parse((await call(cachePort, { path: `/__remote_access__/cache?token=${cacheToken}` })).body);
+check('缓存自检端点：没授权 401（不白给）', cacheNoAuth.status === 401, `HTTP ${cacheNoAuth.status}`);
+check(
+  '缓存自检端点：报出口径与计数（手机端设置页那行字就是它）',
+  cacheJson.ok === true &&
+    cacheJson.policy.ttlMinutes === 10 &&
+    cacheJson.policy.storesOnHost === false &&
+    cacheJson.policy.honorsNoStore === true &&
+    cacheJson.stats.notModified >= 2 &&
+    Array.isArray(cacheJson.recent),
+  JSON.stringify(cacheJson.policy),
+);
+check(
+  '缓存自检端点：只允许 GET',
+  (await call(cachePort, { method: 'POST', path: `/__remote_access__/cache?token=${cacheToken}` })).status === 405,
+);
+
+// 流量账：排查「退出重进还是大流量」靠它 —— 组合包那类响应是 DSH 自己发的 immutable，
+// 「我们加了什么头」的计数看不见它们，所以这里按 URL 记字节（谁在重传、重传了多少）。
+check(
+  '流量账：按 URL 记字节（大图那笔就是 300 KB 量级）',
+  cacheJson.traffic.totalOut > 300 * 1024 &&
+    cacheJson.traffic.top.some((row) => row.key === 'GET /wallpaper/big.jpg' && row.out >= 300 * 1024),
+  JSON.stringify(cacheJson.traffic.top.slice(0, 3)),
+);
+check(
+  '流量账：单独记 WebSocket 与「没有缓存口径」的字节（后者就是下次还会重传的量）',
+  cacheJson.traffic.wsOut === 0 && typeof cacheJson.traffic.uncachedOut === 'number',
+  `wsOut=${cacheJson.traffic.wsOut} uncachedOut=${cacheJson.traffic.uncachedOut}`,
+);
+const resetJson = JSON.parse(
+  (await call(cachePort, { path: `/__remote_access__/cache?reset=1&token=${cacheToken}` })).body,
+);
+check(
+  '流量账：?reset=1 清零（复现问题时先清一次，再看这一轮花了多少）',
+  resetJson.traffic.totalOut === 0 && resetJson.traffic.top.length === 0 && resetJson.stats.notModified > 0,
+  JSON.stringify(resetJson.traffic).slice(0, 140),
+);
+disposeCache();
+cacheUpstream.close();
+try { fs.rmSync(cacheFile, { force: true }); } catch { /* 忽略 */ }
 
 for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile, lateFile, notifyFile]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }

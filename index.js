@@ -21,7 +21,7 @@ import net from 'node:net';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { AsyncResource } from 'node:async_hooks';
 import { pipeline } from 'node:stream';
 
@@ -154,6 +154,10 @@ export const Config = Schema
         Schema.string().default('auto'),
         '远程页面的界面布局：auto = 按视口自动判断，phone = 强制手机布局（横竖屏自适应），desktop = 与桌面一致。只作用于远程页面，本机界面不受影响',
       ),
+      phoneEnterNewline: field(
+        Schema.boolean().default(true),
+        '手机端按回车 = 换行，不发送：只有点「发送」按钮才真正发送（Ctrl/Cmd+Enter 仍是发送）。只作用于远程页面，本机界面不受影响',
+      ),
       // 安卓外壳的状态栏通知（外壳自己在后台轮询 /__remote_access__/notify）
       notifyOnChoice: field(
         Schema.boolean().default(true),
@@ -162,6 +166,10 @@ export const Config = Schema
       notifyOnlyWhenWindowHidden: field(
         Schema.boolean().default(true),
         '只在「电脑上的 DSH 窗口不可见」（收进托盘 / 最小化 / 页面已关）时才通知手机；关掉则只要 App 不在前台就通知',
+      ),
+      notifyOnFinish: field(
+        Schema.boolean().default(true),
+        '一轮结束时通知手机（正常跑完与异常结束都算，异常会带上分类：模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）。与「提问时通知手机」是同一个触发条件、互不影响',
       ),
 
       // 「UI 设置」一组：只作用于远程页面的官方界面偏好。官方在非回环页面上把设置通道降级成内存态
@@ -187,6 +195,28 @@ export const Config = Schema
         Schema.string().default('default'),
         '远程页面的「性能与用量」：default = 出厂值（详细），compact = 简洁，detailed = 详细。只作用于远程页面',
       ),
+      // 手机端缓存：缓存本体在手机的 WebView 里，宿主只负责把响应头喂对（见「手机端缓存策略」那一节）。
+      // 宿主不落任何大文件，所以没有 cacheDir / 容量上限这类字段。
+      cacheEnabled: field(
+        Schema.boolean().default(true),
+        '手机端资源缓存：给上游没给缓存头的静态资源（图片 / 视频 / 字体 / 打包产物…）补上新鲜期与弱校验器，手机重复打开不再重传。API、HTML、no-store 一律不碰',
+      ),
+      cacheTtlMinutes: field(
+        Schema.natural().default(10),
+        '上面那类资源的手机端新鲜期（分钟，1–1440）：期内手机一次请求都不发；过期后先出旧的、后台只做一次头部级核对（零字节）',
+      ),
+      cacheProbe: field(
+        Schema.boolean().default(true),
+        '过期核对时额外取首/尾各 64 KB 做指纹（治「换了图但字节数一模一样」）：不整份哈希、不落盘；关掉就只按长度+类型核对',
+      ),
+      cacheOverrideNoStore: field(
+        Schema.boolean().default(false),
+        '连上游标了 no-store 的大静态媒体（图片 / 音频 / 视频，≥64 KB）也缓存：壁纸那类实时抓帧一取就是几 MB，默认每次进页面都要重传。开着最多会看到 TTL 这么久之前的旧帧/旧音轨',
+      ),
+      cacheFullRange: field(
+        Schema.boolean().default(false),
+        '把「从 0 取到结尾」的整段 Range 请求当成整份来缓存：媒体元素取大文件时会发 Range，而浏览器永远不缓存 206 —— 于是每次进页面都要重下整段（实测壁纸音轨 3.8 MB × 2）。默认关：个别播放器可能因此失去拖动定位',
+      ),
       banFile: field(
         Schema.string().default(''),
         '拉黑暂存文件；只有「写进排除的网段」失败时才用得上（留空 = 与状态文件同目录的 remote-access-bans.txt）。平时不用碰它',
@@ -211,15 +241,22 @@ const DEFAULTS = {
   printUrl: true,
   accessCode: '',
   remoteLayout: 'auto',
+  phoneEnterNewline: true,
 
   notifyOnChoice: true,
   notifyOnlyWhenWindowHidden: true,
+  notifyOnFinish: true,
 
   remoteTheme: 'default',
   remoteFontSize: 0,
   remoteTranscriptView: 'default',
   remoteDeveloperTools: 'default',
   remotePerformanceUsage: 'default',
+  cacheEnabled: true,
+  cacheTtlMinutes: 10,
+  cacheProbe: true,
+  cacheOverrideNoStore: false,
+  cacheFullRange: false,
   banFile: '',
   logLevel: 'info',
 };
@@ -288,9 +325,23 @@ function normalizeConfig(rawIn) {
   c.remoteLayout = ['auto', 'phone', 'desktop'].includes(String(unwrap(c.remoteLayout)))
     ? String(unwrap(c.remoteLayout))
     : 'auto';
+  // 手机端「回车=换行」：与其它布尔开关同一口径，非 false 即开
+  c.phoneEnterNewline = c.phoneEnterNewline !== false;
+  // 手机端缓存：开关非 false 即开；新鲜期卡在 1–1440 分钟（写错值退回默认，不悄悄变成「永久」）
+  c.cacheEnabled = c.cacheEnabled !== false;
+  const cacheTtl = Number(unwrap(c.cacheTtlMinutes));
+  c.cacheTtlMinutes = Number.isInteger(cacheTtl) && cacheTtl >= 1 && cacheTtl <= 1440
+    ? cacheTtl
+    : DEFAULTS.cacheTtlMinutes;
+  c.cacheProbe = c.cacheProbe !== false;
+  // 「连 no-store 的大静态媒体也缓存」是**显式**开关：默认关，因为它是逆着上游意愿来的
+  c.cacheOverrideNoStore = c.cacheOverrideNoStore === true;
+  // 「整段 Range 当整份缓存」同理：默认关（会改变媒体分段的语义）
+  c.cacheFullRange = c.cacheFullRange === true;
   // 通知这一组是布尔开关，非 false 即开（与其它布尔项同一口径，写错值不会悄悄改变行为）
   c.notifyOnChoice = c.notifyOnChoice !== false;
   c.notifyOnlyWhenWindowHidden = c.notifyOnlyWhenWindowHidden !== false;
+  c.notifyOnFinish = c.notifyOnFinish !== false;
   // 「UI 设置」一组：取值一律「出厂值优先」——不认识的值退回 'default'（= 不干预官方默认），
   // 而不是随便挑一个看起来合理的档位，免得配置里写错一个字就悄悄改了手机上的外观。
   const pickUiOne = (raw, allowed) => (allowed.includes(String(unwrap(raw))) ? String(unwrap(raw)) : 'default');
@@ -478,6 +529,8 @@ const UNLOCK_COOKIE = 'dsh-ra-ok';
 const NOTIFY_PATH = '/__remote_access__/notify';
 /** 本机 DSH 页面回报「窗口此刻可见吗」的端点（注册在上游 webServer 上，只有本机能直接打到） */
 const PRESENCE_PATH = '/__remote_access__/presence';
+/** 手机端缓存策略的自检端点（设置页「缓存」子菜单里读它） */
+const CACHE_PATH = '/__remote_access__/cache';
 
 /** 极简解锁页：只在手机上调一次，够用就好，不依赖任何外部资源 */
 function unlockPageHtml(hint) {
@@ -616,6 +669,288 @@ function upstreamHeaders(headers, up, cfg, peer) {
   return h;
 }
 
+// ---------------------------------------------------------------- 手机端缓存策略
+//
+// 缓存本体在**手机**的 WebView 里，宿主一个字节的大文件都不落盘。这里只做两件事：
+//   1. 把响应头喂对：上游什么都不发的那些静态资源，由我们补上新鲜期与（弱）校验器；
+//   2. 替手机判定条件请求：手机带我们自己发的校验器回来时，只做一次「响应头 + 首/尾片段」的核对，
+//      对得上就回 304（零字节），对不上才把新的一份发过去。
+//
+// 为什么坚持不落盘、也不读宿主文件系统：资源可能在任何盘、任何路径上（非默认目录、多个 Windows
+// 用户各自的空间、用软/硬链接搭出来的共用目录）。判定只看「URL（剔除 token）」与上游给的响应头，
+// 上述这些形态对我们就是透明的，也不会出现「A 用户缓存被 B 用户读到」。缓存满了不归我们管：
+// Chromium 的 HTTP 缓存自己 LRU 淘汰，被淘汰的代价只是重新下载一次。
+//
+// 三类资源的通用判据（不认任何插件名、不认路径前缀）：
+//   · 内容寻址（URL 里真有内容哈希）→ immutable，一年不重取；
+//   · 上游已给 ETag/Last-Modified  → 只补新鲜期，校验器仍由上游回答；
+//   · 上游什么都没给（壁纸就是这类）→ 新鲜期内一次请求都不发；过期后由我们用首/尾片段指纹核对。
+
+const CACHE_IMMUTABLE = 'public, max-age=31536000, immutable';
+/** stale-while-revalidate：过期后先出旧的、后台再去核对，手机端不会看到等待 */
+const CACHE_SWR_SECONDS = 12 * 3600;
+/** 上游临时出错时，允许多久之内继续用手上这份 */
+const CACHE_STALE_IF_ERROR_SECONDS = 86400;
+/** 小于这个大小的响应直接缓冲整份算 sha256（精确校验器），不发探针 */
+const CACHE_INLINE_MAX_BYTES = 256 * 1024;
+/** 大资源只取首/尾各这么多字节做指纹 —— 不整份哈希 */
+const CACHE_PROBE_BYTES = 64 * 1024;
+/** application/octet-stream 这类「不知道是什么」的，小文件一律不缓存（多半是接口）*/
+const CACHE_BINARY_MIN_BYTES = 64 * 1024;
+/** 我们自己铸的校验器前缀：认得出它，才知道这个条件请求该由我们回答（而不是转给上游） */
+const CACHE_ETAG_PREFIX = 'dshra-';
+
+/** 短哈希：只用于指纹，不做安全用途 */
+function shortHash(value, chars) {
+  return createHash('sha256').update(value).digest('hex').slice(0, chars);
+}
+
+/**
+ * URL 里的内容标识（没有就返回空串 = 不能按 immutable 处理）。
+ *
+ * 三种通用形态，都不认识具体插件：
+ *   · `?rev=<hash>` —— DSH 插件包的产物修订号（由 size+mtime+ctime 推出，同一 URL ⇒ 同一份字节）；
+ *   · `index-5SrrfWpU.js` 这类哈希文件名（Vite 产物）；
+ *   · URL 里出现 64 位十六进制（内容寻址的附件 id 等）。
+ * 判据刻意收紧：文件名段必须带哈希形态（同时含字母与数字、8–32 位），免得把 `client.js`、
+ * `long-name.js` 这种普通名字当成内容哈希 —— 那会把可变的资源钉死一年。
+ */
+export function contentRevOf(rawUrl) {
+  const url = String(rawUrl ?? '');
+  if (!url) return '';
+  const rev = /[?&]rev=([A-Za-z0-9._-]{8,})/.exec(url);
+  if (rev) return `rev:${rev[1]}`;
+  const sha = /(?:^|[^0-9a-f])([0-9a-f]{64})(?:[^0-9a-f]|$)/.exec(url);
+  if (sha) return `sha:${sha[1]}`;
+  const path = url.split(/[?#]/)[0];
+  for (const segment of path.split('/')) {
+    const named = /^.*?[-.]([A-Za-z0-9_-]{8,32})\.([A-Za-z0-9]{1,6})$/.exec(segment);
+    if (!named) continue;
+    const hash = named[1];
+    if (/[0-9]/.test(hash) && /[A-Za-z]/.test(hash)) return `name:${hash}`;
+  }
+  return '';
+}
+
+/** 静态资源类型：只有这些「可共享的静态产物」才值得我们补缓存头，HTML / 接口一律不碰 */
+export function staticKindOf(contentType) {
+  const ct = String(contentType ?? '').toLowerCase().split(';')[0].trim();
+  if (!ct) return '';
+  if (ct.startsWith('image/')) return 'image';
+  if (ct.startsWith('video/') || ct.startsWith('audio/')) return 'media';
+  if (ct.startsWith('font/') || ct.startsWith('application/font') || ct === 'application/vnd.ms-fontobject') return 'font';
+  if (ct === 'text/css' || ct === 'text/javascript' || ct === 'application/javascript' || ct === 'application/wasm') return 'text';
+  if (ct === 'application/octet-stream') return 'binary';
+  if (ct === 'application/json' || ct === 'application/manifest+json') return 'json';
+  return '';
+}
+
+/** If-None-Match 可能是列表；统一剥掉 W/ 与引号再比 */
+export function etagTokensOf(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((piece) => piece.trim().replace(/^W\//i, ''))
+    .filter(Boolean);
+}
+
+/** 这个条件请求用的是不是我们自己铸的校验器 */
+export function isOwnEtag(value) {
+  return etagTokensOf(value).some((token) => token.startsWith(`"${CACHE_ETAG_PREFIX}`));
+}
+
+/** 首/尾片段指纹：长度 + 类型 + 首片段 + 尾片段（不整份哈希） */
+export function fingerprintEtagOf({ len, ct, head, tail }) {
+  const parts = [Number.isFinite(len) ? String(len) : '-', shortHash(String(ct ?? ''), 8)];
+  if (head) parts.push(shortHash(head, 16));
+  if (tail) parts.push(shortHash(tail, 16));
+  return `W/"${CACHE_ETAG_PREFIX}${parts.join('-')}"`;
+}
+
+/** 小资源：缓冲整份后算出的精确校验器（与指纹同一个前缀，比较时是同一个族） */
+export function inlineEtagOf(len, ct, body) {
+  return `W/"${CACHE_ETAG_PREFIX}${Number(len)}-${shortHash(String(ct ?? ''), 8)}-${shortHash(body, 16)}"`;
+}
+
+/** 给这类资源用的新鲜期头（T2/T3 共用；private：不许任何共享缓存留存 —— 多半是用户自己的东西） */
+function ttlHeaderOf(plan) {
+  const scope = plan.scope === 'public' ? 'public' : 'private';
+  return `${scope}, max-age=${plan.ttlSeconds}, stale-while-revalidate=${CACHE_SWR_SECONDS}, stale-if-error=${CACHE_STALE_IF_ERROR_SECONDS}`;
+}
+
+/**
+ * 「上游明说 no-store，但这是个大静态媒体」时由用户显式接管的方案（默认关，见 cacheOverrideNoStore）。
+ * 只碰图片 / 音频 / 视频 / 字体 —— JSON、无类型二进制、文本一概不碰（那是接口与代码）。
+ *
+ * ⚠️ **刻意不要求 content-length**：壁纸那种抓帧是 `createReadStream` 直接 pipe 出去的（分块传输、
+ * 没有长度头），上一版就是因为卡了长度而**一次都没生效**。大小改由探针读到的首段判定：
+ * 探针拿到不足 64 KB 且总长确定 → 当作实时小端点，不缓存；超过 64 KB 或长度未知 → 按大媒体处理。
+ */
+export function cacheOverridePlan(url, headers, ttlSeconds) {
+  const kind = staticKindOf(headers['content-type']);
+  if (!['image', 'media', 'font'].includes(kind)) return null;
+  const len = Number(headers['content-length']);
+  const size = Number.isFinite(len) && len >= 0 ? len : NaN;
+  const cc = String(headers['cache-control'] ?? '').toLowerCase();
+  return { mode: 'override', kind, size, ttlSeconds, scope: cc.includes('public') ? 'public' : 'private' };
+}
+
+/**
+ * 这个响应为什么没带缓存口径 —— 只给「大且没带」的那些写一句人话，进流量账。
+ * 排查时最有用的就是这一列：看到「带 Range 的分段请求」就知道浏览器永远不会缓存它。
+ */
+export function cacheSkipReason({ url, status, method, headers, cfg, range }) {
+  if (range !== undefined && range !== null) {
+    return `带 Range 的分段请求（${String(range).slice(0, 24)}；浏览器不缓存 206）`;
+  }
+  if (!cfg || cfg.cacheEnabled === false) return '缓存总开关关着';
+  if (String(method ?? 'GET').toUpperCase() !== 'GET') return `${String(method ?? '').toUpperCase()} 请求`;
+  if (Number(status) !== 200) return `HTTP ${status}`;
+  const h = headers ?? {};
+  if (h['set-cookie'] !== undefined) return '带 Set-Cookie';
+  const cc = String(h['cache-control'] ?? '').toLowerCase();
+  if (cc.includes('no-store')) return '上游写了 no-store';
+  if (cc.includes('no-cache')) return '上游写了 no-cache';
+  if (cc.includes('max-age')) return '上游已有新鲜期（原样透传）';
+  const rev = contentRevOf(url);
+  const kind = staticKindOf(h['content-type']);
+  const len = Number(h['content-length']);
+  const size = Number.isFinite(len) && len >= 0 ? len : NaN;
+  if (!kind && !rev) return `类型不在白名单（${String(h['content-type'] ?? '无 content-type').split(';')[0]}）`;
+  if (kind === 'json' && !rev) return 'JSON 且非内容寻址';
+  if (kind === 'binary' && !rev && !(size >= CACHE_BINARY_MIN_BYTES)) return '小块未知二进制';
+  return '其它';
+}
+
+/**
+ * 给一个「将要发给手机」的响应决定缓存口径。返回 null = 一个字都不改（不在白名单、或上游已有自己的口径）。
+ * 纯粹的头部判断：不看盘、不看路径、不看插件名。
+ */
+export function cachePlanOf({ url, status, method, headers, cfg }) {
+  if (!cfg || cfg.cacheEnabled === false) return null;
+  if (String(method ?? 'GET').toUpperCase() !== 'GET') return null;
+  if (Number(status) !== 200) return null;
+  const h = headers ?? {};
+  if (h['set-cookie'] !== undefined) return null;
+  const cc = String(h['cache-control'] ?? '').toLowerCase();
+  const ttlSeconds = Math.max(60, Math.round(Number(cfg.cacheTtlMinutes ?? 10) * 60));
+  // 上游明确说「别存」「每次都得问」→ **默认尊重它**（壁纸插件对实时抓帧/预览族就是这么写的）。
+  // 但「大静态媒体」允许由用户显式接管（默认关）：那种资源一取就是几 MB，而它其实很少变。
+  if (cc.includes('no-store') || cc.includes('no-cache')) {
+    return cfg.cacheOverrideNoStore === true ? cacheOverridePlan(url, h, ttlSeconds) : null;
+  }
+  const vary = String(h['vary'] ?? '').toLowerCase();
+  if (/(^|[,\s])(\*|cookie|authorization)([,\s]|$)/.test(vary)) return null;
+  // 上游自己给了新鲜期（immutable / max-age / must-revalidate）→ 那是它的口径，不插手
+  if (cc.includes('max-age')) return null;
+  const rev = contentRevOf(url);
+  const kind = staticKindOf(h['content-type']);
+  const rawLen = Number(h['content-length']);
+  const size = Number.isFinite(rawLen) && rawLen >= 0 ? rawLen : NaN;
+  if (!kind && !rev) return null;
+  // 接口多半是 json / 未知二进制：只有内容寻址（静态产物）才敢碰
+  if (kind === 'json' && !rev) return null;
+  if (kind === 'binary' && !rev && !(size >= CACHE_BINARY_MIN_BYTES)) return null;
+  const scope = cc.includes('public') ? 'public' : 'private';
+  if (rev) return { mode: 'immutable', kind, size, ttlSeconds, scope, rev };
+  if (h.etag !== undefined || h['last-modified'] !== undefined) {
+    return { mode: 'validated', kind, size, ttlSeconds, scope };
+  }
+  return { mode: 'fingerprint', kind, size, ttlSeconds, scope };
+}
+
+/** 这次会话里的缓存计数：只用于状态文件与设置页那行自检，不落盘 */
+export function createCacheStats() {
+  return { immutable: 0, validated: 0, ttl: 0, notModified: 0, inline: 0, probe: 0, probeFail: 0, override: 0, recent: [] };
+}
+
+/** 记一笔决策（设置页与状态文件里能看到「这条 URL 被判成哪一类」）*/
+export function noteCacheDecision(stats, url, kind) {
+  if (!stats || !kind) return;
+  stats.recent.push({ at: new Date().toISOString(), kind, url: String(url ?? '').slice(0, 200) });
+  if (stats.recent.length > 8) stats.recent.splice(0, stats.recent.length - 8);
+}
+
+// ---------------------------------------------------------------- 流量账（只给人看，不落盘）
+//
+// 为什么必须有它：组合包（`/plugins/??…&rev=…`）那类响应是 **DSH 自己发的 immutable**，按「尊重上游」
+// 的原则我们一个字都不改 —— 于是「我们加了什么头」的计数**看不见它们**，而它们正是十几 MB 的大头。
+// 所以这里按 URL 记**字节数**，不管我们插没插手：谁在重传、重传了多少，一眼能看出来。
+//
+// 上限固定（最多 200 个键）、只聚合到路径（丢掉查询串）、只进内存 —— 这是排查用的账本，不是监控系统。
+
+const TRAFFIC_KEYS_MAX = 200;
+
+export function createTrafficStats() {
+  return { since: Date.now(), totalIn: 0, totalOut: 0, wsIn: 0, wsOut: 0, uncachedOut: 0, rows: new Map() };
+}
+
+/**
+ * 记一笔流量。
+ * @param cached 这一份响应带没带缓存口径（我们补的、或上游本来就有的）——没带的就是「下次还会重传」的
+ */
+export function noteTraffic(stats, key, inBytes = 0, outBytes = 0, cached = true, reason = '') {
+  if (!stats || !key) return;
+  stats.totalIn += inBytes;
+  stats.totalOut += outBytes;
+  if (!cached) stats.uncachedOut += outBytes;
+  let row = stats.rows.get(key);
+  if (!row) {
+    if (stats.rows.size >= TRAFFIC_KEYS_MAX) {
+      // 满了就丢最小的一行（排查用，丢谁都不影响结论）
+      let smallest = null;
+      for (const [k, v] of stats.rows) {
+        if (smallest === null || v.out < stats.rows.get(smallest).out) smallest = k;
+      }
+      if (smallest !== null) stats.rows.delete(smallest);
+    }
+    row = { hits: 0, in: 0, out: 0, cached: 0, reason: '' };
+    stats.rows.set(key, row);
+  }
+  row.hits += 1;
+  row.in += inBytes;
+  row.out += outBytes;
+  if (cached) row.cached += 1;
+  // 只给「大且没带缓存口径」的留一句原因：这是排查时唯一能直接读懂的一列
+  if (!cached && reason && outBytes >= 64 * 1024) row.reason = String(reason).slice(0, 80);
+}
+
+/** 给状态文件 / 设置页用的一份快照：按送出字节从多到少排，最多 top 条 */
+export function trafficView(stats, top = 8) {
+  const rows = [...(stats?.rows ?? new Map()).entries()]
+    .map(([key, v]) => ({ key, ...v }))
+    .sort((a, b) => b.out - a.out)
+    .slice(0, top);
+  return {
+    since: stats?.since ?? 0,
+    totalIn: stats?.totalIn ?? 0,
+    totalOut: stats?.totalOut ?? 0,
+    wsIn: stats?.wsIn ?? 0,
+    wsOut: stats?.wsOut ?? 0,
+    uncachedOut: stats?.uncachedOut ?? 0,
+    top: rows,
+  };
+}
+
+/** 清零（复现「退出重进」这类问题时先清一次，再看这一轮花了多少） */
+export function resetTraffic(stats) {
+  if (!stats) return;
+  stats.since = Date.now();
+  stats.totalIn = 0;
+  stats.totalOut = 0;
+  stats.wsIn = 0;
+  stats.wsOut = 0;
+  stats.uncachedOut = 0;
+  stats.rows.clear();
+}
+
+/** 人看的字节数 */
+export function humanBytes(value) {
+  const n = Number(value) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
 // ---------------------------------------------------------------- 待答选择（安卓外壳的状态栏通知）
 
 /** 桌面窗口可见性报告多久算过期：页面心跳 25s，而后台窗口的定时器会被系统节流，所以留足余量 */
@@ -630,14 +965,59 @@ function notifyText(value, max) {
 }
 
 /**
- * 「待答选择」中心：把宿主里正在等用户回答的提问记成一份可轮询的状态。
+ * 把一轮结束时的错误翻成一句人话（通知里就靠这一句让人知道该干什么）。
  *
- * 三件事都在这里：
+ * 依据是 **DSH 自己的错误码**（`dsh-llm` / `dsh-llm-deepseek` 里那些字面量），不是猜的：
+ *   MALFORMED_RESPONSE（模型输出格式错，常伴随 JSON 解析失败）、QUOTA / ACCOUNT_QUOTA（余额 / 额度）、
+ *   AUTH / INVALID_CREDENTIAL（凭据失效）、RATE_LIMIT（限流）、CONTEXT_WINDOW_EXCEEDED（上下文超长）、
+ *   SERVER（上游 5xx）、EMPTY_RESPONSE（空回复）；网络那一族看 Node 的 errno。
+ * 认不出来就退到错误本身那句话 —— 宁可原文，也不编一个假分类。
+ */
+export function describeAgentError(error) {
+  const code = String(error?.code ?? error?.errno ?? '').toUpperCase();
+  const name = String(error?.name ?? '');
+  const message = String(error?.message ?? error ?? '');
+  const hay = `${code} ${name} ${message}`.toUpperCase();
+  const has = (...needles) => needles.some((needle) => hay.includes(needle));
+  if (has('MALFORMED_RESPONSE', 'INVALID_JSON', 'JSONDECODE', 'UNEXPECTED_TOKEN', 'PARSE')) {
+    return { reason: '模型输出格式错', detail: notifyText(message || '模型返回的内容不是合法 JSON / 结构不符', 160) };
+  }
+  if (has('ACCOUNT_QUOTA', 'QUOTA', 'INSUFFICIENT', 'BALANCE', '402')) {
+    return { reason: '余额 / 额度不足', detail: notifyText(message || '账号余额或额度不够了，去账户页充值或换成别的模型', 160) };
+  }
+  if (has('ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'FETCH FAILED', 'SOCKET HANG UP', 'UND_ERR', 'NETWORK')) {
+    return { reason: '网络连不上', detail: notifyText(message || '连不上模型服务：检查网络 / 代理 / 本机网关', 160) };
+  }
+  if (has('RATE_LIMIT', 'TOO MANY REQUESTS', '429')) {
+    return { reason: '被限流', detail: notifyText(message || '请求太频繁被限流，稍后会自动重试', 160) };
+  }
+  if (has('AUTH', 'INVALID_CREDENTIAL', 'UNAUTHORIZED', 'SESSION_EXPIRED', '401', '403')) {
+    return { reason: '凭据失效', detail: notifyText(message || '登录凭据无效或已过期：重新登录 / 换 API Key', 160) };
+  }
+  if (has('CONTEXT_WINDOW_EXCEEDED', 'TOO MANY TOKENS', 'CONTEXT')) {
+    return { reason: '上下文超长', detail: notifyText(message || '这轮上下文超出模型窗口：压缩会话或新开会话', 160) };
+  }
+  if (has('EMPTY_RESPONSE')) {
+    return { reason: '模型返回空回复', detail: notifyText(message || '模型这次什么都没返回，重试一次通常就好', 160) };
+  }
+  if (has('SERVER', 'BAD GATEWAY', '502', '503', '504')) {
+    return { reason: '模型服务端错误', detail: notifyText(message || '上层服务 5xx：稍后重试', 160) };
+  }
+  return { reason: '出错', detail: notifyText(message || '这一轮异常结束（细节见电脑上的 DSH 日志）', 160) };
+}
+
+/**
+ * 「待答选择 + 一轮结束」中心：把宿主里正在等用户回答的提问、以及最近一次「跑完了 / 出错了」
+ * 记成一份可轮询的状态。
+ *
+ * 四件事都在这里：
  *   1. track() —— 模型提问时（user-questions/request 瀑布）记一条，瀑布结束/被中止时清掉；
- *   2. reportDesktop() —— 本机 DSH 页面回报「窗口可见吗」，用来判断电脑前有没有人看着；
- *   3. subscribe() —— 给长轮询用：状态一变就叫醒所有挂着的请求。
+ *   2. reportFinish() —— 一轮结束（正常或异常）时记一条（只留最近一条，带自增 id 供外壳去重）；
+ *   3. reportDesktop() —— 本机 DSH 页面回报「窗口可见吗」，用来判断电脑前有没有人看着；
+ *   4. subscribe() —— 给长轮询用：状态一变就叫醒所有挂着的请求。
  *
  * rev 是给长轮询用的版本号：外壳带着上次的 rev 来问，一样就挂住等变化，不一样就立刻回。
+ * 「结束」也要推 rev —— 不然外壳得等下一次轮询周期才知道跑完了（那就不是通知，是延迟）。
  */
 export function createChoiceCenter(now = () => Date.now()) {
   /** id → 一条待答选择（id 用工具调用的 callId，同一批提问不会重复记） */
@@ -647,9 +1027,14 @@ export function createChoiceCenter(now = () => Date.now()) {
   let desktopVisible = null; // null = 还没收到过任何回报
   let desktopAt = 0;
   let seq = 0;
+  /** 最近一次「一轮结束」（正常或出错）——只留一条；外壳按 id 去重 */
+  let finish = null;
+  let finishSeq = 0;
   /** 外壳最近一次自报的通知环境（App 版本 / 通知开没开 / 通道重要性），以及去重用的指纹 */
   let phoneSeen = null;
   let phoneLine = '';
+  /** 本实例标记：见 view() 里那段「为什么光用 id 不行」 */
+  const bootId = Math.random().toString(36).slice(2, 10);
 
   function wake() {
     if (waiters.size === 0) return;
@@ -698,6 +1083,29 @@ export function createChoiceCenter(now = () => Date.now()) {
     return clear;
   }
 
+  /**
+   * 记一条「一轮结束」。
+   *
+   * 只留最近一条：这是**通知**，不是日志 —— 手机只该为最新那次响一声。
+   * id 自增，外壳按它去重（同一条不重复弹；新的一条算新通知，横幅才会重新弹一次）。
+   *
+   * @param detail `{ ok, reason, message, ms }`：ok=false 表示异常结束，reason 是人话分类
+   */
+  function reportFinish(detail) {
+    const info = detail && typeof detail === 'object' ? detail : {};
+    finishSeq += 1;
+    finish = {
+      id: finishSeq,
+      at: now(),
+      ok: info.ok !== false,
+      reason: notifyText(info.reason, 40),
+      message: notifyText(info.message, 200),
+      ms: Number.isFinite(info.ms) ? Number(info.ms) : 0,
+    };
+    bump();
+    return finish;
+  }
+
   /** 本机页面回报窗口可见性；报告过期（页面关了 / 电脑那边没在跑）时按「不可见」处理 */
   function reportDesktop(visible) {
     const next = visible === true;
@@ -722,32 +1130,39 @@ export function createChoiceCenter(now = () => Date.now()) {
    */
   function reportPhone(report) {
     if (!report || !report.app) return false;
-    const line = `${report.app}|${report.notifications}|${report.importance}`;
+    const line = `${report.app}|${report.notifications}|${report.importance}|${report.importanceFinish}`;
     const changed = line !== phoneLine;
     phoneLine = line;
     phoneSeen = { ...report, at: now() };
     return changed;
   }
 
-  /** 给外壳的那份 JSON：外壳只看 pending 与 desktop.visible；phone 是它自己报上来的回显 */
+  /** 给外壳的那份 JSON：外壳看 pending / finish / desktop.visible；phone 是它自己报上来的回显 */
   function view(cfg) {
     return {
       ok: true,
       rev,
       at: now(),
+      // 本实例的标记（每次 apply 都换一个）：外壳用它 + finish.id 组成去重键 ——
+      // 光用 id 不行：DSH 重启后 id 从 1 重新数，外壳会误以为「这条又变新了」而重复提醒。
+      boot: bootId,
       enabled: cfg?.notifyOnChoice !== false,
+      enabledFinish: cfg?.notifyOnFinish !== false,
       onlyWhenWindowHidden: cfg?.notifyOnlyWhenWindowHidden !== false,
       desktop: desktopView(),
       phone: phoneSeen,
       pending: [...pending.values()].sort((a, b) => a.at - b.at),
+      finish,
     };
   }
 
   return {
     track,
+    reportFinish,
     reportDesktop,
     reportPhone,
     phone: () => phoneSeen,
+    finish: () => finish,
     view,
     desktopView,
     rev: () => rev,
@@ -764,14 +1179,208 @@ export function createChoiceCenter(now = () => Date.now()) {
  * @param gate 访问门：`{ accessCode, cookieValue, banPath, authorize(req), banned(ip), ban(ip), withTicket(url, cookie), note }`
  *   —— 门只在 accessCode 非空时启用；为空时行为与以前完全一致（裸地址交给 DSH 自己 401）。
  * @param choice 待答选择中心（`createChoiceCenter()`）；给了就接管 `NOTIFY_PATH`，不给就照旧全转给上游。
+ * @param cacheStats 手机端缓存的计数（`createCacheStats()`）；只用于状态文件与设置页自检。
+ * @param trafficStats 流量账（`createTrafficStats()`）；按 URL 记字节，只进内存。
  */
-function startProxy(addr, cfg, up, note, onListening, gate, choice) {
+function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, trafficStats) {
   let active = 0;
 
   const deny = (res, code, text) => {
     res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(text);
   };
+
+  // ---------------------------------------------------------------- 手机端缓存：探针与自检
+  //
+  // 这里的所有动作都只谈「响应头 + 几 KB 片段」：不落盘、不读宿主文件系统、不按路径建键。
+  // 也正因为如此，资源在哪个盘、哪个 Windows 用户的空间、是不是软/硬链接搭出来的共用目录，
+  // 对这整套逻辑都是透明的。
+
+  /** 只读上游这一份的开头若干字节（拿到头就够时立刻掐断连接），用于首/尾片段指纹 */
+  function readTruncated(url, rangeValue, limit, clientHost) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      // Host 与主请求保持同一口径：rewriteHost=false 的用户是靠原样 Host 工作的，探针不能自作主张改写
+      const hostHeader = cfg.rewriteHost ? `${up.host}:${up.port}` : String(clientHost || `${up.host}:${up.port}`);
+      const headers = { host: hostHeader };
+      if (rangeValue) headers.range = rangeValue;
+      let req;
+      try {
+        req = http.request(
+          {
+            host: up.host,
+            port: up.port,
+            method: 'GET',
+            path: gate.withTicket(url, undefined),
+            headers,
+            timeout: cfg.timeoutMs > 0 ? cfg.timeoutMs : 0,
+          },
+          (res) => {
+            const chunks = [];
+            let got = 0;
+            // complete = 上游自己把响应发完了（而不是我们读够 limit 就掐断）——
+            // override 判定「这是不是个小响应」全靠它：分块传输没有长度头，读完了才知道它到底多大。
+            const finish = (complete) =>
+              done({ status: res.statusCode || 0, headers: res.headers, body: Buffer.concat(chunks), complete: complete === true });
+            res.on('data', (chunk) => {
+              const room = limit - got;
+              if (room <= 0) return;
+              chunks.push(chunk.length > room ? chunk.subarray(0, room) : chunk);
+              got += Math.min(chunk.length, room);
+              if (got >= limit) {
+                try { res.destroy(); } catch { /* 已经断了 */ }
+                finish(false);
+              }
+            });
+            res.on('end', () => finish(true));
+            res.on('error', () => done(null));
+          },
+        );
+      } catch {
+        done(null);
+        return;
+      }
+      req.on('timeout', () => req.destroy(new Error('probe timeout')));
+      req.on('error', () => done(null));
+      req.end();
+    });
+  }
+
+  /**
+   * 上游「当前这一份」的指纹：长度 + 类型 + 首片段（+ 尾片段）。
+   * 只读首/尾各 64 KB —— 不整份哈希、不落盘，也不需要知道资源在宿主哪儿。
+   */
+  async function probeFingerprint(url, clientHost) {
+    const head = await readTruncated(url, `bytes=0-${CACHE_PROBE_BYTES - 1}`, CACHE_PROBE_BYTES, clientHost);
+    if (!head || (head.status !== 200 && head.status !== 206)) return { ok: false };
+    const total = (() => {
+      if (head.status === 206) {
+        const m = /bytes\s+\d+-\d+\/(\d+)/i.exec(String(head.headers['content-range'] ?? ''));
+        if (m) return Number(m[1]);
+      }
+      const len = Number(head.headers['content-length']);
+      return Number.isFinite(len) ? len : NaN;
+    })();
+    let tail = null;
+    const wantTail = cfg.cacheProbe !== false && head.status === 206 && Number.isFinite(total) && total > CACHE_PROBE_BYTES * 2;
+    if (wantTail) {
+      const last = await readTruncated(url, `bytes=-${CACHE_PROBE_BYTES}`, CACHE_PROBE_BYTES, clientHost);
+      if (last && last.status === 206) tail = last.body;
+    }
+    return {
+      ok: true,
+      len: total,
+      ct: head.headers['content-type'],
+      // 响应比 64 KB 还短时，这一段就是全部内容 —— 指纹因此是「整份」的（小文件本来就不贵）
+      head: head.body,
+      // 上游把这份发完了没有（override 判定「小响应」要用；分块传输没有长度头，只有这个能作数）
+      complete: head.complete === true,
+      tail,
+    };
+  }
+
+  /**
+   * 读满一份小响应（≤ limit），拿它算精确校验器。
+   * 超过上限时**只是暂停**、不销毁：调用方会把已读到的前缀发出去、剩下的继续转发。
+   */
+  function readWhole(upRes, limit) {
+    return new Promise((resolve) => {
+      const chunks = [];
+      let got = 0;
+      let settled = false;
+      const settle = (value) => {
+        if (settled) return;
+        settled = true;
+        upRes.removeListener('data', onData);
+        upRes.removeListener('end', onEnd);
+        upRes.removeListener('error', onError);
+        upRes.removeListener('close', onClose);
+        resolve(value);
+      };
+      const onData = (chunk) => {
+        got += chunk.length;
+        if (got > limit) {
+          try { upRes.pause(); } catch { /* 已经停了 */ }
+          settle({ ok: false, part: Buffer.concat(chunks) });
+          return;
+        }
+        chunks.push(chunk);
+      };
+      const onEnd = () => settle({ ok: true, body: Buffer.concat(chunks) });
+      const onError = () => settle({ ok: false, part: Buffer.concat(chunks) });
+      // 半路被掐断时 end 与 error 都可能不来（只来 close），所以这条必须兜住 —— 否则这个 Promise 永远不落地
+      const onClose = () => settle({ ok: false, part: Buffer.concat(chunks) });
+      upRes.on('data', onData);
+      upRes.on('end', onEnd);
+      upRes.on('error', onError);
+      upRes.on('close', onClose);
+      upRes.resume();
+    });
+  }
+
+  /** 回一个我们自己判定的 304（零字节）；上游那份响应由调用方掐掉 */
+  function sendNotModified(res, plan, etag) {
+    try {
+      res.writeHead(304, {
+        etag,
+        'cache-control': plan.mode === 'immutable' ? CACHE_IMMUTABLE : ttlHeaderOf(plan),
+      });
+      res.end();
+    } catch { try { res.destroy(); } catch { /* 已经断了 */ } }
+  }
+
+  /**
+   * 设置页「缓存」子菜单读的自检：策略口径 + 本次会话的计数 + 最近几条判定 + 流量账。
+   * 与通知端点同一套鉴权：没授权不给。带 `?reset=1` 时顺手把流量账清零（复现问题时先清一次）。
+   */
+  function handleCache(req, res) {
+    if (req.method !== 'GET') {
+      deny(res, 405, '405 method not allowed\n');
+      return;
+    }
+    if (!gate.authorize(req)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      return;
+    }
+    const stats = cacheStats ?? createCacheStats();
+    const url = new URL(String(req.url), 'http://127.0.0.1');
+    if (url.searchParams.get('reset') === '1') resetTraffic(trafficStats);
+    const traffic = trafficView(trafficStats, 10);
+    const body = {
+      ok: true,
+      policy: {
+        enabled: cfg.cacheEnabled !== false,
+        ttlMinutes: cfg.cacheTtlMinutes,
+        swrHours: CACHE_SWR_SECONDS / 3600,
+        probe: cfg.cacheProbe !== false,
+        immutable: true,
+        honorsNoStore: cfg.cacheOverrideNoStore !== true,
+        overrideNoStore: cfg.cacheOverrideNoStore === true,
+        overrideRange: cfg.cacheFullRange === true,
+        storesOnHost: false,
+      },
+      stats: {
+        immutable: stats.immutable,
+        validated: stats.validated,
+        ttl: stats.ttl,
+        notModified: stats.notModified,
+        inline: stats.inline,
+        probe: stats.probe,
+        probeFail: stats.probeFail,
+        override: stats.override ?? 0,
+      },
+      recent: stats.recent.slice(-5),
+      traffic,
+    };
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify(body));
+  }
 
   /**
    * 安卓外壳的「待答选择」长轮询：走我们自己的鉴权，回答完就结束，不落到上游。
@@ -819,14 +1428,18 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
           app,
           notifications: url.searchParams.get('n') !== '0',
           importance: Number(url.searchParams.get('ch') ?? '0') || 0,
+          // 「任务结束」是单独一条通道：它被调低时横幅同样弹不出来，所以分开自报（老 APK 不带这个参数）
+          importanceFinish: Number(url.searchParams.get('fch') ?? '0') || 0,
         });
         if (changed) {
           const seen = choice.phone();
           const ok = seen.notifications && seen.importance >= 4;
+          const okFinish = seen.notifications && (seen.importanceFinish ?? 0) >= 4;
           note(
             'info',
             `外壳自报：App ${seen.app}，通知${seen.notifications ? '已开' : '未开'}，` +
-              `「模型提问」通道重要性=${seen.importance}${ok ? '' : '（这个状态下横幅弹不出来：见 README 的厂商那一节）'}`,
+              `「模型提问」通道重要性=${seen.importance}${ok ? '' : '（这个状态下横幅弹不出来：见 README 的厂商那一节）'}` +
+              `，「任务结束」通道重要性=${seen.importanceFinish ?? 0}${okFinish ? '' : '（同上）'}`,
           );
         }
       }
@@ -876,6 +1489,12 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
     // 待答选择端点：由我们自己回答（带了鉴权），不问上游 —— 上游不知道这个协议
     if (choice && String(req.url).split('?')[0] === NOTIFY_PATH) {
       handleNotify(req, res);
+      return;
+    }
+
+    // 手机端缓存策略的自检：设置页「缓存」子菜单展开时才来读它
+    if (String(req.url).split('?')[0] === CACHE_PATH) {
+      handleCache(req, res);
       return;
     }
 
@@ -948,7 +1567,28 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
     const canRepair = authorized && /^(GET|HEAD)$/i.test(String(req.method));
     let repaired = false;
 
-    const onUpstream = (upRes) => {
+    // ---------------------------------------------------------------- 这一笔的流量账
+    //
+    // 键只到路径（丢掉查询串）：组合包的路径都是 `/plugins/`，正好把它们合成一笔 ——
+    // 「十几 MB 到底花在哪儿」看的就是这一行。入向字节按请求体累加（上传/JSON RPC 也有量）。
+    const trafficKey = `${String(req.method).toUpperCase()} ${String(req.url).split('?')[0]}`;
+    let bytesIn = 0;
+    let bytesOut = 0;
+    let trafficDone = false;
+    let skipReason = '';
+    const countIn = (chunk) => { bytesIn += chunk?.length ?? 0; };
+    const finishTraffic = (cached) => {
+      if (trafficDone) return;
+      trafficDone = true;
+      noteTraffic(trafficStats, trafficKey, bytesIn, bytesOut, cached !== false, skipReason);
+    };
+
+    /**
+     * 上游的响应到了。**故意写成 async**：手机端缓存要在这条路上「先核对、再决定发不发」，
+     * 而核对要先读完上游的响应头，有时还要读几 KB 片段。
+     * 所有异常都由外面那个 onUpstream 兜住 —— 这条路径绝不能把异常放出请求回调。
+     */
+    const handleUpstream = async (upRes) => {
       // 响应头到了：从现在起不再按「空闲」掐这条连接（timeoutMs 的语义就是「等响应头」）。
       // 否则显式设了 30s 超时的用户，照样会在下大文件 / 看长流的时候被中途掐断。
       try { upRes.socket?.setTimeout?.(0); } catch { /* 没有 socket 就算了 */ }
@@ -961,8 +1601,9 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
        * uncaughtException —— 线上实测直接把 DSH 的宿主进程带崩（外壳报 host exited with 1 并重启）。
        * 代理再怎么写错，也不该有能力崩掉宿主，所以这条路径只「把上游读干丢掉」。
        */
-      const dropUpstream = (why) => {
-        note('debug', `下游已断开，丢弃这次上游响应（${why}）`);
+      const dropUpstream = (why, scope = 'downstream') => {
+        // 两种来路要分得清：下游没了（手机切后台/关标签）是常态；缓存判定完成（回 304）是我们主动不要这份正文
+        note('debug', `${scope === 'cache' ? '缓存判定完成' : '下游已断开'}，丢弃这次上游响应（${why}）`);
         try { upRes.destroy(); } catch { /* 已经断了 */ }
       };
       if (res.destroyed || res.writableEnded) {
@@ -993,40 +1634,213 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
         return;
       }
 
-      // 写响应头本身也会抛（下游刚断、或头已经发过），所以单独包起来
-      try {
-        // 内容寻址的静态产物：聚合插件包（URL 带 rev= 内容哈希）与 Vite 产物（文件名里带哈希）。
-        // 上游一个缓存头都不发（实测：没有 cache-control / etag / last-modified），浏览器没有 freshness
-        // 依据就只能每次重新下 —— 手机上就是「每次进去都慢」；而 WebView 的缓存比 Edge 更保守，尤其明显。
-        // 这里给它们钉一年 immutable：换版本时 URL 里的 rev/哈希会变，自然重新下，不会看到旧东西。
-        let headers = upRes.headers;
+      /**
+       * 「整段 Range」当整份：媒体元素取大文件时发 `Range: bytes=0-`，上游回 206 带上整份字节。
+       * 206 **永远不会被浏览器缓存**，于是每次进页面都重下整段（实测壁纸音轨 3.8 MB × 2）。
+       * 这里只在「请求就是从 0 取到结尾」且「上游回的确实覆盖 0..total-1」时才把状态改写成 200 ——
+       * 字节与一份普通 200 完全相同，所以只是把「可缓存」这件事还回来。
+       * 默认关（cacheFullRange）；个别播放器可能因此失去拖动定位。
+       */
+      let statusOverride = 0;
+      let headers = upRes.headers;
+      let rangedAsFull = false;
+      if (cfg.cacheFullRange === true && upRes.statusCode === 206 && req.headers.range !== undefined) {
+        const askedWhole = /^bytes=0-\s*$/i.test(String(req.headers.range).trim());
+        const covered = /^bytes\s+0-(\d+)\/(\d+)\s*$/i.exec(String(upRes.headers['content-range'] ?? '').trim());
+        if (askedWhole && covered && Number(covered[1]) + 1 === Number(covered[2])) {
+          rangedAsFull = true;
+          statusOverride = 200;
+          headers = { ...upRes.headers };
+          delete headers['content-range'];
+          if (!headers['content-length']) headers['content-length'] = covered[2];
+          note('debug', `整段 Range 当整份处理（${covered[2]} 字节）: ${String(req.url).slice(0, 100)}`);
+        }
+      }
+      const statusOf = () => statusOverride || upRes.statusCode || 502;
+
+      /** 写响应头 + 转发正文：所有分支的收尾都走这里，语义与以前逐字一致 */
+      const passThrough = (extraHeaders, cached) => {
         try {
-          const urlPath = String(upRes.req?.path || '');
-          const hashedAsset =
-            urlPath.startsWith('/plugins/') || urlPath.startsWith('/assets/') || /[?&]rev=/.test(urlPath);
-          const ok = (upRes.statusCode || 0) === 200 || (upRes.statusCode || 0) === 206;
-          if (hashedAsset && ok && !headers['cache-control']) {
-            headers = { ...headers, 'cache-control': 'public, max-age=31536000, immutable' };
-          }
-        } catch { /* 加缓存头失败也照常转发 */ }
-        res.writeHead(upRes.statusCode || 502, headers);
-      } catch (err) {
-        dropUpstream(`写响应头失败: ${err?.message}`);
-        return;
+          res.writeHead(statusOf(), extraHeaders);
+        } catch (err) {
+          dropUpstream(`写响应头失败: ${err?.message}`);
+          return;
+        }
+        // 用 pipeline 而不是 pipe：上游半路断掉时它会**同时收掉下游**。
+        // 只 pipe 的话，上游 socket 被 destroy 只会让 upRes 发个 error，而 res 既不 end 也不 destroy，
+        // 手机端就一直挂在那个残缺响应上等（这正是「壁纸卡着不动」的一种收尾形态）。
+        // 它同样可能同步抛，所以外面再兜一层 try/catch —— 这条路径绝不能把异常放出请求回调。
+        try {
+          pipeline(upRes, res, (err) => {
+            finishTraffic(cached);
+            if (!err) return;
+            note('debug', `转发中断（下游一起收掉，别让手机挂着）: ${err?.message}`);
+          });
+          // 记账监听挂在 pipe 之后：先挂 data 会让流提前进入 flowing 模式，首块有丢的风险
+          upRes.on('data', (chunk) => { bytesOut += chunk?.length ?? 0; });
+          upRes.on('end', () => finishTraffic(cached));
+          upRes.on('close', () => finishTraffic(cached));
+        } catch (err) {
+          finishTraffic(cached);
+          dropUpstream(`无法建立转发: ${err?.message}`);
+        }
+      };
+
+      // ---------------------------------------------------------------- 手机端缓存
+      //
+      // 缓存头只在「上游没给任何缓存口径」时补；带 Range 的请求一般不碰
+      // （那是 `<video>` 在拖进度，206 不该被当成一份完整副本留在缓存里）——
+      // 唯一的例外是上面把「从 0 到结尾」改写成整份 200 的那一种，那时它确实就是一份完整的。
+      const noRange = req.headers.range === undefined || rangedAsFull;
+      let plan = null;
+      try {
+        if (noRange) {
+          plan = cachePlanOf({ url: req.url, status: statusOf(), method: req.method, headers, cfg });
+        }
+      } catch { plan = null; }
+
+      // override 模式下先卡大小：小于 64 KB 的（例如每秒来一次的实时小端点）不碰。
+      // 长度已知时当场判；长度未知时留给探针判（见下面 fingerprint 分支）。
+      if (plan && plan.mode === 'override' && Number.isFinite(plan.size) && plan.size < CACHE_BINARY_MIN_BYTES) {
+        plan = null;
       }
 
-      // 用 pipeline 而不是 pipe：上游半路断掉时它会**同时收掉下游**。
-      // 只 pipe 的话，上游 socket 被 destroy 只会让 upRes 发个 error，而 res 既不 end 也不 destroy，
-      // 手机端就一直挂在那个残缺响应上等（这正是「壁纸卡着不动」的一种收尾形态）。
-      // 它同样可能同步抛，所以外面再兜一层 try/catch —— 这条路径绝不能把异常放出请求回调。
       try {
-        pipeline(upRes, res, (err) => {
-          if (!err) return;
-          note('debug', `转发中断（下游一起收掉，别让手机挂着）: ${err?.message}`);
-        });
+        if (plan && (plan.mode === 'fingerprint' || plan.mode === 'override') && plan.size <= CACHE_INLINE_MAX_BYTES) {
+          // 小资源：缓冲整份算精确校验器（顺手就能把条件请求答掉）
+          const whole = await readWhole(upRes, CACHE_INLINE_MAX_BYTES);
+          if (res.destroyed || res.writableEnded) {
+            dropUpstream('res 已销毁（缓冲小资源时）');
+            return;
+          }
+          if (whole.ok) {
+            const etag = inlineEtagOf(whole.body.length, headers['content-type'], whole.body);
+            if (cacheStats) {
+              if (plan.mode === 'override') cacheStats.override += 1;
+              else cacheStats.inline += 1;
+            }
+            noteCacheDecision(cacheStats, req.url, plan.mode === 'override' ? 'override' : 'inline');
+            if (etagTokensOf(req.headers['if-none-match']).includes(etag.replace(/^W\//i, ''))) {
+              if (cacheStats) cacheStats.notModified += 1;
+              sendNotModified(res, plan, etag);
+              return;
+            }
+            try {
+              res.writeHead(statusOf(), { ...headers, etag, 'cache-control': ttlHeaderOf(plan) });
+              res.end(whole.body);
+              bytesOut += whole.body.length;
+              finishTraffic(true);
+            } catch (err) {
+              note('debug', `回缓冲的小资源失败: ${err?.message}`);
+              finishTraffic(true);
+            }
+            return;
+          }
+          // 上游比声明的还长 / 中途断了：已读到的那段照发，剩下的继续转发（不猜校验器）
+          note('debug', '小资源超过缓冲上限，改回普通转发');
+          try {
+            res.writeHead(statusOf(), { ...headers, 'cache-control': ttlHeaderOf(plan) });
+            if (whole.part.length) { res.write(whole.part); bytesOut += whole.part.length; }
+          } catch (err) {
+            dropUpstream(`写响应头失败: ${err?.message}`);
+            finishTraffic(true);
+            return;
+          }
+          try {
+            pipeline(upRes, res, () => finishTraffic(true));
+            upRes.on('data', (chunk) => { bytesOut += chunk?.length ?? 0; });
+            upRes.on('end', () => finishTraffic(true));
+            upRes.on('close', () => finishTraffic(true));
+          } catch (err) {
+            dropUpstream(`无法建立转发: ${err?.message}`);
+            finishTraffic(true);
+          }
+          return;
+        }
+
+        if (plan && (plan.mode === 'fingerprint' || plan.mode === 'override')) {
+          // 大资源：只取首/尾各 64 KB 做指纹 —— 不整份哈希、不落盘
+          const probe = cfg.cacheProbe !== false ? await probeFingerprint(req.url, req.headers.host) : null;
+          // override 模式下用探针把「小的实时端点」挡在外面：
+          //   · 读完了才知道它小于 64 KB（分块传输没有长度头，这就是唯一可靠判据）；
+          //   · 或者长度明确且不足 64 KB。
+          const overrideTooSmall = plan.mode === 'override' && probe && probe.ok
+            && probe.head.length < CACHE_PROBE_BYTES
+            && (probe.complete === true || (Number.isFinite(probe.len) && probe.len < CACHE_BINARY_MIN_BYTES));
+          if (overrideTooSmall) {
+            note('debug', `no-store 的小响应不缓存（${probe.len} 字节）: ${String(req.url).slice(0, 90)}`);
+          } else if (probe && probe.ok) {
+            const etag = fingerprintEtagOf(probe);
+            if (cacheStats) {
+              if (plan.mode === 'override') cacheStats.override += 1;
+              else cacheStats.probe += 1;
+            }
+            noteCacheDecision(cacheStats, req.url, plan.mode === 'override' ? 'override' : 'fingerprint');
+            if (etagTokensOf(req.headers['if-none-match']).includes(etag.replace(/^W\//i, ''))) {
+              if (cacheStats) cacheStats.notModified += 1;
+              note('debug', `手机端缓存仍然有效 → 304（零字节）: ${String(req.url).slice(0, 120)}`);
+              dropUpstream('已判定 304，这份正文不用了', 'cache');
+              sendNotModified(res, plan, etag);
+              finishTraffic(true);
+              return;
+            }
+            headers = { ...headers, etag, 'cache-control': ttlHeaderOf(plan) };
+          } else if (plan.mode === 'override') {
+            // 探针没成功：override 是逆着上游意愿来的，没有大小证据就不动它（保持上游的 no-store）
+            if (cacheStats) cacheStats.probeFail += 1;
+          } else {
+            // 普通路线：探针失败也至少把新鲜期补上，期内不再重传
+            if (cacheStats) cacheStats.probeFail += 1;
+            headers = { ...headers, 'cache-control': ttlHeaderOf(plan) };
+          }
+          if (cacheStats && !overrideTooSmall) cacheStats.ttl += 1;
+        } else if (plan && plan.mode === 'immutable') {
+          // 内容寻址：URL 里的哈希就是内容身份，一年不用再问
+          if (cacheStats) cacheStats.immutable += 1;
+          noteCacheDecision(cacheStats, req.url, 'immutable');
+          headers = { ...headers, 'cache-control': CACHE_IMMUTABLE };
+        } else if (plan && plan.mode === 'validated') {
+          // 上游自己有校验器：只补新鲜期，条件请求仍由上游回答
+          if (cacheStats) cacheStats.validated += 1;
+          noteCacheDecision(cacheStats, req.url, 'validated');
+          headers = { ...headers, 'cache-control': ttlHeaderOf(plan) };
+        }
       } catch (err) {
-        dropUpstream(`无法建立转发: ${err?.message}`);
+        // 缓存这条路怎么错都不该影响转发：退回上游原样
+        note('warn', `加缓存头失败（照常转发）: ${err?.message}`);
+        headers = upRes.headers;
       }
+
+      // 这一份到底带没带缓存口径：我们补了 / 上游本来就有 max-age → 手机下次可以不问；
+      // 两样都没有 → 它下次还得整份重传（记账里那一列就是「还会重传的字节」，并附一句原因）
+      const sentCacheControl = String(headers['cache-control'] ?? '');
+      const cachedNow = sentCacheControl.includes('max-age') || sentCacheControl.includes('immutable');
+      if (!cachedNow) {
+        try {
+          skipReason = cacheSkipReason({
+            url: req.url,
+            status: statusOf(),
+            method: req.method,
+            headers: upRes.headers,
+            cfg,
+            range: req.headers.range,
+          });
+        } catch { skipReason = ''; }
+      }
+      passThrough(headers, cachedNow);
+    };
+
+    const onUpstream = (upRes) => {
+      handleUpstream(upRes).catch((err) => {
+        note('error', `处理上游响应时抛出异常（已兜住）: ${err?.stack ?? err}`);
+        finishTraffic(false);
+        try { upRes.destroy(); } catch { /* 已经断了 */ }
+        if (!res.headersSent) {
+          try { res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' }); res.end('502 bad gateway\n'); } catch { /* 已经断了 */ }
+        } else {
+          try { res.destroy(); } catch { /* 已经断了 */ }
+        }
+      });
     };
 
     const upReq = http.request(options, onUpstream);
@@ -1035,8 +1849,12 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
       note('debug', `等上游响应头超时（${options.timeout || 'agent 默认'}ms）`);
       upReq.destroy(new Error('upstream timeout'));
     });
-    upReq.on('error', failUpstream);
+    upReq.on('error', (err) => { finishTraffic(false); failUpstream(err); });
     req.pipe(upReq);
+    // 入向字节（上传、JSON RPC 也有量）：监听挂在 pipe 之后，理由与上面一样。
+    // ⚠️ **不要**在这里挂 `req.on('end'/'close')` 去结账：GET 的请求体是空的，会**立刻** end，
+    // 于是账在正文还没发出去时就结掉了（字节数全是 0）。结账只由响应那一侧负责。
+    req.on('data', countIn);
   }
 
   server.on('connection', (socket) => {
@@ -1085,6 +1903,23 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice) {
       if (head && head.length) upstream.write(head);
       socket.pipe(upstream);
       upstream.pipe(socket);
+      // WebSocket 也要记账，而且**按通道分开**：重进页面时会话状态与聊天图片是从这里推下来的，
+      // HTTP 缓存一条都帮不上忙 —— 「退出重进还是大流量」的答案经常就在这几行。
+      if (trafficStats) {
+        const wsKey = `WS ${String(req.url).split('?')[0]}`;
+        let wsIn = 0;
+        let wsOut = 0;
+        let wsFlushed = false;
+        socket.on('data', (chunk) => { const n = chunk?.length ?? 0; wsIn += n; trafficStats.wsIn += n; });
+        upstream.on('data', (chunk) => { const n = chunk?.length ?? 0; wsOut += n; trafficStats.wsOut += n; });
+        const flushWs = () => {
+          if (wsFlushed) return;
+          wsFlushed = true;
+          noteTraffic(trafficStats, wsKey, wsIn, wsOut, true);
+        };
+        socket.on('close', flushWs);
+        upstream.on('close', flushWs);
+      }
     });
     upstream.on('error', (err) => {
       note('debug', `WebSocket 上游失败: ${err?.message}`);
@@ -1230,6 +2065,10 @@ export function apply(ctx, config) {
   let bansCheckedAt = 0;
   /** 待答选择 + 电脑窗口可见性：安卓外壳靠它决定要不要弹状态栏通知 */
   const choice = createChoiceCenter();
+  /** 手机端缓存的计数（只进状态文件与设置页自检；宿主不缓存任何正文） */
+  const cacheStats = createCacheStats();
+  /** 流量账：按 URL 记字节，用来回答「大流量到底花在哪儿」（只进内存，不落盘） */
+  const trafficStats = createTrafficStats();
 
   function render() {
     return [
@@ -1247,11 +2086,47 @@ export function apply(ctx, config) {
           : '(无)'
       }`,
       `放行密钥: ${secretPathOf(cfg)}（改密码不会踢人；想让所有设备重新输密码就删掉它）`,
+      `手机端缓存: ${(() => {
+        if (cfg.cacheEnabled === false) return '已关闭（cacheEnabled=false）';
+        return (
+          `内容寻址 immutable · 无校验器 ${cfg.cacheTtlMinutes} 分钟（SWR ${CACHE_SWR_SECONDS / 3600} 小时）· ` +
+          `指纹探针${cfg.cacheProbe === false ? '关' : '开'} · 正文一律不落宿主盘`
+        );
+      })()}`,
+      `缓存计数: immutable ${cacheStats.immutable} · 有校验器 ${cacheStats.validated} · ` +
+        `无校验器 ${cacheStats.ttl}（小资源缓冲 ${cacheStats.inline}，探针 ${cacheStats.probe}，探针失败 ${cacheStats.probeFail}）· ` +
+        `回给手机的 304 ${cacheStats.notModified} 次`,
+      // 流量账：排查「退出重进还是大流量」就看这几行 —— 谁在重传、重传了多少字节
+      ...(() => {
+        const t = trafficView(trafficStats, 5);
+        const lines = [
+          `流量账（自 ${new Date(t.since).toISOString()}）: 送出 ${humanBytes(t.totalOut)}` +
+            `（其中没有缓存口径的 ${humanBytes(t.uncachedOut)}）· 收到 ${humanBytes(t.totalIn)}` +
+            ` · WebSocket 送 ${humanBytes(t.wsOut)} / 收 ${humanBytes(t.wsIn)}`,
+        ];
+        for (const row of t.top) {
+          lines.push(
+            `  送出 ${humanBytes(row.out)}（${row.hits} 次${row.cached === row.hits ? '，都带缓存口径' : `，其中 ${row.hits - row.cached} 次没带`}）  ${row.key}` +
+              `${row.reason ? ` —— ${row.reason}` : ''}`,
+          );
+        }
+        if (t.top.length === 0) lines.push('  （还没有流量记录）');
+        return lines;
+      })(),
       `待答选择: ${
         cfg.notifyOnChoice
           ? `${choice.pendingCount()} 条（安卓 App 在后台时会收到状态栏通知）`
           : '通知已关闭（notifyOnChoice=false）'
       }`,
+      `一轮结束: ${(() => {
+        const last = choice.finish();
+        const flag = cfg.notifyOnFinish ? '会通知手机' : '通知已关闭（notifyOnFinish=false）';
+        if (!last) return `还没有结束过（${flag}）`;
+        const when = new Date(last.at).toISOString();
+        return last.ok
+          ? `最近一次：正常跑完（${Math.max(1, Math.round((last.ms || 0) / 1000))} 秒，${when}）· ${flag}`
+          : `最近一次：异常结束 —— ${last.reason}：${last.message}（${when}）· ${flag}`;
+      })()}`,
       `电脑窗口: ${(() => {
         const d = choice.desktopView();
         if (!d.known) return '未知（本机页面没回报过 → 手机端一律按不可见处理）';
@@ -1365,6 +2240,116 @@ export function apply(ctx, config) {
     }
   } catch (err) {
     note('warn', `挂「待答选择」监听失败: ${err?.message}`);
+  }
+
+  // ---------------------------------------------------------------- 一轮结束的通知（正常 / 异常）
+  //
+  // 事件来自 DSH 自己，不是我们猜的：
+  //   · `agent/status`  payload `{ agent, status }` —— running ↔ idle；running→idle 就是「这一轮跑完了」。
+  //     主 agent 与子 agent 都会发，用 `agent.id === agent.session.id` 只认主 agent（子 agent 结束不打扰你）。
+  //   · `agent/error`   payload `{ agent, turn, step, error }` —— 异常结束，一次拿到错误对象，
+  //     按 DSH 自己的错误码分类（见 describeAgentError）。
+  //
+  // 为什么要防抖：循环里 `running → maintenance` 也会被映射成 idle（maintenance 期间的 status 也是 idle），
+  // 所以不能一收到 idle 就报「跑完了」。真结束会一直是 idle；中间抖一下的，紧接着的 running 会把它取消。
+  const FINISH_DEBOUNCE_MS = 2000;
+  let finishTimer = null;
+  let runStartedAt = 0;
+  let runError = null;
+  /**
+   * 这一轮有没有真的 `running` 过。
+   *
+   * 为什么必须有它：`agent/status` 不保证「running → idle」只出现一次 —— 中间态（维护 / 压缩、
+   * 以及紧接着又跑一轮）都可能再发一次 idle；只防计时器的话，**一次消息会报两次「结束」**，
+   * 手机上就是「一条消息弹两回」。现在的规矩很硬：**一次 running 只兑现一次结束**，
+   * 没有 running 过的 idle 一律忽略。
+   */
+  let runActive = false;
+
+  /** 只认主 agent：子 agent 有自己的 id，不拿 session.id 当 id */
+  function isMainAgent(agent) {
+    try {
+      return Boolean(agent && agent.session && agent.id === agent.session.id);
+    } catch {
+      return false;
+    }
+  }
+
+  function publishFinish() {
+    const ms = runStartedAt > 0 ? Date.now() - runStartedAt : 0;
+    const error = runError;
+    runStartedAt = 0;
+    runError = null;
+    runActive = false;
+    const record = error
+      ? choice.reportFinish({ ok: false, reason: error.reason, message: error.detail, ms })
+      : choice.reportFinish({ ok: true, ms });
+    if (cfg.notifyOnFinish) {
+      note(
+        'info',
+        error
+          ? `一轮异常结束（${error.reason}）：${error.detail} → 已让手机端提醒`
+          : `一轮正常结束（用时 ${Math.max(1, Math.round(ms / 1000))} 秒）→ 已让手机端提醒`,
+      );
+    }
+    return record;
+  }
+
+  try {
+    if (typeof ctx?.on === 'function') {
+      ctx.on('agent/status', (payload) => {
+        try {
+          const agent = payload?.agent;
+          if (!isMainAgent(agent)) return;
+          const status = String(payload?.status ?? '');
+          if (status === 'running') {
+            // 新的一轮开始：清掉上一轮的残留，并取消还没落地的「结束」
+            runStartedAt = Date.now();
+            runActive = true;
+            runError = null;
+            if (finishTimer) {
+              clearTimeout(finishTimer);
+              finishTimer = null;
+            }
+            return;
+          }
+          if (status !== 'idle') return;
+          if (!runActive) return; // 没有 running 过的 idle：中间态，不是「跑完了」
+          if (finishTimer) clearTimeout(finishTimer);
+          finishTimer = setTimeout(() => {
+            finishTimer = null;
+            if (!runActive) return; // 这两秒里又跑起来了 → 这一条不算结束
+            try { publishFinish(); } catch (err) { note('warn', `报「一轮结束」失败: ${err?.message}`); }
+          }, FINISH_DEBOUNCE_MS);
+          finishTimer.unref?.();
+        } catch (err) {
+          note('warn', `处理 agent/status 失败（不影响运行）: ${err?.message}`);
+        }
+      });
+      // 只记第一个错误：后面的多半是它的连锁反应（重试、收尾），报一串只会更糊涂
+      ctx.on('agent/error', (payload) => {
+        try {
+          const agent = payload?.agent;
+          if (!isMainAgent(agent)) return;
+          if (!runError) runError = describeAgentError(payload?.error);
+        } catch (err) {
+          note('warn', `处理 agent/error 失败（不影响运行）: ${err?.message}`);
+        }
+      });
+      note('debug', '已挂上 agent/status 与 agent/error：一轮结束（正常 / 异常）时通知手机');
+    } else {
+      note('debug', '这个上下文没有 ctx.on，一轮结束不会通知手机');
+    }
+    if (typeof ctx?.effect === 'function') {
+      ctx.effect(() => () => {
+        if (finishTimer) {
+          clearTimeout(finishTimer);
+          finishTimer = null;
+        }
+      });
+    }
+  } catch (err) {
+    note('warn', `挂「一轮结束」监听失败: ${err?.message}`);
   }
 
   /**
@@ -1622,7 +2607,7 @@ export function apply(ctx, config) {
             urls.push(mintUrl(ticket, boundAddr, port));
             if (cfg.printUrl) note('info', `远程访问网址: ${urls[urls.length - 1]}`);
             flush();
-          }, gate, choice),
+          }, gate, choice, cacheStats, trafficStats),
         );
       } catch (err) {
         note('error', `启动 ${addr} 失败: ${err?.message}`);

@@ -198,22 +198,25 @@ check(
   String(footerOf()).includes('还没有通知接口') && String(footerOf()).includes('更新插件'),
   String(footerOf()),
 );
-globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false }, phone: { app: pkgVersion, notifications: true, importance: 4 } }) });
+globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false }, phone: { app: pkgVersion, notifications: true, importance: 4, importanceFinish: 4 } }) });
 remount();
 await sleep(40);
 check(
-  '手机页面：宿主支持时报「已支持提问通知」，并带上手机端自报的横幅状态',
+  '手机页面：宿主支持时报「已支持提问通知」，并带上手机端自报的两个通道状态',
   String(footerOf()).includes('已支持提问通知') &&
     String(footerOf()).includes(`手机端 App ${pkgVersion}`) &&
-    String(footerOf()).includes('横幅通道=高'),
+    String(footerOf()).includes('提问通道=4') &&
+    String(footerOf()).includes('结束通道=4'),
   String(footerOf()),
 );
-globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false }, phone: { app: pkgVersion, notifications: true, importance: 2 } }) });
+globalThis.window.fetch = async () => ({ status: 200, ok: true, json: async () => ({ ok: true, enabled: true, pending: [], desktop: { known: false, visible: false }, phone: { app: pkgVersion, notifications: true, importance: 2, importanceFinish: 2 } }) });
 remount();
 await sleep(40);
 check(
-  '手机页面：横幅通道被调低时，页脚直接说「弹不出来」',
-  String(footerOf()).includes('横幅通道=2') && String(footerOf()).includes('弹不出来'),
+  '手机页面：任一通道被调低时，页脚直接说「弹不出来」（两个通道分开报）',
+  String(footerOf()).includes('提问通道=2') &&
+    String(footerOf()).includes('结束通道=2') &&
+    (String(footerOf()).match(/弹不出来/g) ?? []).length === 2,
   String(footerOf()),
 );
 delete globalThis.window.fetch;
@@ -701,6 +704,169 @@ check(
   JSON.stringify(mutateCalls[0]?.ops ?? null),
 );
 
+// 「缓存」这一层下一级菜单：同样默认收起；那一行自检只在**展开时**才去问宿主（平时零请求）
+const cacheHeader = flatten(tree).find((n) => n?.type === 'button' && String(n?.props?.children ?? '').includes('缓存'));
+check(
+  '设置页有「缓存」这一层下一级菜单（默认收起，不铺满一屏）',
+  cacheHeader !== undefined && cacheHeader.props['aria-expanded'] === 'false' && byKey(tree, 'cacheEnabled-i') === undefined,
+  cacheHeader ? `aria-expanded=${cacheHeader.props['aria-expanded']}` : '(没有这一组)',
+);
+
+const cacheFetches = [];
+globalThis.window.fetch = async (url) => {
+  cacheFetches.push(String(url));
+  return {
+    status: 200,
+    ok: true,
+    json: async () => ({
+      ok: true,
+      policy: {
+        enabled: true,
+        ttlMinutes: 10,
+        swrHours: 12,
+        probe: true,
+        storesOnHost: false,
+        honorsNoStore: false,
+        overrideNoStore: true,
+        overrideRange: true,
+      },
+      stats: { immutable: 3, validated: 1, ttl: 12, notModified: 4, inline: 2, probe: 5, probeFail: 0, override: 2 },
+      recent: [],
+      // 流量账：组合包那类响应是 DSH 自己发的 immutable，缓存计数看不见它们 —— 只能靠这里的字节数
+      traffic: {
+        since: 0,
+        totalIn: 2048,
+        totalOut: 1258291,
+        wsIn: 4096,
+        wsOut: 629145,
+        uncachedOut: 1048576,
+        top: [
+          { key: 'GET /plugins/', hits: 3, in: 0, out: 1180000, cached: 2 },
+          { key: 'GET /wallpaper/big.jpg', hits: 2, in: 0, out: 614400, cached: 2 },
+          { key: 'GET /wallpaper-engine/scene-audio/xyz', hits: 2, in: 0, out: 3986490, cached: 0, reason: '带 Range 的分段请求（bytes=0-；浏览器不缓存 206）' },
+        ],
+      },
+    }),
+  };
+};
+cacheHeader.props.onClick();
+await sleep(40);
+const cacheTexts = flatten(tree).map((n) => String(n?.props?.children ?? ''));
+check(
+  '设置页：主区按「服务 / 访问控制 / 手机通知 / 远程界面」分节（读起来像配置清单）',
+  ['服务', '访问控制', '手机通知', '远程界面'].every((title) => cacheTexts.includes(title)),
+  cacheTexts.filter((t) => ['服务', '访问控制', '手机通知', '远程界面'].includes(t)).join(' | '),
+);
+check(
+  '设置页：字段下面带一行小字说明（不再把全部解释塞进 placeholder）',
+  cacheTexts.some((t) => t.includes('关掉即停止监听')) &&
+    cacheTexts.some((t) => t.includes('只有点「发送」才发送')) &&
+    cacheTexts.some((t) => t.includes('输错一次即拉黑该地址')),
+  cacheTexts.filter((t) => t.includes('拉黑') || t.includes('停止监听')).join(' | '),
+);
+check(
+  '缓存：展开后才显示四个字段（启用 / 新鲜期 / 片段核对 / no-store / 整段 Range）',
+  ['cacheEnabled', 'cacheTtlMinutes', 'cacheProbe', 'cacheOverrideNoStore', 'cacheFullRange'].every(
+    (key) => byKey(tree, `${key}-i`) !== undefined,
+  ),
+  ['cacheEnabled', 'cacheTtlMinutes', 'cacheProbe', 'cacheOverrideNoStore', 'cacheFullRange']
+    .map((k) => `${k}=${byKey(tree, `${k}-i`) !== undefined}`)
+    .join(' '),
+);
+check(
+  '缓存：自检那行说出实际口径与本次计数（304 次数直接可见）',
+  cacheFetches.length === 1 &&
+    cacheFetches[0].includes('/__remote_access__/cache') &&
+    cacheTexts.some((t) => t.includes('immutable') && t.includes('10 分钟') && t.includes('304 4 次')),
+  cacheFetches.join(',') || '(没发请求)',
+);
+check(
+  '缓存：那行还带本轮流量（送出 / 无缓存口径 / WebSocket）',
+  cacheTexts.some((t) => t.includes('本轮送出 1.20 MB') && t.includes('其中无缓存口径 1.00 MB') && t.includes('WebSocket 614.4 KB')),
+  cacheTexts.find((t) => t.includes('本轮送出')) ?? '(没有)',
+);
+// 三块小标题：生效策略 / 本次会话 / 本轮流量账 —— 展开后是「报告」的样子，不是一坨字
+check(
+  '缓存：展开后分成「生效策略 / 本次会话 / 本轮流量账」三块',
+  ['生效策略', '本次会话', '本轮流量账（按 URL 排字节）'].every((t) => cacheTexts.includes(t)),
+  cacheTexts.filter((t) => t.includes('生效') || t.includes('本次') || t.includes('流量账')).join(' | '),
+);
+check(
+  '缓存：策略那几行把两个开关的实际状态写出来（开 · 已接管 / 关 · 尊重上游）',
+  cacheTexts.filter((t) => t === '开 · 已接管').length === 2 &&
+    cacheTexts.includes('首/尾各 64 KB 片段指纹') &&
+    cacheTexts.includes('不落宿主盘（零字节）'),
+  cacheTexts.filter((t) => t.includes('接管') || t.includes('零字节')).join(' | '),
+);
+check(
+  '缓存：本次会话把 304 / 小资源 / 探针 / 接管 都列出来',
+  cacheTexts.includes('4 次') &&
+    cacheTexts.includes('2 次') &&
+    cacheTexts.includes('5 次（失败 0）') &&
+    cacheTexts.includes('304（零字节）'),
+  cacheTexts.filter((t) => t.endsWith('次') || t.endsWith('次）')).join(' | '),
+);
+check(
+  '缓存：流量账是一张表（表头 + 字节/次数/URL 三列），并按字节从多到少排',
+  cacheTexts.includes('送出') &&
+    cacheTexts.includes('次数') &&
+    cacheTexts.includes('URL') &&
+    cacheTexts.includes('3.80 MB') &&
+    cacheTexts.includes('1.13 MB') &&
+    cacheTexts.some((t) => t.includes('GET /plugins/')) &&
+    cacheTexts.some((t) => t.includes('GET /wallpaper-engine/scene-audio/xyz')),
+  cacheTexts.filter((t) => /MB|KB|GET |B$/.test(t)).slice(0, 8).join(' | '),
+);
+check(
+  '缓存：没带缓存口径的那几行会写明「下次仍会重传」与具体原因',
+  cacheTexts.some((t) => t.includes('1 次无缓存口径 → 下次仍会重传')) &&
+    cacheTexts.some((t) => t.includes('原因：带 Range 的分段请求（bytes=0-；浏览器不缓存 206）')),
+  cacheTexts.filter((t) => t.includes('原因：') || t.includes('无缓存口径')).join(' | '),
+);
+// 「刷新 / 清零本轮统计」两个按钮：清零后走一遍，回来这几行就是那一轮的真实花费
+const refreshButton = buttons(tree).find((b) => textOf(b) === '刷新');
+const resetButton = buttons(tree).find((b) => textOf(b) === '清零本轮统计');
+check(
+  '缓存：有「刷新」与「清零本轮统计」两个按钮（按钮文案与说明分开写）',
+  refreshButton !== undefined && resetButton !== undefined,
+  buttons(tree).map((b) => textOf(b)).join(' | '),
+);
+globalThis.window.fetch = async (url) => {
+  cacheFetches.push(String(url));
+  return { status: 200, ok: true, json: async () => ({ ok: true, policy: {}, stats: {}, traffic: { totalOut: 0, totalIn: 0, wsOut: 0, wsIn: 0, uncachedOut: 0, top: [] } }) };
+};
+resetButton.props.onClick();
+await sleep(40);
+check(
+  '缓存：点「清零本轮统计」会带 ?reset=1 再读一次',
+  cacheFetches.some((url) => url.includes('reset=1')),
+  cacheFetches.join(','),
+);
+// 收起再展开不该重复问（只在展开那一刻读一次）
+const cacheFetchesAfterFirst = cacheFetches.length;
+cacheHeader.props.onClick();
+await sleep(10);
+flatten(tree).find((n) => n?.type === 'button' && String(n?.props?.children ?? '').includes('缓存')).props.onClick();
+await sleep(30);
+check(
+  '缓存：收起再展开才再读一次（收起状态零请求）',
+  cacheFetches.length === cacheFetchesAfterFirst + 1,
+  `${cacheFetchesAfterFirst} → ${cacheFetches.length}`,
+);
+// 宿主还没有这个接口（老版本）→ 说清「更新插件」，别含糊
+globalThis.window.fetch = async () => ({ status: 404, ok: false, json: async () => null });
+react.resetAll();
+tree = Panel();
+await sleep(60);
+flatten(tree).find((n) => n?.type === 'button' && String(n?.props?.children ?? '').includes('缓存')).props.onClick();
+await sleep(40);
+check(
+  '缓存：宿主没有缓存接口时说清「更新插件并重启」',
+  flatten(tree).some((n) => String(n?.props?.children ?? '').includes('还没有缓存接口')),
+  flatten(tree).map((n) => String(n?.props?.children ?? '')).find((t) => t.includes('缓存')) ?? '(没有)',
+);
+delete globalThis.window.fetch;
+
 // ---------------------------------------------------------------- 场景六：返回键（只给手机布局）
 //
 // 安卓外壳（android/MainActivity）把系统返回键接管了：网页上那一下返回键，外壳会先问这里
@@ -767,6 +933,14 @@ function makeBackEl(tag, attrs = {}) {
     removeEventListener() {},
     appendChild(c) { c.parentElement = this; this.children.push(c); return c; },
     closest(sel) { for (let n = this; n; n = n.parentElement) if (matchesSelector(n, sel)) return n; return null; },
+    // 编辑器桩子：插换行那三条路都要往它身上派事件；`onEvent` 让测试扮演 Lexical（收到
+    // beforeinput/insertLineBreak 或 shift+回车就往 textContent 里加一个换行）
+    dispatchEvent(ev) {
+      this.events = this.events ?? [];
+      this.events.push(ev);
+      if (typeof this.onEvent === 'function') this.onEvent(ev);
+      return true;
+    },
     getBoundingClientRect() { return this._box; },
     click() { this.clicks += 1; },
     querySelector(sel) { return descendants(this).find((e) => matchesSelector(e, sel)) ?? null; },
@@ -781,7 +955,7 @@ function makeBackEl(tag, attrs = {}) {
 }
 
 /** 造一个够布局控制器 + 返回键 API + 手势用的 DOM；返回里面的关键元素，方便断言 */
-function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {} } = {}) {
+function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {}, coarse = false } = {}) {
   globalThis.Element = class Element {}; // 手势判定的 `instanceof Element` 需要它
   const html = makeBackEl('html');
   const head = makeBackEl('head');
@@ -831,7 +1005,11 @@ function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {} } = {})
   globalThis.MutationObserver = class { observe() {} disconnect() {} };
   globalThis.KeyboardEvent = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
   globalThis.window.matchMedia = (query) => ({
-    matches: /max-width/.test(query) ? width <= Number(/max-width:\s*(\d+)/.exec(query)[1]) : false,
+    matches: /max-width/.test(query)
+      ? width <= Number(/max-width:\s*(\d+)/.exec(query)[1])
+      : /pointer:\s*coarse/.test(query)
+        ? coarse
+        : false,
     addEventListener() {},
     removeEventListener() {},
   });
@@ -864,7 +1042,7 @@ function installBackDom({ width = 390, drawerOpen = true, bodyAttrs = {} } = {})
 }
 
 /** 只挂布局控制器，并把它的清理函数抓出来（返回 stop()，selectPanel 的调用记在 stop.calls 上） */
-function applyBackController({ isLoopback, remoteLayout, activePanel = null, withLayout = true }) {
+function applyBackController({ isLoopback, remoteLayout, activePanel = null, withLayout = true, phoneEnterNewline = true }) {
   // ctx.effect 的契约：回调可以「返回一个清理函数」，停用时由宿主执行。
   // 插件里注册了不止一个 effect，所以这里要全收着，停用时按同样的规矩跑。
   const effects = [];
@@ -890,7 +1068,7 @@ function applyBackController({ isLoopback, remoteLayout, activePanel = null, wit
       settings: {
         describe: async () => ({
           ok: true,
-          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { remoteLayout }, revision: 1 }] },
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { remoteLayout, phoneEnterNewline }, revision: 1 }] },
         }),
         mutate: async () => ({ ok: true, value: {} }),
       },
@@ -1174,6 +1352,288 @@ check(
     (stopRowDom.docListeners.get('click')?.size ?? 0) === 0 &&
     (stopRowDom.docListeners.get('focusin')?.size ?? 0) === 0,
   `按住了=${wasHeld} inert=${stopRowDom.composer.inert} 监听=${stopRowDom.docListeners.get('click')?.size ?? 0}`,
+);
+
+// ---------------------------------------------------------------- 场景八：手机端回车 = 换行（不发送）
+//
+// 官方把「回车发送」挂在那棵 Lexical 编辑器上（冒泡阶段）。我们在 document 的捕获阶段先吃掉它，
+// 再自己插一个换行。这一节要钉住的是三件事：
+//   1. 手机端的裸回车被吃掉（preventDefault + stopPropagation），并且真的插了换行；
+//   2. Shift/Ctrl/Cmd/Alt、输入法合成、别的输入框、电脑布局 —— 一条都不能误伤；
+//   3. 本机页面与「关掉这个开关」的页面都不装监听。
+
+/** 造一个带主输入框的 DOM；输入框自己扮演 Lexical（收到换行指令就往 textContent 里加 \n） */
+function installComposerDom({ width = 390, coarse = false } = {}) {
+  const dom = installBackDom({ width, drawerOpen: false, coarse });
+  const composer = dom.makeBackEl('div', { 'data-composer-input': '' });
+  composer.textContent = '写点什么';
+  composer.onEvent = (ev) => {
+    // 扮演编辑器：beforeinput(insertLineBreak)、execCommand 的等价路径、以及 shift+回车，
+    // 三种做法都当作「插入了一个换行」—— 插件只要有一条走通就不该再往下试
+    const isBreak = (ev.type === 'beforeinput' && ev.inputType === 'insertLineBreak') ||
+      (ev.type === 'keydown' && ev.shiftKey === true && ev.key === 'Enter');
+    if (isBreak) composer.textContent += '\n';
+  };
+  dom.body.appendChild(composer);
+  const outside = dom.makeBackEl('input', {});
+  dom.body.appendChild(outside);
+  return { ...dom, composer, outside };
+}
+
+/**
+ * 造一个**像真编辑器那样**的输入框：收到 beforeinput 就 preventDefault（Lexical 就是这么做的，
+ * `client.js:5501` 那句 `switch (e.preventDefault(), n)`），而结果**异步**落到 DOM（下一帧才 +\n）。
+ *
+ * 这正是「一次回车插出两个换行」那个 bug 的现场：插件原来用同步读 textContent 判断「插成了没有」，
+ * 异步提交让第一条路被判成没成，于是又走了第二条（execCommand），于是多出一个换行。
+ */
+function installAsyncEditorDom({ width = 390, coarse = true } = {}) {
+  const dom = installBackDom({ width, drawerOpen: false, coarse });
+  const composer = dom.makeBackEl('div', { 'data-composer-input': '' });
+  composer.textContent = '写点什么';
+  const committed = [];
+  composer.onEvent = (ev) => {
+    if (ev.type === 'beforeinput' && ev.inputType === 'insertLineBreak') {
+      // Lexical：无条件 preventDefault（同步），结果稍后提交
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      committed.push('beforeinput');
+      setTimeout(() => { composer.textContent += '\n'; }, 0);
+      return;
+    }
+    if (ev.type === 'keydown' && ev.shiftKey === true && ev.key === 'Enter') {
+      committed.push('shift+enter');
+      setTimeout(() => { composer.textContent += '\n'; }, 0);
+    }
+  };
+  dom.body.appendChild(composer);
+  return { ...dom, composer, committed };
+}
+
+/** 派一个「可取消」的合成按键事件（桩子的 fireDoc 不看捕获/冒泡，只按类型喂） */
+function keyEvent(init) {
+  return {
+    type: 'keydown',
+    key: 'Enter',
+    keyCode: 13,
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    isComposing: false,
+    defaultPrevented: false,
+    stopped: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.stopped = true; },
+    ...init,
+  };
+}
+
+// ---- 手机端主输入框：裸回车 → 吃掉 + 换行
+const enterDom = installComposerDom({ width: 390, coarse: true });
+applyBackController({ isLoopback: false, remoteLayout: 'phone', phoneEnterNewline: true });
+await sleep(80);
+const enterEvent = keyEvent({ target: enterDom.composer });
+const listeners = enterDom.fireDoc('keydown', enterEvent);
+check(
+  '回车换行：装了文档级 keydown 监听（捕获阶段）',
+  listeners >= 1,
+  `监听=${listeners}`,
+);
+check(
+  '回车换行：手机端的裸回车被吃掉（官方那条「回车发送」收不到）',
+  enterEvent.defaultPrevented === true && enterEvent.stopped === true,
+  `preventDefault=${enterEvent.defaultPrevented} stopPropagation=${enterEvent.stopped}`,
+);
+check(
+  '回车换行：换行真的插进去了（走的 beforeinput/insertLineBreak）',
+  enterDom.composer.textContent === '写点什么\n' &&
+    (enterDom.composer.events ?? []).some((ev) => ev.type === 'beforeinput' && ev.inputType === 'insertLineBreak'),
+  JSON.stringify(enterDom.composer.textContent),
+);
+
+// ---- `data-composer-input` 挂在外面一层时：事件要落到里层的 contenteditable 上（真实 DOM 里两种挂法都有）
+const wrappedDom = installComposerDom({ width: 390, coarse: true });
+const wrappedInner = wrappedDom.makeBackEl('div', { contenteditable: 'true' });
+wrappedInner.textContent = '外层宿主';
+wrappedDom.composer.appendChild(wrappedInner); // composer（带 data-composer-input）里再套一层真正的编辑器
+wrappedDom.composer.textContent = '外层宿主';
+wrappedDom.composer.onEvent = undefined;
+wrappedInner.onEvent = (ev) => {
+  if (ev.type === 'beforeinput' && ev.inputType === 'insertLineBreak') wrappedDom.composer.textContent += '\n';
+};
+applyBackController({ isLoopback: false, remoteLayout: 'phone', phoneEnterNewline: true });
+await sleep(80);
+const wrappedEvent = keyEvent({ target: wrappedDom.composer });
+wrappedDom.fireDoc('keydown', wrappedEvent);
+check(
+  '回车换行：宿主在外面一层时，事件落到里层 contenteditable（两种挂法都能插进去）',
+  wrappedEvent.defaultPrevented === true && wrappedDom.composer.textContent === '外层宿主\n',
+  JSON.stringify(wrappedDom.composer.textContent),
+);
+
+// ---- 异步提交的编辑器（真实 Lexical 的样子）：一次回车只许插**一个**换行
+//
+// 这一条是给「一次回车插出两个换行」那个 bug 立的桩：编辑器同步 preventDefault、结果下一帧才落 DOM。
+const asyncDom = installAsyncEditorDom();
+applyBackController({ isLoopback: false, remoteLayout: 'phone', phoneEnterNewline: true });
+await sleep(80);
+const asyncEvent1 = keyEvent({ target: asyncDom.composer });
+asyncDom.fireDoc('keydown', asyncEvent1);
+await sleep(20);
+check(
+  '回车换行：编辑器异步提交时也只插一个换行（preventDefault 是同步信号，不再走第二条路）',
+  asyncDom.committed.length === 1 &&
+    asyncDom.committed[0] === 'beforeinput' &&
+    asyncDom.composer.textContent === '写点什么\n',
+  `committed=${JSON.stringify(asyncDom.committed)} text=${JSON.stringify(asyncDom.composer.textContent)}`,
+);
+const asyncEvent2 = keyEvent({ target: asyncDom.composer });
+asyncDom.fireDoc('keydown', asyncEvent2);
+await sleep(20);
+check(
+  '回车换行：连按两次就是两个换行（不翻倍）',
+  asyncDom.committed.length === 2 && asyncDom.composer.textContent === '写点什么\n\n',
+  `committed=${JSON.stringify(asyncDom.committed)} text=${JSON.stringify(asyncDom.composer.textContent)}`,
+);
+
+// ---- 编辑器完全不接管 beforeinput 时，才轮到第二条路，而且只走一条
+const fallbackDom = installComposerDom({ width: 390, coarse: true });
+fallbackDom.composer.onEvent = undefined; // 谁都不认 beforeinput
+let execCalls = 0;
+globalThis.document.execCommand = (cmd) => {
+  execCalls += 1;
+  if (cmd === 'insertLineBreak') {
+    fallbackDom.composer.textContent += '\n';
+    return true;
+  }
+  return false;
+};
+applyBackController({ isLoopback: false, remoteLayout: 'phone', phoneEnterNewline: true });
+await sleep(80);
+const fallbackEvent = keyEvent({ target: fallbackDom.composer });
+fallbackDom.fireDoc('keydown', fallbackEvent);
+check(
+  '回车换行：编辑器不接管时才轮到 execCommand，且只调一次、只插一个',
+  execCalls === 1 &&
+    fallbackDom.composer.textContent === '写点什么\n' &&
+    fallbackEvent.defaultPrevented === true,
+  `execCommand ${execCalls} 次 / text=${JSON.stringify(fallbackDom.composer.textContent)}`,
+);
+delete globalThis.document.execCommand;
+
+// ---- 放行：Shift / Ctrl / Cmd / Alt + 回车（Shift+Enter 本来就是换行；Ctrl/Cmd+Enter 是发送）
+for (const [name, init] of [
+  ['Shift+回车', { shiftKey: true }],
+  ['Ctrl+回车', { ctrlKey: true }],
+  ['Cmd+回车', { metaKey: true }],
+  ['Alt+回车', { altKey: true }],
+]) {
+  const ev = keyEvent({ target: enterDom.composer, ...init });
+  enterDom.fireDoc('keydown', ev);
+  check(`回车换行：${name} 一律放行（那是官方自己的语义）`, ev.defaultPrevented === false && ev.stopped === false);
+}
+
+// ---- 放行：输入法（合成中 / 刚结束）—— 中文输入法用回车确认候选词，吃掉它等于打不了字
+const composingEv = keyEvent({ target: enterDom.composer, isComposing: true });
+enterDom.fireDoc('keydown', composingEv);
+const imeKeyCodeEv = keyEvent({ target: enterDom.composer, keyCode: 229 });
+enterDom.fireDoc('keydown', imeKeyCodeEv);
+check(
+  '回车换行：输入法合成中（isComposing / keyCode 229）不插手',
+  composingEv.defaultPrevented === false && imeKeyCodeEv.defaultPrevented === false,
+);
+enterDom.fireDoc('compositionstart', { type: 'compositionstart' });
+const duringCompose = keyEvent({ target: enterDom.composer });
+enterDom.fireDoc('keydown', duringCompose);
+enterDom.fireDoc('compositionend', { type: 'compositionend' });
+const rightAfterCompose = keyEvent({ target: enterDom.composer });
+enterDom.fireDoc('keydown', rightAfterCompose);
+await sleep(90);
+const afterGuard = keyEvent({ target: enterDom.composer });
+enterDom.fireDoc('keydown', afterGuard);
+check(
+  '回车换行：合成中与刚合成完（60ms 窗口）都放行，窗口过了才恢复接管',
+  duringCompose.defaultPrevented === false &&
+    rightAfterCompose.defaultPrevented === false &&
+    afterGuard.defaultPrevented === true,
+  `合成中=${duringCompose.defaultPrevented} 刚结束=${rightAfterCompose.defaultPrevented} 过窗口=${afterGuard.defaultPrevented}`,
+);
+
+// ---- 放行：不在主输入框里（设置页的输入框、行内编辑器都不该被碰）
+const outsideEvent = keyEvent({ target: enterDom.outside });
+enterDom.fireDoc('keydown', outsideEvent);
+check('回车换行：不在主输入框里的一律不碰', outsideEvent.defaultPrevented === false && outsideEvent.stopped === false);
+const noTargetEvent = keyEvent({ target: null });
+enterDom.fireDoc('keydown', noTargetEvent);
+check('回车换行：没有 target 也不炸', noTargetEvent.defaultPrevented === false);
+
+// ---- 别的键（打字、退格）照常放行
+const letterEvent = keyEvent({ target: enterDom.composer, key: 'a', keyCode: 65 });
+enterDom.fireDoc('keydown', letterEvent);
+check('回车换行：别的按键完全不插手', letterEvent.defaultPrevented === false);
+
+// ---- 关掉开关 → 回车回到「发送」
+const enterOffDom = installComposerDom({ width: 390, coarse: true });
+applyBackController({ isLoopback: false, remoteLayout: 'phone', phoneEnterNewline: false });
+await sleep(80);
+const offEvent = keyEvent({ target: enterOffDom.composer });
+enterOffDom.fireDoc('keydown', offEvent);
+check(
+  '回车换行：配置关掉后恢复原样（回车仍然是发送）',
+  offEvent.defaultPrevented === false && offEvent.stopped === false && enterOffDom.composer.textContent === '写点什么',
+  JSON.stringify(enterOffDom.composer.textContent),
+);
+
+// ---- 电脑布局 + 不是触摸设备 → 不接管（远程的电脑浏览器保持原样）
+const deskEnterDom = installComposerDom({ width: 1400, coarse: false });
+applyBackController({ isLoopback: false, remoteLayout: 'desktop', phoneEnterNewline: true });
+await sleep(80);
+const deskEvent = keyEvent({ target: deskEnterDom.composer });
+deskEnterDom.fireDoc('keydown', deskEvent);
+check(
+  '回车换行：电脑布局 + 非触摸 → 不接管（回车仍然是发送）',
+  deskEvent.defaultPrevented === false && deskEnterDom.composer.textContent === '写点什么',
+);
+
+// ---- 粗指针设备（平板/触摸笔记本）即使选了电脑布局也要接管 —— 这是「两者都算」的那一半
+const coarseDeskDom = installComposerDom({ width: 1400, coarse: true });
+applyBackController({ isLoopback: false, remoteLayout: 'desktop', phoneEnterNewline: true });
+await sleep(80);
+const coarseEvent = keyEvent({ target: coarseDeskDom.composer });
+coarseDeskDom.fireDoc('keydown', coarseEvent);
+check(
+  '回车换行：粗指针设备（触摸）就算选了电脑布局也接管',
+  coarseEvent.defaultPrevented === true && coarseDeskDom.composer.textContent === '写点什么\n',
+  JSON.stringify(coarseDeskDom.composer.textContent),
+);
+
+// ---- 本机页面：一个监听都不装（连 data-ra-layout 都不会有）
+const localEnterDom = installComposerDom({ width: 390, coarse: true });
+applyBackController({ isLoopback: true, remoteLayout: 'phone', phoneEnterNewline: true });
+await sleep(80);
+const localEvent = keyEvent({ target: localEnterDom.composer });
+const localListeners = localEnterDom.fireDoc('keydown', localEvent);
+check(
+  '回车换行：本机页面不装监听（本机界面一个像素、一个按键都不动）',
+  localListeners === 0 && localEvent.defaultPrevented === false && localEnterDom.composer.textContent === '写点什么',
+  `监听=${localListeners}`,
+);
+
+// ---- 停用（控制器清理）→ 监听收回
+const stopEnterDom = installComposerDom({ width: 390, coarse: true });
+const stopEnter = applyBackController({ isLoopback: false, remoteLayout: 'phone', phoneEnterNewline: true });
+await sleep(80);
+const beforeStop = keyEvent({ target: stopEnterDom.composer });
+stopEnterDom.fireDoc('keydown', beforeStop);
+stopEnter();
+const afterStop = keyEvent({ target: stopEnterDom.composer });
+stopEnterDom.fireDoc('keydown', afterStop);
+check(
+  '回车换行：停用后监听收回（HMR 重挂 / 卸载后不留后手）',
+  beforeStop.defaultPrevented === true &&
+    afterStop.defaultPrevented === false &&
+    (stopEnterDom.docListeners.get('keydown')?.size ?? 0) === 0,
+  `停用前=${beforeStop.defaultPrevented} 停用后=${afterStop.defaultPrevented} 监听=${stopEnterDom.docListeners.get('keydown')?.size ?? 0}`,
 );
 
 // ---------------------------------------------------------------- 窗口可见性上报（只在本机页面）

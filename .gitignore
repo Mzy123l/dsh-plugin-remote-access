@@ -12,5 +12,8 @@ remote-access-url.txt
 # npm 打包产物
 *.tgz
 
+# 构建出来的 APK（发布时上传到 Releases，不进仓库）
+*.apk
+
 # 编辑工具留下的临时目录（里面是源码副本，别误提交）
 .*.tmpdir/

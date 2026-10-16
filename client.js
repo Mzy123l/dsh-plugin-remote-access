@@ -33,18 +33,21 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.3.6';
+    const CLIENT_VERSION = '1.3.8';
 
     // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [
-      { key: 'enabled', type: 'boolean', label: '启用' },
-      { key: 'allowCidrs', type: 'list', label: '允许的网段', placeholder: '换行分割' },
-      { key: 'denyCidrs', type: 'list', label: '排除的网段', placeholder: '换行分割' },
-      { key: 'port', type: 'number', label: '端口', placeholder: '0=随机' },
-      { key: 'maxConnections', type: 'number', label: '并发上限', placeholder: '0=不限制' },
+      // 分节（section）只是版式：让设置页读起来像一份配置清单，而不是一串控件。
+      // 每一节标题下面是同类参数；`hint` 是字段下方那行小字（手机上比 placeholder 好读）。
+      { key: 'enabled', type: 'boolean', section: '服务', label: '启用', hint: '关掉即停止监听，不需要卸载插件' },
+      { key: 'port', type: 'number', section: '服务', label: '端口', placeholder: '0=随机', hint: '固定下来才好存书签（默认 0 = 系统随机）' },
+      { key: 'allowCidrs', type: 'list', section: '服务', label: '允许的网段', placeholder: '换行分割', hint: '唯一的安全边界；listen=auto 时也用它挑本机要监听的地址' },
+      { key: 'denyCidrs', type: 'list', section: '服务', label: '排除的网段', placeholder: '换行分割', hint: '白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封' },
+      { key: 'maxConnections', type: 'number', section: '服务', label: '并发上限', placeholder: '0=不限制' },
       {
         key: 'logLevel',
         type: 'select',
+        section: '服务',
         label: '日志级别',
         options: [
           { value: 'silent', label: '静默' },
@@ -52,21 +55,27 @@ window.__ModuleLoader__.load({
           { value: 'debug', label: '详细' },
         ],
       },
-      { key: 'accessCode', type: 'password', label: '访问密码', placeholder: '4-12位数字或字母' },
+      { key: 'accessCode', type: 'password', section: '访问控制', label: '访问密码', placeholder: '4-12位数字或字母', hint: '设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址' },
       // 安卓外壳的状态栏通知：宿主只负责回答「有没有选择在等 / 电脑窗口可见吗」，
       // 弹不弹、弹什么由 App 自己决定（它才知道自己在不在前台）
-      { key: 'notifyOnChoice', type: 'boolean', label: '提问时通知手机' },
-      { key: 'notifyOnlyWhenWindowHidden', type: 'boolean', label: '仅窗口不可见时通知' },
+      { key: 'notifyOnChoice', type: 'boolean', section: '手机通知', label: '提问时通知手机', hint: '模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知' },
+      { key: 'notifyOnFinish', type: 'boolean', section: '手机通知', label: '一轮结束时通知手机', hint: '正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）' },
+      { key: 'notifyOnlyWhenWindowHidden', type: 'boolean', section: '手机通知', label: '仅窗口不可见时通知', hint: '电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒' },
       {
         key: 'remoteLayout',
         type: 'select',
+        section: '远程界面',
         label: '远程UI布局',
         options: [
           { value: 'phone', label: '手机（横竖屏自适应）' },
           { value: 'desktop', label: '电脑' },
           { value: 'auto', label: '自动' },
         ],
+        hint: '只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新',
       },
+      // 手机端输入：回车当成换行，只有点「发送」才真的发出去。
+      // 为什么单独给一个开关：有人用外接键盘、或就是习惯回车发送；默认按手机的习惯来。
+      { key: 'phoneEnterNewline', type: 'boolean', section: '远程界面', label: '手机端回车=换行', hint: '只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行' },
       // 「UI 设置」一组（group: 'ui'）：官方「通用设置」里的五项界面偏好，只作用于远程页面。
       // 为什么要有这一份副本：官方设置页在远程页面上是内存态（读写都到不了宿主），手机端改了刷新就还原；
       // 这里存的是同一批值，由 startUiSettingsController 在每次打开远程页面时重新套到页面上。
@@ -120,6 +129,17 @@ window.__ModuleLoader__.load({
           { value: 'detailed', label: '详细' },
         ],
       },
+      // 「缓存」一组（group: 'cache'）：手机端资源缓存的口径。缓存本体在手机的 WebView 里，
+      // 宿主只负责把响应头喂对（详见 index.js 的「手机端缓存策略」与 README 同名一节）。
+      { key: 'cacheEnabled', type: 'boolean', group: 'cache', label: '启用手机端资源缓存' },
+      { key: 'cacheTtlMinutes', type: 'number', group: 'cache', label: '新鲜期（分钟）', placeholder: '1-1440，默认 10' },
+      { key: 'cacheProbe', type: 'boolean', group: 'cache', label: '过期核对用首/尾片段指纹' },
+      // 默认关：这是**逆着上游意愿**的一步（壁纸那类实时抓帧自己写了 no-store），
+      // 开着最多会看到「新鲜期」这么久之前的旧帧/旧音轨，所以必须由用户显式打开。
+      { key: 'cacheOverrideNoStore', type: 'boolean', group: 'cache', label: '接管 no-store 的大媒体' },
+      // 媒体元素取大文件时会发 Range，而浏览器**永远不缓存 206** —— 于是每次进页面都重下整段。
+      // 这一项把「从 0 取到结尾」那一种改写成可缓存的整份。默认关：个别播放器可能失去拖动定位。
+      { key: 'cacheFullRange', type: 'boolean', group: 'cache', label: '整段 Range 视为整份' },
     ];
 
     const DEFAULTS = {
@@ -131,12 +151,23 @@ window.__ModuleLoader__.load({
       logLevel: 'info',
       accessCode: '',
       remoteLayout: 'auto',
+      phoneEnterNewline: true,
+      // 通知这三个也要有出厂值：`decode` 读不到就退回这里，否则「宿主默认开着」会被显示成没开
+      notifyOnChoice: true,
+      notifyOnlyWhenWindowHidden: true,
+      notifyOnFinish: true,
 
       remoteTheme: 'default',
       remoteFontSize: 0,
       remoteTranscriptView: 'default',
       remoteDeveloperTools: 'default',
       remotePerformanceUsage: 'default',
+
+      cacheEnabled: true,
+      cacheTtlMinutes: 10,
+      cacheProbe: true,
+      cacheOverrideNoStore: false,
+      cacheFullRange: false,
     };
 
     /** 访问密码的规则，必须与 index.js 的 normalizeAccessCode 一致（check-config-schema 之外的人工约定） */
@@ -173,6 +204,14 @@ window.__ModuleLoader__.load({
       return value === undefined || value === null ? '' : value;
     };
 
+    /** 人看的字节数（缓存自检 / 流量账那几行用） */
+    function humanBytes(value) {
+      const n = Number(value) || 0;
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / 1024 / 1024).toFixed(2)} MB`;
+    }
+
     function draftFrom(value) {
       const source = value && typeof value === 'object' ? value : {};
       const next = {};
@@ -196,6 +235,11 @@ window.__ModuleLoader__.load({
     const LAYOUT_PHONE_WIDTH = 720;
     const LAYOUT_STYLE_ID = 'dsh-remote-access/layout.css';
     const SCRIM_ID = 'dsh-ra-scrim';
+    /**
+     * 输入法刚结束后的这段窗口里，回车仍然可能是在「确认候选词」—— 这段时间内不插手。
+     * 与官方自己的做法同一口径（它用 10ms），这里放宽一点：多吞一个换行没代价，多吃一个候选词确认很恼人。
+     */
+    const ENTER_COMPOSE_GUARD_MS = 60;
 
     /**
      * 手机布局的全部样式。挂在 html[data-ra-layout="phone"] 之下，所以本机页面
@@ -400,6 +444,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       let attempt = 0;
       let retryTimer = null;
       let raScheduled = false;
+      /** 「手机端回车=换行」的开头（配置里读；默认开） */
+      let enterNewline = true;
 
       const matches = (query) => {
         try {
@@ -769,9 +815,12 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           .then((response) => {
             if (stopped) return;
             if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
-            const next = String(namespaceOf(response.value)?.value?.remoteLayout ?? 'auto');
+            const value = namespaceOf(response.value)?.value ?? {};
+            const next = String(value.remoteLayout ?? 'auto');
             attempt = 0;
             mode = ['auto', 'phone', 'desktop'].includes(next) ? next : 'auto';
+            // 「手机端回车=换行」与布局一起读：这一项是输入体验的开关，默认开
+            enterNewline = value.phoneEnterNewline !== false;
             applyLayout();
           })
           .catch((err) => {
@@ -810,6 +859,119 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         document.addEventListener('visibilitychange', onVisible);
         mediaSources.push(() => document.removeEventListener('visibilitychange', onVisible));
       } catch { /* 忽略 */ }
+
+      // ---------------------------------------------------------------- 手机端：回车 = 换行，不发送
+      //
+      // 官方把「回车发送」与编辑器的按键处理都挂在那棵 Lexical 编辑器上（冒泡阶段）。所以我们在
+      // **document 的捕获阶段**先一步 preventDefault + stopPropagation：官方那条命令收不到这个事件，
+      // 也就不会发送；然后我们自己把换行插进去。发送按钮不受影响 —— 点它照旧发送。
+      //
+      // 放行的四种情况，一条都不能少：
+      //   · Shift / Ctrl / Cmd / Alt + Enter —— Shift+Enter 本来就是换行，Ctrl/Cmd+Enter 是发送；
+      //   · 输入法合成中、或刚结束 60ms 内 —— 中文输入法用回车确认候选词，吃掉它等于打字打不出来；
+      //   · 不在主输入框里（`[data-composer-input]`）—— 设置页的输入框、行内编辑器一律不碰；
+      //   · 既不是手机布局、也不是粗指针设备 —— 本机与远程的电脑浏览器都保持原样。
+      let composing = false;
+      let composingAt = 0;
+
+      const phoneLikeNow = () =>
+        document.documentElement.getAttribute('data-ra-layout') === 'phone' || matches('(pointer: coarse)');
+
+      function composerOf(target) {
+        try {
+          return target && typeof target.closest === 'function' ? target.closest('[data-composer-input]') : null;
+        } catch {
+          return null;
+        }
+      }
+
+      /**
+       * 编辑器根：优先最内层的 `contenteditable`，否则就是标记元素本身。
+       * **只挑一个**目标 —— 早先「两个目标都派一遍」的写法正是重复插入的来源之一。
+       */
+      function editorRootOf(input) {
+        try {
+          const inner = typeof input.querySelector === 'function' ? input.querySelector('[contenteditable]') : null;
+          if (inner && inner !== input) return inner;
+        } catch { /* 取不到就用原元素 */ }
+        return input;
+      }
+
+      /** 合成一个 `beforeinput`（inputType = insertLineBreak），老 WebView 没有 InputEvent 就退回 Event */
+      function beforeInputEvent() {
+        const init = { bubbles: true, cancelable: true, inputType: 'insertLineBreak' };
+        if (typeof InputEvent === 'function') return new InputEvent('beforeinput', init);
+        const event = new Event('beforeinput', { bubbles: true, cancelable: true });
+        try { event.inputType = 'insertLineBreak'; } catch { /* 只读就算了 */ }
+        return event;
+      }
+
+      /**
+       * 往编辑器里插**一个**换行。三条路依次试，但判据必须是「编辑器有没有真的接管」：
+       *   ① 合成 `beforeinput(insertLineBreak)` —— 编辑器（Lexical）收到就**同步** `preventDefault()` 并接下；
+       *   ② 没人接管（没被 preventDefault、DOM 也没变）→ `execCommand('insertLineBreak')`，它同步生效；
+       *   ③ 还不行才合成一次 `Shift+Enter`（走官方那条路）。
+       * 三条都不成时**什么都不做**：绝不退回「发送」。
+       *
+       * ⚠️ 这里曾经用「同步读 `textContent` 变没变」来决定要不要往下试 —— 而编辑器把结果提交到 DOM 是
+       * **异步**的，于是第一条路明明成了、又被判成没成，接着走了第二条，**一次回车插出两个换行**。
+       * 现在以 `defaultPrevented` 为主判据（它是同步的），并且每条路最多执行一次。
+       */
+      function insertLineBreak(input) {
+        const target = editorRootOf(input);
+        const before = String(input.textContent ?? '');
+        const changed = () => String(input.textContent ?? '') !== before;
+        let event = null;
+        try {
+          event = beforeInputEvent();
+          target.dispatchEvent(event);
+        } catch { event = null; }
+        if (event && event.defaultPrevented === true) return true; // ① 编辑器接管了（结果稍后才落到 DOM）
+        if (changed()) return true;
+        try {
+          if (typeof document.execCommand === 'function' && document.execCommand('insertLineBreak') === true) {
+            return true; // ② 同步生效；返回 true 即成功，绝不因为「DOM 还没更新」再插一次
+          }
+        } catch { /* 走 ③ */ }
+        if (changed()) return true;
+        try {
+          target.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter',
+            code: 'Enter',
+            keyCode: 13,
+            which: 13,
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }));
+        } catch { /* 都不行就只吞掉这一下 */ }
+        return changed();
+      }
+
+      function onComposerKeyDown(event) {
+        if (stopped || !enterNewline) return;
+        if (!phoneLikeNow()) return;
+        if (!event || (event.key !== 'Enter' && event.keyCode !== 13)) return;
+        if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+        const input = composerOf(event.target);
+        if (!input) return;
+        if (event.isComposing === true || event.keyCode === 229) return;
+        if (composing || Date.now() - composingAt < ENTER_COMPOSE_GUARD_MS) return;
+        // 到这里：手机端主输入框里的一下裸回车 → 吃掉它，换成换行
+        try { event.preventDefault(); } catch { /* 忽略 */ }
+        try { event.stopPropagation(); } catch { /* 忽略 */ }
+        insertLineBreak(input);
+      }
+
+      const onCompositionStart = () => { composing = true; };
+      const onCompositionEnd = () => { composing = false; composingAt = Date.now(); };
+      let enterBound = false;
+      try {
+        document.addEventListener('keydown', onComposerKeyDown, true);
+        document.addEventListener('compositionstart', onCompositionStart, true);
+        document.addEventListener('compositionend', onCompositionEnd, true);
+        enterBound = true;
+      } catch { /* 没有 DOM 就算了 */ }
 
       // ---------------------------------------------------------------- 弹窗开合后的重绘
       //
@@ -1181,6 +1343,14 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           document.removeEventListener('click', onDocumentClick);
           document.removeEventListener('focusin', onComposerFocusIn, true);
         } catch { /* 忽略 */ }
+        // 「回车=换行」那三个监听：停用后必须彻底安静（本机页面 / 卸载 / HMR 重挂）
+        if (enterBound) {
+          try {
+            document.removeEventListener('keydown', onComposerKeyDown, true);
+            document.removeEventListener('compositionstart', onCompositionStart, true);
+            document.removeEventListener('compositionend', onCompositionEnd, true);
+          } catch { /* 忽略 */ }
+        }
         if (focusGuardTimer !== null) {
           try { window.clearTimeout(focusGuardTimer); } catch { /* 忽略 */ }
           focusGuardTimer = null;
@@ -1529,8 +1699,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
-          // 「UI 设置」是一层可折叠的下一级菜单，默认收起
-          const [uiOpen, setUiOpen] = React.useState(false);
+          // 「UI 设置」「缓存」是两层可折叠的下一级菜单，默认都收起
+          const [groupsOpen, setGroupsOpen] = React.useState({});
+          const toggleGroup = (id) => setGroupsOpen((open) => ({ ...open, [id]: open[id] !== true }));
+          const cacheOpen = groupsOpen.cache === true;
           const revisionRef = React.useRef(snap.revision);
 
           // 回环页面用 configForms（官方通道）；拿不到就退到 Remote 通道（手机）
@@ -1577,10 +1749,16 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                 let phoneNote = '';
                 if (phone && phone.app) {
                   const bannerOk = phone.notifications && phone.importance >= 4;
-                  phoneNote = bannerOk
-                    ? ` · 手机端 App ${phone.app}：通知已开、横幅通道=高`
-                    : ` · 手机端 App ${phone.app}：通知${phone.notifications ? '已开' : '没开'}` +
-                      `、横幅通道=${phone.importance}（横幅弹不出来 → 去系统设置里打开 DSH 的通知/横幅）`;
+                  const finishOk = phone.notifications && (phone.importanceFinish ?? 0) >= 4;
+                  const parts = [
+                    `通知${phone.notifications ? '已开' : '没开'}`,
+                    `提问通道=${phone.importance}${bannerOk ? '' : '（弹不出来）'}`,
+                  ];
+                  // 「任务结束」是单独一条通道，重要性也分开报（老 APK 不带这个字段，就只说提问那条）
+                  if (phone.importanceFinish !== undefined) {
+                    parts.push(`结束通道=${phone.importanceFinish}${finishOk ? '' : '（弹不出来）'}`);
+                  }
+                  phoneNote = ` · 手机端 App ${phone.app}：${parts.join('、')}`;
                 }
                 setLinkNote(host + phoneNote);
               } catch {
@@ -1591,6 +1769,67 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           }, [viaForms]);
 
           React.useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), []);
+
+          /**
+           * 「缓存」那一组的自检：只在手机上、且**展开这一组时**才去问一次宿主。
+           * 默认收起 = 平时一个额外请求都不发；展开才 1 次（这条路径与通知自检同一套鉴权）。
+           * 同一个端点带 `?reset=1` 就是「把流量账清零」—— 复现「退出重进还是大流量」时先清一次，
+           * 再走一遍，回来看这一轮到底送出了多少。
+           */
+          const [cacheNote, setCacheNote] = React.useState('');
+          const [cacheInfo, setCacheInfo] = React.useState(null);
+          const [cacheBusy, setCacheBusy] = React.useState(false);
+          const readCacheInfo = async (reset, alive) => {
+            if (viaForms) {
+              setCacheNote('本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径');
+              return;
+            }
+            if (typeof window.fetch !== 'function') return;
+            if (reset) setCacheBusy(true);
+            try {
+              const res = await window.fetch(`/__remote_access__/cache${reset ? '?reset=1' : ''}`, { cache: 'no-store' });
+              if (alive && !alive()) return;
+              if (res.status === 404) {
+                setCacheNote('电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH');
+                return;
+              }
+              if (res.status === 401 || res.status === 403) {
+                setCacheNote('缓存接口需要重新解锁：刷新本页、再输一次访问密码');
+                return;
+              }
+              const data = await res.json().catch(() => null);
+              if (alive && !alive()) return;
+              if (!res.ok || data === null) {
+                setCacheNote(`缓存接口返回 HTTP ${res.status}`);
+                return;
+              }
+              const policy = data.policy ?? {};
+              const stats = data.stats ?? {};
+              const head = policy.enabled === false
+                ? '电脑上关掉了手机端缓存'
+                : `内容寻址 immutable · 无校验器 ${policy.ttlMinutes} 分钟 · ` +
+                  `探针${policy.probe === false ? '关' : '开'}`;
+              const traffic = data.traffic ?? null;
+              const trafficText = traffic
+                ? ` · 本轮送出 ${humanBytes(traffic.totalOut)}（其中无缓存口径 ${humanBytes(traffic.uncachedOut)}）` +
+                  `、WebSocket ${humanBytes(traffic.wsOut)}`
+                : '';
+              setCacheNote(`${head} · 本次 304 ${stats.notModified ?? 0} 次 / 小资源 ${stats.inline ?? 0} / 探针 ${stats.probe ?? 0}${trafficText}`);
+              setCacheInfo({ policy, stats, traffic, at: Date.now() });
+            } catch {
+              if (!alive || alive()) setCacheNote('读不到电脑上的缓存状态');
+            } finally {
+              if (reset) setCacheBusy(false);
+            }
+          };
+          React.useEffect(() => {
+            if (!cacheOpen) return undefined;
+            let alive = true;
+            readCacheInfo(false, () => alive);
+            return () => { alive = false; };
+            // 只在「展开这一组」与「本机 ↔ 远程」切换时读一次（readCacheInfo 每次渲染都是新的，
+            // 但它只读一次远端状态，不进 deps 才不会被自己反复触发）
+          }, [cacheOpen, viaForms]);
 
           // 布局在「手机 ↔ 电脑」之间切换时（改了这一项、或横竖屏转了）让表单跟着重排
           const [, bumpLayout] = React.useState(0);
@@ -1750,12 +1989,20 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           // 复选框在手机上是行首一个 44px 的方块，单指才好点
           const checkStyle = phone ? { width: 22, height: 22 } : undefined;
 
-          // 「UI 设置」这一组：可折叠的下一级菜单。标题上带「已改 N 项」，收起来也知道动过没有。
+          // 分组：都是可折叠的下一级菜单，默认收起（手机上不能一进来就铺满屏）。
+          // 标题上带「已改 N 项」，收起来也知道动过没有 —— 判据是「与出厂默认值不同」，
+          // 布尔项要按布尔比（否则默认就开着的那几项会被算成「已改」）。
           const uiFields = FIELDS.filter((field) => field.group === 'ui');
-          const uiChanged = uiFields.filter((field) => {
+          const cacheFields = FIELDS.filter((field) => field.group === 'cache');
+          const changedCount = (fields) => fields.filter((field) => {
             const raw = current[field.key];
-            return field.type === 'number' ? Number(raw) !== 0 : String(raw ?? 'default') !== 'default';
+            const fallback = DEFAULTS[field.key];
+            if (field.type === 'boolean') return (raw === true) !== (fallback === true);
+            if (field.type === 'number') return Number(raw) !== Number(fallback);
+            return String(raw ?? '') !== String(fallback ?? '');
           }).length;
+          const uiChanged = changedCount(uiFields);
+          const cacheChanged = changedCount(cacheFields);
           const groupStyle = {
             marginTop: phone ? 14 : 16,
             border: '1px solid rgba(127,127,127,0.3)',
@@ -1832,30 +2079,239 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                 placeholder: field.placeholder,
               });
             }
-            return [h('div', { key: `${field.key}-l`, style: labelStyle }, field.label), input];
+            return [
+              h('div', { key: `${field.key}-l`, style: labelStyle }, field.label),
+              input,
+              field.hint
+                ? h(
+                    'div',
+                    {
+                      key: `${field.key}-h`,
+                      style: { fontSize: 11, opacity: 0.55, lineHeight: 1.6, gridColumn: phone ? '1' : '2' },
+                    },
+                    field.hint,
+                  )
+                : null,
+            ];
           };
-          const mainRows = FIELDS.filter((field) => field.group !== 'ui').flatMap(renderField);
-          const uiRows = uiFields.flatMap(renderField);
+
+          /**
+           * 主区按「节」铺开：每节一个标题行，然后是该节的字段（标签 / 控件 / 一行小字说明）。
+           * 版式与 DSH 设置页其它条目一致，宽屏两列、手机单列。
+           */
+          const renderSections = (fields) => {
+            const out = [];
+            let lastSection = '';
+            for (const field of fields) {
+              const section = field.section ?? '';
+              if (section && section !== lastSection) {
+                lastSection = section;
+                out.push(
+                  h(
+                    'div',
+                    {
+                      key: `section-${section}`,
+                      style: {
+                        gridColumn: phone ? '1' : '1 / -1',
+                        marginTop: out.length === 0 ? 0 : phone ? 14 : 16,
+                        paddingBottom: 4,
+                        borderBottom: '1px solid rgba(127,127,127,0.25)',
+                        fontSize: 12,
+                        fontWeight: 600,
+                        opacity: 0.85,
+                      },
+                    },
+                    section,
+                  ),
+                );
+              }
+              out.push(...renderField(field));
+            }
+            return out;
+          };
+
+          /** 一层可折叠的下一级菜单（UI 设置 / 缓存）：默认收起，标题带「已改 N 项」 */
+          const renderGroup = (id, title, hint, fields, changed, extra) => h(
+            'div',
+            { key: `group-${id}`, style: groupStyle },
+            h(
+              'button',
+              {
+                type: 'button',
+                style: groupHeaderStyle,
+                'aria-expanded': groupsOpen[id] === true ? 'true' : 'false',
+                onClick: () => toggleGroup(id),
+              },
+              `${groupsOpen[id] === true ? '▾' : '▸'} ${title}${changed > 0 ? `（已改 ${changed} 项）` : ''}`,
+            ),
+            h('div', { style: groupHintStyle }, hint),
+            groupsOpen[id] === true ? h('div', { style: rowStyle }, fields.flatMap(renderField)) : null,
+            groupsOpen[id] === true ? extra : null,
+          );
+
+          /**
+           * 「缓存」那一组展开后的三块（自上而下）：
+           *   1. 生效策略 —— 一条一条对上，不必去翻配置文件；
+           *   2. 本次会话计数 —— `304` 就是省下来的重传次数；
+           *   3. 本轮流量账 —— 按 URL 排字节（组合包那类「DSH 自己发 immutable」的响应看不见缓存计数，
+           *      只能靠字节数），配「刷新 / 清零本轮统计」。
+           * 版式与设置页其它条目一致：左标签、右等宽数字；窄屏单列也不挤。
+           */
+          const cachePolicy = cacheInfo?.policy ?? null;
+          const cacheCounters = cacheInfo?.stats ?? null;
+          const cacheTraffic = cacheInfo?.traffic ?? null;
+          const blockStyle = { marginTop: 12, paddingTop: 10, borderTop: '1px solid rgba(127,127,127,0.25)' };
+          const blockTitleStyle = { fontSize: 12, fontWeight: 600, opacity: 0.9, margin: '0 0 6px' };
+          const statRowStyle = {
+            display: 'grid',
+            gridTemplateColumns: phone ? 'minmax(88px, max-content) minmax(0, 1fr)' : 'minmax(112px, max-content) minmax(0, 1fr)',
+            gap: '1px 10px',
+            fontSize: 12,
+            lineHeight: 1.75,
+          };
+          const statLabelStyle = { opacity: 0.62 };
+          const statValueStyle = { fontVariantNumeric: 'tabular-nums', wordBreak: 'break-word' };
+          const flagText = (on, off) => (on ? '开 · 已接管' : `关 · ${off}`);
+          const statRow = (label, value) =>
+            h(
+              'div',
+              { key: `stat-${label}`, style: statRowStyle },
+              h('span', { style: statLabelStyle }, label),
+              h('span', { style: statValueStyle }, value),
+            );
+          const trafficGrid = { display: 'grid', gridTemplateColumns: '68px 40px minmax(0, 1fr)', gap: '2px 8px' };
+
+          const cacheExtra = h(
+            'div',
+            { style: { fontSize: 12 } },
+            // ---- 生效策略
+            h(
+              'div',
+              { style: blockStyle },
+              h('div', { style: blockTitleStyle }, '生效策略'),
+              statRow('内容寻址产物', 'immutable（一年内不重取）'),
+              statRow('其它静态资源', cachePolicy ? `${cachePolicy.ttlMinutes} 分钟（过期先出旧的，后台核对一次）` : '—'),
+              statRow('过期核对', cachePolicy ? (cachePolicy.probe === false ? '长度 + 类型' : '首/尾各 64 KB 片段指纹') : '—'),
+              statRow('no-store 大媒体', cachePolicy ? flagText(cachePolicy.overrideNoStore, '尊重上游') : '—'),
+              statRow('整段 Range', cachePolicy ? flagText(cachePolicy.overrideRange, '原样透传 206') : '—'),
+              statRow('正文落盘', cachePolicy && cachePolicy.storesOnHost === false ? '不落宿主盘（零字节）' : '—'),
+            ),
+            // ---- 本次会话计数
+            h(
+              'div',
+              { style: blockStyle },
+              h('div', { style: blockTitleStyle }, '本次会话'),
+              statRow('304（零字节）', cacheCounters ? `${cacheCounters.notModified} 次` : '—'),
+              statRow('小资源缓冲', cacheCounters ? `${cacheCounters.inline} 次` : '—'),
+              statRow('片段探针', cacheCounters ? `${cacheCounters.probe} 次（失败 ${cacheCounters.probeFail}）` : '—'),
+              statRow('接管 no-store', cacheCounters ? `${cacheCounters.override ?? 0} 次` : '—'),
+            ),
+            // ---- 本轮流量账
+            h(
+              'div',
+              { style: blockStyle },
+              h('div', { style: blockTitleStyle }, '本轮流量账（按 URL 排字节）'),
+              ...(cacheTraffic
+                ? [
+                    h(
+                      'div',
+                      { key: 'traffic-total', style: { ...statRowStyle, marginBottom: 6 } },
+                      h('span', { style: statLabelStyle }, '送出 / 收到'),
+                      h(
+                        'span',
+                        { style: statValueStyle },
+                        `${humanBytes(cacheTraffic.totalOut)} / ${humanBytes(cacheTraffic.totalIn)}` +
+                          `　其中无缓存口径 ${humanBytes(cacheTraffic.uncachedOut)}` +
+                          `　WebSocket ${humanBytes(cacheTraffic.wsOut)} / ${humanBytes(cacheTraffic.wsIn)}`,
+                      ),
+                    ),
+                    h(
+                      'div',
+                      {
+                        key: 'traffic-head',
+                        style: {
+                          ...trafficGrid,
+                          fontSize: 11,
+                          opacity: 0.55,
+                          borderBottom: '1px solid rgba(127,127,127,0.25)',
+                          paddingBottom: 3,
+                          marginBottom: 3,
+                        },
+                      },
+                      h('span', { style: { textAlign: 'right' } }, '送出'),
+                      h('span', { style: { textAlign: 'right' } }, '次数'),
+                      h('span', null, 'URL'),
+                    ),
+                    ...cacheTraffic.top.slice(0, 6).map((row) => {
+                      const uncached = row.hits - row.cached;
+                      return h(
+                        'div',
+                        { key: `row-${row.key}`, style: { marginBottom: row.reason ? 4 : 0 } },
+                        h(
+                          'div',
+                          { style: { ...trafficGrid, fontVariantNumeric: 'tabular-nums', lineHeight: 1.6 } },
+                          h('span', { style: { textAlign: 'right' } }, humanBytes(row.out)),
+                          h('span', { style: { textAlign: 'right', opacity: uncached > 0 ? 0.95 : 0.6 } }, String(row.hits)),
+                          h(
+                            'span',
+                            { style: { wordBreak: 'break-all', opacity: 0.9 } },
+                            row.key,
+                            uncached > 0 ? `　（${uncached} 次无缓存口径 → 下次仍会重传）` : null,
+                          ),
+                        ),
+                        row.reason
+                          ? h(
+                              'div',
+                              { style: { fontSize: 11, opacity: 0.55, paddingLeft: phone ? 0 : 116 } },
+                              `原因：${row.reason}`,
+                            )
+                          : null,
+                      );
+                    }),
+                  ]
+                : [h('div', { key: 'traffic-none', style: statRowStyle }, h('span', { style: statLabelStyle }, cacheNote || '—'))]),
+              !viaForms
+                ? h(
+                    'div',
+                    { style: { marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                    h(
+                      'button',
+                      { type: 'button', style: buttonStyle, disabled: cacheBusy || busy, onClick: () => readCacheInfo(false, null) },
+                      cacheBusy ? '读取中…' : '刷新',
+                    ),
+                    h(
+                      'button',
+                      { type: 'button', style: buttonStyle, disabled: cacheBusy || busy, onClick: () => readCacheInfo(true, null) },
+                      cacheBusy ? '处理中…' : '清零本轮统计',
+                    ),
+                  )
+                : null,
+              !viaForms
+                ? h(
+                    'div',
+                    { style: { marginTop: 6, fontSize: 11, opacity: 0.55, lineHeight: 1.7 } },
+                    '用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。' +
+                      '实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。',
+                  )
+                : null,
+            ),
+          );
+
+          // 分组之外的都排在主区（缓存与 UI 设置都收在各自的下一级菜单里）
+          const mainRows = renderSections(FIELDS.filter((field) => !field.group));
 
           return h(
             'div',
             { style: { padding: phone ? '4px 2px' : '2px 0' } },
             h('div', { style: rowStyle }, mainRows),
-            h(
-              'div',
-              { style: groupStyle },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  style: groupHeaderStyle,
-                  'aria-expanded': uiOpen ? 'true' : 'false',
-                  onClick: () => setUiOpen((open) => !open),
-                },
-                `${uiOpen ? '▾' : '▸'} UI 设置${uiChanged > 0 ? `（已改 ${uiChanged} 项）` : ''}`,
-              ),
-              h('div', { style: groupHintStyle }, uiHint),
-              uiOpen ? h('div', { style: rowStyle }, uiRows) : null,
+            renderGroup('ui', 'UI 设置', uiHint, uiFields, uiChanged),
+            renderGroup(
+              'cache',
+              '缓存',
+              cacheNote || `默认：内容寻址的产物钉一年、其余 ${DEFAULTS.cacheTtlMinutes} 分钟；正文一律不落宿主盘`,
+              cacheFields,
+              cacheChanged,
+              cacheExtra,
             ),
             h(
               'div',

@@ -55,8 +55,16 @@ public class WatchService extends Service {
   static final int ID_CHOICE_A = 1002;
   static final int ID_CHOICE_B = 1003;
 
+  /**
+   * 「这一轮结束了」（正常跑完 / 出错）那条通知：同样两个 id 轮流用，理由与上面一样 ——
+   * 每跑完一轮都该是一次**新通知**，否则横幅不会重新弹。
+   */
+  static final int ID_FINISH_A = 1004;
+  static final int ID_FINISH_B = 1005;
+
   static final String CHANNEL_ONGOING = "dsh-watch";
   static final String CHANNEL_CHOICE = "dsh-choice";
+  static final String CHANNEL_FINISH = "dsh-finish";
 
   /** 长轮询一次最多挂多久：宿主上限 30 秒，这里取 20，读超时留足余量 */
   private static final int POLL_WAIT_SECONDS = 20;
@@ -70,6 +78,12 @@ public class WatchService extends Service {
   private static final long NEED_ACTION_RETRY_MS = 60_000L;
   /** 轮询间隔：连着的时候长轮询本来就会挂住，这里只是防止「状态一直变」时打转 */
   private static final long LOOP_IDLE_MS = 300;
+  /**
+   * 「一轮结束」多久之内算新鲜、值得提醒：服务只在你把 App 退到后台时活着，
+   * 所以「刚在电脑上/页面上看着它跑完、然后切出去」的那一条也要能收到；
+   * 太旧的（超过这个窗口）只记下编号，不再打扰。
+   */
+  private static final long FINISH_FRESH_MS = 5 * 60 * 1000L;
 
   /** App 在前台时由 MainActivity 置位：那会儿用户自己看得到问题，不用打扰 */
   static volatile boolean activityVisible = false;
@@ -86,16 +100,61 @@ public class WatchService extends Service {
   private String dismissedId = "";
   /** 当前那条「等你选择」的通知用的是哪个 id；0 = 现在没有 */
   private int choiceId = 0;
+  /** 「一轮结束」那条通知用的 id；0 = 现在没有 */
+  private int finishId = 0;
+  /**
+   * 最近一次**已经提醒过**的「结束」是哪一条，键是 `<宿主实例>:<编号>`。
+   *
+   * 为什么不用一个 int 就够：宿主重启后编号会从 1 重新数，光比编号会把「新的」当成「旧的」而漏提醒；
+   * 加上实例标记就不会。**而且必须持久化** —— App 切到前台时这个服务会被停掉、切回后台是**新实例**，
+   * 只放在内存里的话，同一条结束会被再弹一次（实测就是这个症状）。
+   */
+  private String lastFinishKey = "";
   /** App 的 versionName（懒查一次） */
   private String cachedVersion = null;
   /** 常驻通知当前那行文案：一样就不重复刷 */
   private String ongoingText = "";
+
+  /** 去重状态的键名：跟着 App 的 SharedPreferences 走，卸载才会清 */
+  static final String PREF_FINISH_KEY = "watch_finish_key";
+  static final String PREF_QUESTION_FP = "watch_question_fp";
+
+  /** 记下「哪一条问题已经提醒过」——持久化，服务重建后不会因为内存丢了而重弹 */
+  private void rememberQuestion(String fingerprint) {
+    shownFingerprint = fingerprint == null ? "" : fingerprint;
+    try {
+      getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+          .edit().putString(PREF_QUESTION_FP, shownFingerprint).apply();
+    } catch (Throwable ignored) {
+      // 存不下也不影响本次运行
+    }
+  }
+
+  /** 记下「哪一条结束已经提醒过」（见 lastFinishKey 的说明） */
+  private void rememberFinish(String key) {
+    lastFinishKey = key == null ? "" : key;
+    try {
+      getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+          .edit().putString(PREF_FINISH_KEY, lastFinishKey).apply();
+    } catch (Throwable ignored) {
+      // 同上
+    }
+  }
 
   // ---------------------------------------------------------------- 生命周期
 
   @Override
   public void onCreate() {
     super.onCreate();
+    // 去重状态先读回来：这个服务在 App 切前台时会被停掉，切回后台是**新实例** ——
+    // 只放在内存里的话，「同一条问题 / 同一次结束」会被再弹一次（实测症状）。
+    try {
+      SharedPreferences prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE);
+      shownFingerprint = String.valueOf(prefs.getString(PREF_QUESTION_FP, ""));
+      lastFinishKey = String.valueOf(prefs.getString(PREF_FINISH_KEY, ""));
+    } catch (Throwable ignored) {
+      // 读不到就当没有历史
+    }
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) return;
     // 两条通道分别对应两种打扰程度，这一对必须分得干净：
@@ -123,8 +182,22 @@ public class WatchService extends Service {
       // 拿不到默认铃声就靠通道默认值
     }
 
+    // 「任务结束」单独一条通道：与「模型提问」分开，用户想静音哪一类都行。
+    // 同样 IMPORTANCE_HIGH —— 不正常结束的那一轮正是最该弹出来的时候（余额不足、模型报错…）。
+    NotificationChannel finish = new NotificationChannel(
+        CHANNEL_FINISH, "任务结束", NotificationManager.IMPORTANCE_HIGH);
+    finish.setDescription("一轮跑完（或出错结束）时提醒你；异常会带上原因分类");
+    finish.setShowBadge(true);
+    finish.enableVibration(true);
+    try {
+      finish.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION), null);
+    } catch (Throwable ignored) {
+      // 同上
+    }
+
     manager.createNotificationChannel(watch);
     manager.createNotificationChannel(choice);
+    manager.createNotificationChannel(finish);
   }
 
   @Override
@@ -250,7 +323,8 @@ public class WatchService extends Service {
     String query = "?rev=" + rev + "&wait=" + POLL_WAIT_SECONDS
         + "&av=" + urlEncode(appVersion())
         + "&n=" + (notificationsEnabled() ? 1 : 0)
-        + "&ch=" + choiceChannelImportance();
+        + "&ch=" + choiceChannelImportance()
+        + "&fch=" + finishChannelImportance();
     HttpURLConnection conn;
     try {
       conn = (HttpURLConnection) new URL(base + "/__remote_access__/notify" + query).openConnection();
@@ -365,9 +439,18 @@ public class WatchService extends Service {
 
   /** 「模型提问」通道当前的重要性；查不到返回 0 */
   private int choiceChannelImportance() {
+    return channelImportance(CHANNEL_CHOICE);
+  }
+
+  /** 「任务结束」通道当前的重要性；查不到返回 0 */
+  private int finishChannelImportance() {
+    return channelImportance(CHANNEL_FINISH);
+  }
+
+  private int channelImportance(String channelId) {
     try {
       NotificationManager manager = getSystemService(NotificationManager.class);
-      NotificationChannel channel = manager == null ? null : manager.getNotificationChannel(CHANNEL_CHOICE);
+      NotificationChannel channel = manager == null ? null : manager.getNotificationChannel(channelId);
       return channel == null ? 0 : channel.getImportance();
     } catch (Throwable err) {
       return 0;
@@ -394,6 +477,20 @@ public class WatchService extends Service {
     return "";
   }
 
+  /** 「任务结束」通道那一份同样的自检（两个通道各管各的，谁被调低都不会连累另一个） */
+  private String finishBlockedHint() {
+    try {
+      if (!notificationsEnabled()) return "手机没给 DSH 通知权限，弹不出来 —— 点这条去打开";
+      int importance = finishChannelImportance();
+      if (importance > 0 && importance < NotificationManager.IMPORTANCE_HIGH) {
+        return "「任务结束」通道重要性被调低了（现在 " + importance + "），横幅弹不出来 —— 点这条去改";
+      }
+    } catch (Throwable ignored) {
+      // 查不出来就不说
+    }
+    return "";
+  }
+
   // ---------------------------------------------------------------- 该不该响
 
   /**
@@ -405,15 +502,28 @@ public class WatchService extends Service {
    */
   private void applyState(JSONObject json) {
     boolean enabled = json.optBoolean("enabled", true);
+    boolean enabledFinish = json.optBoolean("enabledFinish", true);
     boolean onlyWindowHidden = json.optBoolean("onlyWhenWindowHidden", true);
     JSONObject desktop = json.optJSONObject("desktop");
     boolean desktopVisible = desktop != null && desktop.optBoolean("visible", false);
     JSONArray pending = json.optJSONArray("pending");
     int count = pending == null ? 0 : pending.length();
 
+    // 「什么时候不该打扰」是所有通知共用的一把闸：App 在前台（问题/结果就在眼前）与
+    // 「电脑窗口正开着（你就在电脑前）」都不必弹。两类通知各自还受自己的开关约束。
+    boolean quiet = activityVisible || (onlyWindowHidden && desktopVisible);
+
+    // ---- 一轮结束（正常 / 出错）：与提问互不影响，自己一套开关
+    applyFinish(json.optJSONObject("finish"), json.optString("boot", ""), enabledFinish, quiet);
+
     boolean alert = enabled && count > 0 && !activityVisible && (!onlyWindowHidden || !desktopVisible);
     if (!alert) {
-      cancelChoice();
+      // 只在「问题已经不在等了」或「宿主把通知关了」时撤回。
+      //
+      // 反过来**不要**因为「你切到前台看了一眼」或「电脑窗口开着」就撤 —— 那样会连带把
+      // `shownFingerprint` 清掉（撤回=从没提醒过），于是你切回后台时同一条问题又被当成新的弹一次。
+      // 现在指纹是**持久化**的：提醒过一次就记着，回来不再弹；只有新问题才会再响。
+      if (count == 0 || !enabled) cancelChoice();
       String why = !enabled
           ? "提示已在「设置 → 远程访问」里关掉"
           : activityVisible
@@ -445,13 +555,14 @@ public class WatchService extends Service {
     String fingerprint = title + "\n" + text;
     String id = first == null ? "" : first.optString("id", "");
     if (fingerprint.equals(shownFingerprint)) {
-      // 同一条问题：还挂在通知栏上就什么都别做；被用户划掉了就记下来，别每隔 20 秒再弹一次
+      // 同一条问题：已经提醒过了。还挂在通知栏上就什么都不做；被你划掉了也**不再弹** ——
+      // 「我看见了、我划掉了」是你明确表达过的意思，回来再弹只是噪音。
       if (choiceActive()) return;
       dismissedId = id;
       return;
     }
     dismissedId = "";
-    shownFingerprint = fingerprint;
+    rememberQuestion(fingerprint);
     notifyChoice(title, text);
     updateOngoing("有 " + count + " 个选择在等你");
   }
@@ -459,6 +570,35 @@ public class WatchService extends Service {
   private static String text(JSONObject object, String key) {
     if (object == null) return "";
     return object.optString(key, "").trim();
+  }
+
+  /**
+   * 「一轮结束」那条通知。宿主只留**最近一条**（通知不是日志），这里按 `<宿主实例>:<编号>` 去重：
+   * 同一条只提醒一次；换一条（新的一轮，或宿主重启后编号从头数）才算新的。
+   *
+   * 去重键是**持久化**的：这个服务在 App 切前台时会被停掉、切回后台是新实例，
+   * 只靠内存字段会让同一条结束被反复弹（实测就是这个症状）。
+   *
+   * 为什么还要看时间：这个服务只在你把 App 退到后台时活着。你在前台看着它跑完 → 服务刚起来
+   * → 那条「结束」可能是一两分钟前的。这里给一个新鲜窗口（`FINISH_FRESH_MS`），
+   * 刚跑完的那一条照样提醒你（那正是你离开 App 后想知道的），太旧的只记下键、不打扰。
+   */
+  private void applyFinish(JSONObject finish, String boot, boolean enabledFinish, boolean quiet) {
+    if (finish == null) return;
+    int id = finish.optInt("id", 0);
+    if (id <= 0) return;
+    String key = (boot == null || boot.isEmpty() ? "-" : boot) + ":" + id;
+    if (key.equals(lastFinishKey)) return;
+    boolean fresh = true;
+    long at = finish.optLong("at", 0L);
+    if (at > 0) fresh = System.currentTimeMillis() - at <= FINISH_FRESH_MS;
+    rememberFinish(key);
+    if (!enabledFinish || quiet || !fresh) return;
+    boolean ok = finish.optBoolean("ok", true);
+    String reason = text(finish, "reason");
+    String message = text(finish, "message");
+    long ms = finish.optLong("ms", 0L);
+    notifyFinish(ok, reason, message, ms);
   }
 
   // ---------------------------------------------------------------- 通知
@@ -570,7 +710,9 @@ public class WatchService extends Service {
   }
 
   private void cancelChoice() {
-    shownFingerprint = "";
+    // 撤回 = 这条问题不再等了：把「已提醒过」的指纹一起忘掉（内存与持久化都清），
+    // 这样以后再出现同样文字的问题仍然会提醒 —— 而「只是切前台看了一眼」那条路**不会**走到这里。
+    rememberQuestion("");
     dismissedId = "";
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) {
@@ -586,7 +728,59 @@ public class WatchService extends Service {
     choiceId = 0;
   }
 
-  /** 那条「等你选择」的通知还在不在（用户划掉了就要允许再发一次） */
+  /**
+   * 发那条「这一轮结束了」的通知 —— 正常与异常都走这里，样式与「模型提问」同款
+   * （高优先级、响铃震动、两个 id 轮流用保证每次都弹横幅），但通道是独立的「任务结束」，
+   * 于是你想只静音其中一类时不用连着另一类一起关。
+   *
+   * 正文只写**结论与原因**，绝不带模型的回答内容：那条内容可能很长，也不适合出现在锁屏上。
+   */
+  private void notifyFinish(boolean ok, String reason, String message, long ms) {
+    NotificationManager manager = getSystemService(NotificationManager.class);
+    if (manager == null) return;
+    String title = ok ? "这一轮跑完了" : "这一轮出错了";
+    StringBuilder body = new StringBuilder();
+    if (ok) {
+      long seconds = Math.max(1, Math.round(ms / 1000.0));
+      body.append("用时约 ").append(seconds >= 60 ? (seconds / 60) + " 分 " + (seconds % 60) + " 秒" : seconds + " 秒");
+      body.append("。点开看结果。");
+    } else {
+      if (!reason.isEmpty()) body.append(reason);
+      if (!message.isEmpty()) body.append(body.length() > 0 ? "：" : "").append(message);
+      if (body.length() == 0) body.append("这一轮异常结束了，点开看电脑上的日志。");
+    }
+    String text = body.toString();
+    int previous = finishId;
+    int next = previous == ID_FINISH_A ? ID_FINISH_B : ID_FINISH_A;
+    try {
+      Notification.Builder builder = new Notification.Builder(this, CHANNEL_FINISH)
+          .setSmallIcon(ok ? R.drawable.ic_notify_watch : R.drawable.ic_notify_choice)
+          .setContentTitle(title)
+          .setContentText(text)
+          .setStyle(new Notification.BigTextStyle().bigText(text))
+          .setContentIntent(openApp())
+          .setAutoCancel(true)
+          .setOngoing(false)
+          .setOnlyAlertOnce(false)
+          .setCategory(Notification.CATEGORY_STATUS)
+          .setPriority(Notification.PRIORITY_MAX)
+          .setDefaults(Notification.DEFAULT_ALL)
+          .setVisibility(Notification.VISIBILITY_PUBLIC)
+          .setWhen(System.currentTimeMillis())
+          .setShowWhen(true)
+          .setTicker(title + "：" + text);
+      if (!finishBlockedHint().isEmpty()) builder.addAction(finishSettingsAction());
+      manager.notify(next, builder.build());
+      finishId = next;
+      if (previous != 0 && previous != next) manager.cancel(previous);
+    } catch (Throwable err) {
+      Log.w(TAG, "发「结束」通知失败: " + err);
+    }
+  }
+
+  /**
+   * 那条「等你选择」的通知还在不在（用户划掉了就要允许再发一次）
+   */
   private boolean choiceActive() {
     NotificationManager manager = getSystemService(NotificationManager.class);
     if (manager == null) return false;
@@ -616,13 +810,22 @@ public class WatchService extends Service {
    * 厂商那层开关（小米的「悬浮通知 / 横幅通知」、后台弹出界面）就在那一页里，用户找起来最快。
    */
   private Notification.Action channelSettingsAction() {
+    return settingsAction(CHANNEL_CHOICE, "去开启横幅");
+  }
+
+  /** 「任务结束」通道那一份同样的入口 */
+  private Notification.Action finishSettingsAction() {
+    return settingsAction(CHANNEL_FINISH, "去开启横幅");
+  }
+
+  private Notification.Action settingsAction(String channelId, String label) {
     Intent intent = new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
         .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())
-        .putExtra(Settings.EXTRA_CHANNEL_ID, CHANNEL_CHOICE)
+        .putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
     PendingIntent pending = PendingIntent.getActivity(
         this, 2, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     return new Notification.Action.Builder(
-        Icon.createWithResource(this, R.drawable.ic_notify_choice), "去开启横幅", pending).build();
+        Icon.createWithResource(this, R.drawable.ic_notify_choice), label, pending).build();
   }
 }
