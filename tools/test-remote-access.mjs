@@ -1873,6 +1873,11 @@ check(
   JSON.stringify(diffConfigKeys({ port: 1, logLevel: 'info' }, { port: 2, logLevel: 'info' })) === '["port"]',
   JSON.stringify(diffConfigKeys({ port: 1, logLevel: 'info' }, { port: 2, logLevel: 'info' })),
 );
+check(
+  'diffConfigKeys：引导字段 localConfigFile 不参与比较',
+  JSON.stringify(diffConfigKeys({ localConfigFile: 'off' }, { localConfigFile: '' })) === '[]',
+  JSON.stringify(diffConfigKeys({ localConfigFile: 'off' }, { localConfigFile: '' })),
+);
 const mergedLocal = mergeLocalConfig({ port: 19388, logLevel: 'info' }, { port: 54321 });
 check(
   'mergeLocalConfig：本用户配置覆盖共享值，没写的沿用共享值',
@@ -2048,6 +2053,15 @@ check('保存同步：首次启动种子正确', readLocalConfigFile(syncFile).c
 const fireReload = () => {
   for (const l of syncListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
 };
+// 什么都没改的 config-reload 不该重写本用户配置（localConfigFile 这类引导字段不算差异）
+const seededUpdatedAt = JSON.parse(fs.readFileSync(syncFile, 'utf8')).updatedAt;
+fireReload();
+await sleep(400);
+check(
+  '保存同步：没有改动时不会重写本用户配置（引导字段不算差异）',
+  JSON.parse(fs.readFileSync(syncFile, 'utf8')).updatedAt === seededUpdatedAt,
+  `${seededUpdatedAt} → ${JSON.parse(fs.readFileSync(syncFile, 'utf8')).updatedAt}`,
+);
 syncRow = { ...syncRow, remoteTheme: 'light' };
 fireReload();
 await sleep(500);

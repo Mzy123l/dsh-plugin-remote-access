@@ -2172,9 +2172,17 @@ export function writeLocalConfigFile(file, { config, baseline }) {
   fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
 }
 
-/** 两份配置里值不同的键（只比已知字段；顺序与 DEFAULTS 一致，日志好读） */
+/**
+ * 两份配置里值不同的键（只比已知字段；顺序与 DEFAULTS 一致，日志好读）。
+ *
+ * `localConfigFile` 是**启动期引导字段**，不存进本用户配置文件，也不该被当成
+ * 「共享 profile 改了」的证据 —— 否则每次 config-reload 都会误报一次差异并白写一遍文件。
+ */
+const BOOTSTRAP_KEYS = new Set(['localConfigFile']);
 export function diffConfigKeys(a, b) {
-  return Object.keys(DEFAULTS).filter((key) => JSON.stringify(a?.[key]) !== JSON.stringify(b?.[key]));
+  return Object.keys(DEFAULTS).filter(
+    (key) => !BOOTSTRAP_KEYS.has(key) && JSON.stringify(a?.[key]) !== JSON.stringify(b?.[key]),
+  );
 }
 
 /** 共享配置打底、本用户配置覆盖：本用户没写的字段仍用共享值 */
@@ -2288,8 +2296,9 @@ export function apply(ctx, config) {
         }
       }
     } else if (read.missing) {
-      // 第一次：以共享 profile 为种子建一份自己的
-      localConfig = { path: localFile, config: sharedConfig, baseline: sharedConfig };
+      // 第一次：以共享 profile 为种子建一份自己的（归一化后存，字段齐全、方便手改）
+      const seeded = normalizeConfig(sharedConfig);
+      localConfig = { path: localFile, config: seeded, baseline: seeded };
       try {
         writeLocalConfigFile(localFile, localConfig);
         bootNotes.push([
@@ -2310,7 +2319,8 @@ export function apply(ctx, config) {
           backup = `${localFile}.bad-${new Date().toISOString().replace(/[:.]/g, '-')}`;
           fs.renameSync(localFile, backup);
         } catch { backup = ''; }
-        localConfig = { path: localFile, config: sharedConfig, baseline: sharedConfig };
+        const rebuilt = normalizeConfig(sharedConfig);
+        localConfig = { path: localFile, config: rebuilt, baseline: rebuilt };
         try {
           writeLocalConfigFile(localFile, localConfig);
           bootNotes.push([
