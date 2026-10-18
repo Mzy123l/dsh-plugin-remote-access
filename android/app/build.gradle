@@ -10,14 +10,16 @@ if (keystoreFile.exists()) {
 
 android {
   namespace 'dev.dsh.remote'
-  compileSdk 34
+  compileSdk 35
+  // 本机 SDK 已装 36.0.0，35.0.0 的 license 没接受；显式钉到已装的版本，避免构建被 license 卡住
+  buildToolsVersion '36.0.0'
 
   defaultConfig {
     applicationId 'dev.dsh.remote'
     minSdk 26
-    targetSdk 34
-    versionCode 15
-    versionName '1.3.8'
+    targetSdk 35
+    versionCode 16
+    versionName '1.4.1'
   }
 
   if (keystoreFile.exists()) {

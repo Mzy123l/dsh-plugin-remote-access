@@ -91,7 +91,8 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main
 > 每抬一次版本都会换名字，钉死某个文件名迟早会落后。要装具体某一版，进 Release 页挑。
 
 > **APK 与插件不总是同一个号**：APK 只在「动了外壳代码」的那一版重发。
-> 当前插件是 **1.4.0**，APK 仍是 **1.3.8**（这一版只动网页半区与宿主半区，外壳代码没动，不用重装 App）。
+> 当前插件是 **1.4.1**，APK 也重打为 **1.4.1**（`versionCode` 16；功能代码没动，
+> 只是版本号对齐，旧版可直接覆盖安装）。
 
 App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
 
@@ -692,6 +693,8 @@ node tools/e2e-cache-local.mjs        # 手动：起一个「什么都不发缓�
   并在当前桌面端实测把 bundle 加进 `dsh.profile.bundles` 后 HMR 直接热加载，
   均返回 `application: applied`、无需重启）。
 - 新增 `tools/check-dsh-compat.mjs` 的重复 id 检查（与 DSH 组合后的 loader 行 id 唯一性）。
+- **APK 对齐为 1.4.1（`versionCode` 16）**：外壳功能代码没动，只是版本号与插件对齐；
+  安装包改名为 `dsh-plugin-remote-access-1.4.1.apk`，同一把自签钥匙，可直接覆盖安装。
 
 ### 1.4.0
 - **适配 DSH 0.2.1**（`engines.dsh = ^0.2.1-rc.1`，0.2.0 及更早请用 1.3.8）。
