@@ -320,7 +320,12 @@ function makeEl(tag, attrs = {}) {
     children: [],
     parentElement: null,
     dataset: {},
-    style: {},
+    // 0.2.1 的 UI 设置投影会读/写 body 的 CSS 变量；这里给一个最小可用的 style
+    style: {
+      setProperty(name, value) { this[name] = String(value); },
+      removeProperty(name) { delete this[name]; },
+      getPropertyValue(name) { return this[name] ?? ''; },
+    },
     textContent: '',
     _attrs: new Map(Object.entries(attrs)),
     getAttribute(n) { return this._attrs.has(n) ? this._attrs.get(n) : null; },
@@ -602,6 +607,125 @@ try {
   uiMissing = [String(err?.message ?? err)];
 }
 check('官方入口缺席时安静跳过（不报错、不把插件带崩）', !uiMissingThrew && uiMissing.length === 0, JSON.stringify(uiMissing));
+
+// ---------------------------------------------------------------- 场景五之二：DSH 0.2.1 的远程 UI 设置
+//
+// 0.2.1 的 ui-settings 取消了「非回环 → memory」降级：ConfigFormController 的快照里
+// 不再有 mode，远程页面调官方 setter 会直接写宿主。这里断言本插件改走「只投影到本页」：
+//   * 官方 setTheme / setFontSize / 五个入口一个都不调用（不写电脑）；
+//   * 外观与字号真的落到了本页 DOM；
+//   * 电脑端主题变化后，手机仍保留自己的外观。
+function applyWithUiSettings021(config) {
+  const calls = [];
+  let themeChange = null;
+  const hostTheme = {
+    preference: 'light',
+    fontSizes: { text: 14, code: 13, terminal: 13 },
+    active: { colorScheme: 'light', tokens: {} },
+    themes: [],
+  };
+  plugin.apply({
+    get: (name) => {
+      if (name === 'theme') {
+        return {
+          getTheme: () => hostTheme,
+          setTheme: (id) => calls.push(['setTheme', id]),
+          setFontSize: (...args) => calls.push(['setFontSize', ...args]),
+        };
+      }
+      if (name === 'configForms') {
+        return { developerTools: { setEnabled: (on) => calls.push(['setDeveloperTools', on]) } };
+      }
+      return null;
+    },
+    configForms: {
+      // 关键：没有 mode → 当作 0.2.1
+      get: () => ({
+        getSnapshot: () => ({ status: 'unavailable', writable: false, revision: undefined, value: undefined }),
+        subscribe: () => () => {},
+        mutate: async () => false,
+      }),
+      describe: () => ({ load: async () => {} }),
+    },
+    remote: {
+      $host: { home: undefined, isLoopback: false },
+      settings: {
+        describe: async () => ({
+          ok: true,
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { ...config }, revision: 1 }] },
+        }),
+        mutate: async () => ({ ok: true, value: { ns: 'remote-access', value: { ...config }, revision: 2 } }),
+      },
+      $on: () => () => {},
+    },
+    on: (event, fn) => {
+      if (event === 'theme/change') themeChange = fn;
+      return () => {
+        if (themeChange === fn) themeChange = null;
+      };
+    },
+    slots: {
+      inject: (_name, callback) => callback(),
+      register: () => () => {},
+      entries: (key) =>
+        key === 'settings.general.item'
+          ? [
+              { options: { id: 'transcript-view' }, inject: () => ({ setTranscriptView: (mode) => calls.push(['setTranscriptView', mode]) }) },
+              { options: { id: 'performance-usage' }, inject: () => ({ setPerformanceUsage: (mode) => calls.push(['setPerformanceUsage', mode]) }) },
+            ]
+          : [],
+    },
+  });
+  return { calls, fireThemeChange: () => themeChange?.() };
+}
+
+const ui021 = applyWithUiSettings021({
+  remoteLayout: 'phone',
+  remoteTheme: 'dark',
+  remoteFontSize: 16,
+  remoteTranscriptView: 'verbose',
+  remoteDeveloperTools: 'off',
+  remotePerformanceUsage: 'compact',
+});
+await sleep(120);
+check('0.2.1：不调用任何会写宿主的官方入口', ui021.calls.length === 0, JSON.stringify(ui021.calls));
+check(
+  '0.2.1：外观只投影到本页（root 标记 + 深色属性）',
+  document.documentElement.getAttribute('data-ds-theme-source') === 'dark' && document.body.hasAttribute('data-ds-dark-theme'),
+  `${document.documentElement.getAttribute('data-ds-theme-source')} / ${document.body.hasAttribute('data-ds-dark-theme')}`,
+);
+check(
+  '0.2.1：字号只投影正文（代码/终端保持官方值）',
+  document.body.style.getPropertyValue('--dsh-content-font-size') === '16px' &&
+    document.body.style.getPropertyValue('--dsh-code-font-size') === '13px' &&
+    document.body.style.getPropertyValue('--dsh-terminal-font-size') === '13px',
+  JSON.stringify({
+    text: document.body.style.getPropertyValue('--dsh-content-font-size'),
+    code: document.body.style.getPropertyValue('--dsh-code-font-size'),
+    terminal: document.body.style.getPropertyValue('--dsh-terminal-font-size'),
+  }),
+);
+
+ui021.fireThemeChange();
+check(
+  '0.2.1：电脑端主题变化后，手机仍保留自己的外观',
+  document.documentElement.getAttribute('data-ds-theme-source') === 'dark' && ui021.calls.length === 0,
+  `${document.documentElement.getAttribute('data-ds-theme-source')} / ${JSON.stringify(ui021.calls)}`,
+);
+
+const ui021Factory = applyWithUiSettings021({
+  remoteLayout: 'phone',
+  remoteTheme: 'default',
+  remoteFontSize: 0,
+});
+await sleep(120);
+check(
+  '0.2.1：出厂值也走本页投影（system + 官方字号）',
+  document.documentElement.getAttribute('data-ds-theme-source') === 'system' &&
+    document.body.style.getPropertyValue('--dsh-content-font-size') === '14px' &&
+    ui021Factory.calls.length === 0,
+  `${document.documentElement.getAttribute('data-ds-theme-source')} / ${document.body.style.getPropertyValue('--dsh-content-font-size')} / ${JSON.stringify(ui021Factory.calls)}`,
+);
 
 delete globalThis.document;
 delete globalThis.MutationObserver;
@@ -919,7 +1043,12 @@ function makeBackEl(tag, attrs = {}) {
     children: [],
     parentElement: null,
     dataset: {},
-    style: {},
+    // 0.2.1 的 UI 设置投影会读/写 body 的 CSS 变量；这里给一个最小可用的 style
+    style: {
+      setProperty(name, value) { this[name] = String(value); },
+      removeProperty(name) { delete this[name]; },
+      getPropertyValue(name) { return this[name] ?? ''; },
+    },
     textContent: '',
     clicks: 0,
     _attrs: new Map(),

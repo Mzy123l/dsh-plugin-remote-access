@@ -7,15 +7,21 @@
 - **不写死地址**：网段、监听地址、端口、上游、落地文件全是配置项。
 - **两种进入方式**：复制带令牌的网址；或者设一个密码，手机开裸地址输一次（之后 30 天免密）。
 - **手机界面能看**：「远程UI布局」可选手机 / 电脑 / 自动；手机布局**只作用于远程页面**，本机界面一个像素都不动。
-- **手机上的官方界面偏好能留下来**：「UI 设置」把「通用设置」里的外观 / 字号 / 工作步骤展示 / 显示代码工作视图 /
-  性能与用量存进本插件的配置（默认「出厂值」＝不干预官方默认），远程页面每次打开都重新套一遍 ——
-  官方那几项在手机上是「改完刷新即还原」的。
+- **手机上的外观/字号只改手机**：「UI 设置」把外观与字号存进本插件配置，每次打开远程页面只投影到**本页 DOM**，
+  不写电脑的设置文档。DSH 0.2.1 起官方设置会跨端写宿主，因此「工作步骤展示 / 显示代码工作视图 / 性能与用量」
+  不再由本插件远程覆盖（它们跟随电脑设置），设置页里会如实写明。
+- **适配 DSH 0.2.1**：`engines.dsh = ^0.2.1-rc.1`；上游地址自动读 `webServer.getOrigin()`，
+  跟随桌面端**系统分配端口**与原生 HTTPS；Host/Origin 改写在两种协议下都正确。
 - **在设置页里改**：保存即热重载（原地关掉旧监听、按新参数重开），不用重启 DSH。
 - **失败可见**：无论成功失败都会写一份自诊断文件，看不到 DSH 日志时也能定位。
 
 ## 安装
 
 三种方式，选一种即可；**装完重启一次 DSH**。
+
+> **版本要求**：本版（1.4.0 起）只适配 **DSH 0.2.1+**（`engines.dsh = ^0.2.1-rc.1`，
+> 覆盖 `0.2.1-rc.1` / `0.2.1-rc.2` 与后续 0.2.x）。DSH 0.2.0 及更早版本请用 `1.3.8`。
+> dshmarket 会按这个字段显示「支持/不兼容」，安装前也能看到。
 
 > **发布记录**：[GitHub Releases](https://github.com/Mzy123l/dsh-plugin-remote-access/releases)
 > （每个版本的说明与 APK）· [npm](https://www.npmjs.com/package/dsh-plugin-remote-access)
@@ -77,10 +83,8 @@ $s = irm https://raw.githubusercontent.com/Mzy123l/dsh-plugin-remote-access/main
 > 链接指向 Releases 而不是某个固定文件名：APK 名形如 `dsh-plugin-remote-access-<版本>.apk`，
 > 每抬一次版本都会换名字，钉死某个文件名迟早会落后。要装具体某一版，进 Release 页挑。
 
-> **APK 与插件不总是同一个号**：APK 只在「动了外壳代码」的那一版重发（两边的号仍然对齐，
-> 只是纯网页半区的版本不重打 APK）。当前插件与 APK 都是 **1.3.8**
-> （[`v1.3.8` Release](https://github.com/Mzy123l/dsh-plugin-remote-access/releases/latest)）。
-> （这一版只动网页半区与宿主半区，外壳代码没动，不用重装 App）。
+> **APK 与插件不总是同一个号**：APK 只在「动了外壳代码」的那一版重发。
+> 当前插件是 **1.4.0**，APK 仍是 **1.3.8**（这一版只动网页半区与宿主半区，外壳代码没动，不用重装 App）。
 
 App 名字就叫 **DSH**，装完图标是那个蓝色看板娘（自适应图标，圆形/方形启动器都正常）。
 
@@ -239,31 +243,32 @@ cookie（默认 30 天）；之后直接访问 `http://<地址>:<端口>/` 即�
 
 ### 手机上的同一页也能改
 
-DSH 的客户端策略让 `configForms` 在非回环页面不可写，但 Remote 通道本身是通的，
-所以那一页直接调 `ctx.remote.settings.describe()` / `mutate()`，写盘跑在 Host 网关自己的上下文里，
-落盘位置与桌面**完全相同**，而且等写盘完成才回执。
+0.2.1 的 ui-settings 不再把非回环页面的设置通道降级成内存态，`configForms` 在手机页上也能写宿主；
+本插件优先走它，读不到（或运行在 0.2.0）时回退到 `ctx.remote.settings.describe()` / `mutate()`。
+两条路写盘位置与桌面**完全相同**，写盘跑在 Host 网关自己的上下文里，而且等写盘完成才回执。
 
-### 「UI 设置」这一组是什么、为什么要有副本
+### 「UI 设置」这一组：外观/字号只改手机
 
 设置页里「远程访问」下面有一层可折叠的**下一级菜单「UI 设置」**，放的是官方「通用设置」里的五项界面偏好
 （外观、字号大小、工作步骤展示、显示代码工作视图、性能与用量）。
 
-官方这几项在**非回环页面**上只能「本页有效、刷新即还原」：ui-settings 把设置通道的持久化降级成内存态
-（`persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'`），读写都到不了宿主 —— 手机端在官方设置里
-改完，一刷新就回到默认。本插件因此存了同一批值，并在**每次打开远程页面**时重新套一遍（桌面端改完、
-手机切回来也会重读）：
+**DSH 0.2.0**：官方这几项在非回环页面上是「本页有效、刷新即还原」（设置通道降级成内存态），
+本插件存一份值并在每次打开远程页面时用官方 setter 重新套一遍。
 
-- 用的是官方自己的「本页」写入入口（`theme.setTheme` / `theme.setFontSize` /
-  `configForms.developerTools.setEnabled` / 官方那两行设置项的 `setTranscriptView`、`setPerformanceUsage`），
-  与你在设置页手点那几行是**同一条路径**；
-- **宿主的官方配置一个字都不写**；本机（回环）页面一个像素都不动（与 `remoteLayout` 同一条硬约束）；
-- `default`（出厂值）不是「什么都不做」，而是**显式套回官方默认值** —— 这样从「完全展开」改回「出厂值」
-  也能真的还原。官方默认值取自官方源码：外观 `system`、字号 `14`、工作步骤展示 Web 端 `detailed`
-  （桌面客户端 `standard`）、显示代码工作视图 `true`、性能与用量 `detailed`；
-- 因此**本插件的配置优先**：在官方「通用设置」里改这几项只对当前页面有效，下一次重读配置时会被本插件的值
-  覆盖。想用官方的默认行为，就把这几项留在「出厂值」；
-- 这一组是**新增的 Host 配置字段**，而宿主的配置 schema 是在 DSH 启动时读进来的：**第一次升级到这一版需要重启
-  一次 DSH**（之后改值、保存都不必重启；浏览器半区刷新页面即可生效）。
+**DSH 0.2.1**：那个降级被取消了（`ConfigFormController` 不再有 persistence/mode），
+远程页面再调官方 setter 就会**直接写电脑的设置**。所以本版改成：
+
+- **外观 / 字号**：只投影到本页 DOM —— root 的 `color-scheme`、`data-ds-theme-source`、body 的
+  `data-ds-dark-theme` 与三种字号的 CSS 变量；**不调用** `theme.setTheme` / `theme.setFontSize`，
+  宿主的官方设置文档一个字都不写。电脑端改主题时会广播 `theme/change`，手机页在官方 presenter
+  之后重新投影自己的外观，所以「电脑切深色、手机仍按自己的设置」；
+- **工作步骤展示 / 显示代码工作视图 / 性能与用量**：0.2.1 只提供「写宿主」的公开入口，
+  没有「只改本页」的路径。继续调用就等于替你改电脑，所以这一版**不再远程覆盖**这三项，
+  它们跟随电脑设置；设置页状态行会写明。0.2.0 上仍然照旧生效；
+- **本机（回环）页面一个像素都不动** —— 与 `remoteLayout` 同一条硬约束；
+- `default`（出厂值）不是「什么都不做」：外观套回 `system`、字号套回官方当前值；
+- 这一组是 Host 配置字段，而配置 schema 在 DSH 启动时读入：**第一次升级到这一版需要重启一次 DSH**
+  （之后改值、保存都不必重启；浏览器半区刷新页面即可生效）。
 
 ### 其余参数
 
@@ -284,17 +289,17 @@ DSH 的客户端策略让 `configForms` 在非回环页面不可写，但 Remote
 | `notifyOnFinish` | `true` | 一轮结束时通知手机：正常跑完与异常结束都算，异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流 / 凭据失效 / 上下文超长 / 服务端错误…）。与「提问」的开关、通道都独立 | ✅ |
 | `notifyOnlyWhenWindowHidden` | `true` | 只在「电脑上的 DSH 窗口不可见」时才让 App 提醒；关掉则 App 一退到后台就提醒 | ✅ |
 | `remoteTheme` | `'default'` | 「UI 设置」一组里的**外观**：`default`（出厂值）/ `dark`（深色）/ `light`（浅色）/ `system`（跟随系统）。**只作用于远程页面**，且不写宿主设置文档 | ✅ |
-| `remoteFontSize` | `0` | 正文字号（10–22 px）：`0` = 出厂值（14） | ✅ |
-| `remoteTranscriptView` | `'default'` | 工作步骤展示：`default` / `compact`（简洁）/ `standard`（标准）/ `detailed`（详细）/ `verbose`（完全展开） | ✅ |
-| `remoteDeveloperTools` | `'default'` | 显示代码工作视图：`default`（出厂值＝开启）/ `on` / `off` | ✅ |
-| `remotePerformanceUsage` | `'default'` | 性能与用量：`default` / `compact`（简洁）/ `detailed`（详细） | ✅ |
+| `remoteFontSize` | `0` | 正文字号（10–22 px）：`0` = 出厂值（14）。只投影到远程页面 | ✅ |
+| `remoteTranscriptView` | `'default'` | 工作步骤展示：`default` / `compact` / `standard` / `detailed` / `verbose`。**DSH 0.2.1 起跟随电脑设置**（官方只提供写宿主入口） | ✅ |
+| `remoteDeveloperTools` | `'default'` | 显示代码工作视图：`default`（开启）/ `on` / `off`。**DSH 0.2.1 起跟随电脑设置** | ✅ |
+| `remotePerformanceUsage` | `'default'` | 性能与用量：`default` / `compact` / `detailed`。**DSH 0.2.1 起跟随电脑设置** | ✅ |
 | `cacheEnabled` | `true` | 手机端资源缓存总开关：给**上游没给缓存头**的静态资源（图片 / 视频 / 字体 / 打包产物…）补新鲜期与弱校验器。API、HTML、`no-store` 一律不碰 | ✅ |
 | `cacheTtlMinutes` | `10` | 上面那类资源的**手机端新鲜期**（1–1440 分钟）：期内手机一次请求都不发；过期后先出旧的、后台只做一次「头部级」核对（零字节） | ✅ |
 | `cacheProbe` | `true` | 过期核对时额外取首/尾各 64 KB 做指纹（治「换了图但字节数一模一样」）。不整份哈希、不落盘 | ✅ |
 | `cacheOverrideNoStore` | `false` | **默认关**：连上游标了 `no-store` 的**大静态媒体**（图片 / 音频 / 视频）也缓存。有些插件对「实时抓帧 / 预览图」写 `no-store`，一取就是几 MB、每次进页面都重来；打开后最多会看到「新鲜期」这么久之前的旧帧（配 SWR：先出旧的、后台悄悄换新）。判大小用探针读到的首段 —— **没有 `content-length` 的分块响应同样算数**（真实抓帧就是这种）；读完不足 64 KB 的实时小端点不会被顺手缓存 | ✅ |
 | `cacheFullRange` | `false` | **默认关**：把「**从 0 取到结尾**」的整段 Range 请求当成整份来缓存（上游回的 206 覆盖整份，而浏览器永远不缓存 206 —— 实测壁纸音轨每次进页面重下 3.8 MB × 2）。只有「请求就是 `bytes=0-`」且「上游回的确实覆盖 `0..total-1`」时才改写成 200，字节一模一样；拖进度那种中间分段一律原样透传 | ✅ |
 | `listen` | `['auto']` | `auto` = 只监听上面网段里的本机地址；也可写 `['100.x.y.z']` | — |
-| `upstream` | `'auto'` | DSH 界面地址；`auto` 读 `ctx.webServer.port` | — |
+| `upstream` | `'auto'` | DSH 界面地址；`auto` 读 `ctx.webServer.getOrigin()`（协议 + 真实端口，兼容 0.2.1 的系统分配端口与 HTTPS）。也可显式写 `http://127.0.0.1:3080` / `https://...` | — |
 | `rewriteHost` | `true` | 把 `Host`/`Origin` 改写成上游 authority | — |
 | `forwardClientHeaders` | `true` | 转发 `x-forwarded-for` / `x-forwarded-proto` | — |
 | `timeoutMs` | `0` | 等上游**响应头**的超时（毫秒），`0` = 不超时。响应头一到就交棒，正文/流式传输不会被它掐断 | — |
@@ -545,10 +550,10 @@ DSH 的界面是为桌面三栏设计的。在 390px 宽的手机上，它的表
 （`Config` 是原生 Schemastery schema 且字段都标了 `.volatile()`；`package.json` 把
 `@deepseek-ai/schemastery` 声明成了 peerDependency）。改完 `package.json` 要重启一次 DSH 才生效。
 
-**手机上在「通用设置」里改完，刷新就变回去了** — 那几项（外观 / 字号大小 / 工作步骤展示 / 显示代码工作视图 /
-性能与用量）在非回环页面上是「本页有效、刷新即还原」的。要让它留住，就用本插件的
-「设置 → 远程访问 → **UI 设置**」改：这份值存在宿主配置里，每次打开远程页面重新套一遍
-（默认「出厂值」＝不干预官方默认，行为与官方一致）。
+**手机上改的外观/字号会影响电脑吗** — 不会。0.2.1 起官方设置本来会跨端写宿主，所以本插件把
+「外观 / 字号大小」改成**只投影到本页 DOM**：手机上看到的是本插件配置里的值，电脑的设置文档不动。
+「工作步骤展示 / 显示代码工作视图 / 性能与用量」在 0.2.1 上没有「只改本页」的公开入口，因此本插件
+不再远程覆盖，它们跟随电脑设置；要改请到电脑的官方「通用设置」里改。
 
 **升级后保存「UI 设置」报 `Config field "…" is not volatile`** — 宿主还不认识这个新字段
 （宿主的配置 schema 在 DSH 启动时读入，改 `index.js` 不会热生效）。**重启一次 DSH** 即可，
@@ -581,8 +586,12 @@ node --check index.js                 # 语法
 node tools/test-remote-access.mjs     # Host 功能测试（起一个假上游，不需要 DSH）
 node tools/test-client.mjs            # 客户端冒烟测试（极简 React / 宿主桩子真跑一遍设置页，不需要浏览器）
 node tools/check-config-schema.mjs    # 用安装包里的真 Schemastery 校验 Config（找不到安装包则 SKIP）
+node tools/check-dsh-compat.mjs       # 用 DSH 0.2.1 自己的 evaluatePluginCompatibility + 市场索引校验器验 engines.dsh
 node tools/e2e-cache-local.mjs        # 手动：起一个「什么都不发缓存头」的假上游 + 本插件代理，用真浏览器/curl 验缓存与 304
 ```
+
+> 宿主跑的是 Electron 内置的 Node 24：流式错误路径与 Node 22 不完全相同。
+> 建议再用 `ELECTRON_RUN_AS_NODE=1` + 安装目录里的 `DeepSeek Harness.exe` 跑一遍上面几个脚本。
 
 `e2e-cache-local.mjs` 会在临时端口上跑起来并打印带票网址（新鲜期压到 1 分钟，几分钟内就能看到
 「过期 → 条件请求 → 304 零字节」）。它只是给人手验的，不参与自动测试。
@@ -649,10 +658,10 @@ node tools/e2e-cache-local.mjs        # 手动：起一个「什么都不发缓�
 | 路径 | 说明 |
 |---|---|
 | `index.js` | 插件 Host 半区（零依赖，只用 `node:` 内置模块）：反向代理、访问门、401 说明页、热重载；手机端缓存策略（响应头治理 + 用首/尾片段探针替手机判定 304，正文一律不落盘）与 `/__remote_access__/cache` 自检端点；外加给安卓外壳的待答选择状态（`/__remote_access__/notify` 长轮询）与窗口可见性上报路由 |
-| `client.js` | 浏览器半区：设置页参数表单（含「UI 设置」「缓存」两层子菜单）+ 只作用于远程页面的手机布局引擎 + 手机端「回车=换行」+ 把官方那五项界面偏好套到远程页面 + 给安卓外壳的返回键入口（手机布局下的浮层层数 / 关掉最上面那层）+ 本机页面的窗口可见性上报 |
+| `client.js` | 浏览器半区：设置页参数表单（含「UI 设置」「缓存」两层子菜单）+ 只作用于远程页面的手机布局引擎 + 手机端「回车=换行」+ 远程页面的外观/字号本页投影（0.2.1 不写宿主）+ 给安卓外壳的返回键入口 + 本机页面的窗口可见性上报 |
 | `docs/release-notes/` | 每个版本的 GitHub Release 正文（dshmarket 的「更新说明」就是从 Release 正文读的，发布时直接贴） |
-| `cordis.patch.yml` | bundle 的 patch：插入插件行、固定选目录器 |
-| `package.json` | 清单（`dsh.bundle.patch` / `exports` / `icon` / `meta`） |
+| `cordis.patch.yml` | bundle 的 patch：插入插件行（`upstream: auto`）、固定选目录器 |
+| `package.json` | 清单（`engines.dsh` / `dsh.bundle.patch` / `exports` / `icon` / `meta`） |
 | `locale/{zh,en}.json` | 插件页显示用的标题与说明 |
 | `icon.svg` | 插件页图标 |
 | `tools/` | 测试（Host / 客户端 / Config 校验）与从 DSH 安装包里取文件的工具 |
@@ -661,6 +670,22 @@ node tools/e2e-cache-local.mjs        # 手动：起一个「什么都不发缓�
 | `LICENSE` | MIT |
 
 ## 更新日志
+
+### 1.4.0
+- **适配 DSH 0.2.1**（`engines.dsh = ^0.2.1-rc.1`，0.2.0 及更早请用 1.3.8）。
+  dshmarket 会按这个字段显示兼容性，安装前就能看到。
+- **上游自动跟随桌面端的系统分配端口**：0.2.1 的桌面端不再固定 19387，`upstream: auto` 改为优先读
+  `ctx.webServer.getOrigin()`（协议 + 真实监听端口）；`cordis.patch.yml` 里的默认值也从写死端口改成 `auto`。
+- **支持 0.2.1 的原生 HTTPS**：上游是 `https:` 时，HTTP 代理、缓存探针、WebSocket 透传都走 TLS
+  （只连本机回环，接受 DSH 自签证书），`Host`/`Origin` 也按实际协议改写。
+- **远程「外观 / 字号」只投影本页，不写电脑设置**：0.2.1 的 ui-settings 取消了「非回环 → memory」降级，
+  官方 setter 会直接写宿主。本版改为只设置本页 DOM（`color-scheme` / `data-ds-theme-source` /
+  `data-ds-dark-theme` / 字号 CSS 变量），并跟随 `theme/change` 重新投影；`theme.setFontSize` 的
+  0.2.0 单参 / 0.2.1 双参签名都兼容。
+- **「工作步骤展示 / 显示代码工作视图 / 性能与用量」不再远程覆盖**：0.2.1 只提供写宿主入口，
+  继续调用会改电脑；这三项改为跟随电脑设置，设置页状态行会说明。0.2.0 上仍照旧生效。
+- **清单补齐 dshmarket 要求**：`engines.dsh`、`./icon.svg` 导出、中英文展示文本；
+  新增 `tools/check-dsh-compat.mjs`，用 DSH 自己的 `evaluatePluginCompatibility` 与市场索引校验器实测。
 
 ### 1.3.8
 - **手机端「回车 = 换行」，点「发送」才发送**。手机上的回车键本来就小，官方语义下它直接发送，

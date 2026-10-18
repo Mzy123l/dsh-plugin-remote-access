@@ -1,15 +1,52 @@
 // test-remote-access.mjs —— 不依赖 DSH 的功能测试（node tools/test-remote-access.mjs）
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter, contentRevOf, cacheSkipReason, describeAgentError } =
+const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter, contentRevOf, cacheSkipReason, describeAgentError, parseUpstream, resolveUpstream } =
   await import(new URL('../index.js', import.meta.url).href);
 
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '   ' + extra : ''}`);
+
+// ---------------------------------------------------------------- DSH 0.2.1：地址与协议
+//
+// 0.2.1 的桌面端改用系统分配端口，Web 还能自己开 HTTPS。auto 必须优先读
+// webServer.getOrigin()（协议 + 真实端口），不能再靠写死 19387。
+check(
+  '0.2.1：显式 upstream 保留 https 协议',
+  JSON.stringify(parseUpstream('https://127.0.0.1:3080')) === JSON.stringify({ protocol: 'https:', host: '127.0.0.1', port: 3080 }),
+  JSON.stringify(parseUpstream('https://127.0.0.1:3080')),
+);
+check(
+  '0.2.1：显式 upstream 的 http 协议',
+  JSON.stringify(parseUpstream('http://127.0.0.1:58945')) === JSON.stringify({ protocol: 'http:', host: '127.0.0.1', port: 58945 }),
+  JSON.stringify(parseUpstream('http://127.0.0.1:58945')),
+);
+const originAuto = resolveUpstream(
+  { get: (name) => (name === 'webServer' ? { getOrigin: () => 'http://127.0.0.1:58945' } : undefined) },
+  { upstream: 'auto' },
+  () => {},
+);
+check(
+  '0.2.1：auto 从 getOrigin() 读到随机端口',
+  originAuto?.protocol === 'http:' && originAuto?.port === 58945,
+  JSON.stringify(originAuto),
+);
+const tlsAuto = resolveUpstream(
+  { get: (name) => (name === 'webServer' ? { port: 3080, protocol: 'https:' } : undefined) },
+  { upstream: 'auto' },
+  () => {},
+);
+check(
+  '0.2.1：auto 跟随 webServer.protocol=https',
+  tlsAuto?.protocol === 'https:' && tlsAuto?.port === 3080,
+  JSON.stringify(tlsAuto),
+);
 
 // 假上游：模拟 DSH 界面（把收到的 Host/Origin/token 回显出来）+ 一个 upgrade 端点
 const upstream = http.createServer((req, res) => {
@@ -1719,6 +1756,97 @@ check(
 disposeCache();
 cacheUpstream.close();
 try { fs.rmSync(cacheFile, { force: true }); } catch { /* 忽略 */ }
+
+// ---------------------------------------------------------------- 场景：DSH 0.2.1 的 HTTPS 上游
+//
+// 0.2.1 的 Web 可以自己开 HTTPS。这里用 openssl 现场签一张自签证书，起一个 HTTPS 假上游，
+// 再让插件以 https:// 为上游跑一遍 HTTP 转发 + WebSocket 透传。没有 openssl 就明确 SKIP。
+let httpsUpstream = null;
+let httpsDispose = null;
+let httpsDir = null;
+try {
+  httpsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-https-'));
+  const keyFile = path.join(httpsDir, 'key.pem');
+  const certFile = path.join(httpsDir, 'cert.pem');
+  execFileSync(
+    'openssl',
+    ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyFile, '-out', certFile, '-days', '1', '-subj', '/CN=127.0.0.1'],
+    { stdio: 'ignore' },
+  );
+  httpsUpstream = https.createServer(
+    { key: fs.readFileSync(keyFile), cert: fs.readFileSync(certFile) },
+    (req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(`secure host=${req.headers.host} origin=${req.headers.origin ?? '-'}`);
+    },
+  );
+  httpsUpstream.on('upgrade', (req, socket) => {
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+    socket.write('hello-tls');
+    socket.end();
+  });
+  await new Promise((r) => httpsUpstream.listen(0, '127.0.0.1', r));
+  const httpsPort = httpsUpstream.address().port;
+  const httpsStatus = path.join(os.tmpdir(), `ra-https-status-${Date.now()}.txt`);
+  httpsDispose = apply(makeCtx(), {
+    allowCidrs: ['127.0.0.0/8'],
+    listen: ['127.0.0.1'],
+    port: 0,
+    upstream: `https://127.0.0.1:${httpsPort}`,
+    urlFile: httpsStatus,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  const httpsUrl = readUrl(httpsStatus);
+  const httpsProxyPort = httpsUrl.url ? Number(new URL(httpsUrl.url).port) : 0;
+
+  const secureBody = await new Promise((resolve) => {
+    http
+      .get({ host: '127.0.0.1', port: httpsProxyPort, path: '/', headers: { origin: 'http://127.0.0.1:9999' } }, (res) => {
+        let d = '';
+        res.on('data', (c) => (d += c));
+        res.on('end', () => resolve(d));
+      })
+      .on('error', (e) => resolve('ERR ' + e.message));
+  });
+  check(
+    '0.2.1：HTTPS 上游能正常转发（Host/Origin 按 https 改写）',
+    secureBody.includes('secure host=127.0.0.1:') && secureBody.includes(`origin=https://127.0.0.1:${httpsPort}`),
+    secureBody.slice(0, 120),
+  );
+
+  const secureWs = await new Promise((resolve) => {
+    const sock = net.connect(httpsProxyPort, '127.0.0.1', () => {
+      sock.write(`GET /ws HTTP/1.1\r\nHost: 127.0.0.1:${httpsProxyPort}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n`);
+    });
+    let d = '';
+    sock.on('data', (c) => {
+      d += c.toString();
+      if (d.includes('hello-tls')) {
+        sock.destroy();
+        resolve(d);
+      }
+    });
+    sock.on('error', (e) => resolve('ERR ' + e.message));
+    setTimeout(() => {
+      sock.destroy();
+      resolve(d || '(超时)');
+    }, 2000);
+  });
+  check('0.2.1：HTTPS 上游的 WebSocket 也能透传', secureWs.includes('101') && secureWs.includes('hello-tls'), secureWs.split('\r\n')[0]);
+  httpsDispose();
+  httpsDispose = null;
+  await new Promise((r) => httpsUpstream.close(r));
+  httpsUpstream = null;
+  fs.rmSync(httpsStatus, { force: true });
+} catch (err) {
+  check('0.2.1：HTTPS 上游测试（openssl 不可用则 SKIP）', true, `SKIP: ${String(err?.message ?? err).slice(0, 100)}`);
+  try { httpsDispose?.(); } catch { /* 忽略 */ }
+  try { httpsUpstream?.close(); } catch { /* 忽略 */ }
+} finally {
+  try {
+    if (httpsDir) fs.rmSync(httpsDir, { recursive: true, force: true });
+  } catch { /* 忽略 */ }
+}
 
 for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile, lateFile, notifyFile]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }

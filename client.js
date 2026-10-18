@@ -3,16 +3,14 @@
  *
  * 注册位置：settings.section（设置左侧导航的一页）。
  *
- * 两条读写通道，按页面所在位置自动选：
+ * 两条读写通道，按 0.2.1 的实际行为自动选：
  *   1. 本机（回环）页面 —— 官方通道 ctx.configForms.get('remote-access')：
- *      读 form.getSnapshot() → { status, value, revision, writable, mode }，
+ *      读 form.getSnapshot() → { status, value, revision, writable }，
  *      写 form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>。
- *   2. 手机等远程页面 —— DSH 的客户端策略让 configForms 在非回环页面恒为 unavailable
- *      （ui-settings 里 `persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'`），
- *      但 Remote 通道本身是通的（那一页显示的数值就是 remote.settings.describe 来的），
- *      所以直接调 ctx.remote.settings.describe() / mutate()：
- *      写盘跑在 Host 网关自己的上下文里（不会撞上 HMR 事务），而且**等写盘完成才返回**，
- *      拿到的就是新值。两条路写的是同一个地方（profile 的 cordis.patch.yml）。
+ *   2. 手机等远程页面 —— 0.2.1 的 ui-settings 已经取消了「非回环 → memory」的降级，
+ *      configForms 在远程页面上也能写宿主；但为了兼容 0.2.0 以及「远程页面的 Remote
+ *      连接还没就绪」的瞬间，这里仍保留 ctx.remote.settings.describe() / mutate() 回退。
+ *      两条路写的是同一个地方（profile 的 cordis.patch.yml），都会等写盘完成才返回。
  *
  * 页面上只说人话：失败给一句「下一步做什么」，内部状态只写开发者控制台。
  */
@@ -33,7 +31,7 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.3.8';
+    const CLIENT_VERSION = '1.4.0';
 
     // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [
@@ -1423,14 +1421,22 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
 
     // ---------------------------------------------------------------- UI 设置（只在远程页面生效）
     //
-    // 官方的「通用设置」里有五项界面偏好。它们在**非回环页面**上是「本页有效、刷新即还原」：
-    // ui-settings 把设置通道的持久化降级成内存态（persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'），
-    // 读写都到不了宿主；但官方这几处的 setter 都是「先改本页状态、再尝试持久化」，写不进去不影响本页生效。
-    // 我们这份配置就是那份还原的补丁：值存在宿主配置里（手机端也能改），每次打开远程页面重新套一遍。
+    // 官方的「通用设置」里有五项界面偏好。
     //
-    // 三条硬约束，改这里之前先读一遍：
-    //   1. 本机（回环）页面一个像素都不动 —— 与布局控制器同一个开关（ctx.remote.$host.isLoopback）。
-    //   2. 宿主的官方配置一个字都不写：全部走官方自己的「本页」写入入口，宿主设置文档保持原样。
+    // 0.2.0：非回环页面把设置通道降级成内存态
+    //        （`persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'`），
+    //        官方 setter 只改本页；本插件存一份值，每次打开远程页面重新套一遍。
+    // 0.2.1：这个降级被取消了（ConfigFormController 不再有 persistence/mode），
+    //        远程页面调官方 setter 会**直接写宿主设置**。继续沿用那套，会把「手机选的外观」
+    //        悄悄改成电脑的外观。所以 0.2.1 起：
+    //          · 外观 / 字号：只投影到本页 DOM（不写宿主），本机页面仍一个像素都不动；
+    //          · 工作步骤展示 / 显示代码工作视图 / 性能与用量：官方只保留「写宿主」的入口，
+    //            没有公开的「只改本页」路径，因此不再远程覆盖，状态行会如实说明；
+    //          · 0.2.0 仍走原来的官方入口（本页生效）。
+    //
+    // 三条硬约束不变：
+    //   1. 本机（回环）页面一个像素都不动 —— 与布局控制器同一个开关。
+    //   2. 宿主的官方配置一个字都不写。
     //   3. 没有 DOM / 没有对应服务的环境必须安静地什么都不做（tools/test-client.mjs 的桩子）。
     const UI_FIELDS = [
       'remoteTheme',
@@ -1438,6 +1444,16 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       'remoteTranscriptView',
       'remoteDeveloperTools',
       'remotePerformanceUsage',
+    ];
+
+    /** 0.2.1 的 ui-layout 用这两个属性切换内置调色板（与官方 ThemePresenter 同一对） */
+    const THEME_SOURCE_ATTR = 'data-ds-theme-source';
+    const DARK_THEME_ATTR = 'data-ds-dark-theme';
+    /** 0.2.1 的 ui-layout 把三种字号写成 body 上的 CSS 变量 */
+    const FONT_SIZE_VARS = [
+      ['text', '--dsh-content-font-size'],
+      ['code', '--dsh-code-font-size'],
+      ['terminal', '--dsh-terminal-font-size'],
     ];
 
     /**
@@ -1456,6 +1472,99 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       setDeveloperTools: true,
       setPerformanceUsage: 'detailed',
     };
+
+    /**
+     * 0.2.1 起官方设置表单在远程页面上也可写（快照里不再有 0.2.0 的 `mode` 字段）。
+     * 用它决定要不要把「官方 setter 会写宿主」这条路径换成本页投影。
+     */
+    function settingsPersistAcrossPages(ctx) {
+      try {
+        const snapshot = ctx?.configForms?.get?.(NS)?.getSnapshot?.();
+        return snapshot !== undefined && snapshot !== null && !('mode' in snapshot);
+      } catch {
+        return false;
+      }
+    }
+
+    function themeServiceOf(ctx) {
+      try {
+        return typeof ctx?.get === 'function' ? ctx.get('theme') : null;
+      } catch {
+        return null;
+      }
+    }
+
+    /** 把「外观」只投影到本页：改 root/body 属性与 color-scheme，不碰 ctx.theme 的持久化入口 */
+    function projectThemeLocal(ctx, raw) {
+      if (typeof document === 'undefined' || document.documentElement === null) return;
+      const preference = ['dark', 'light', 'system'].includes(String(raw)) ? String(raw) : FACTORY_UI.setTheme;
+      let scheme = preference;
+      if (preference === 'system') {
+        let dark = false;
+        try {
+          dark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+        } catch { /* 老 WebView 没有 matchMedia：按浅色 */ }
+        scheme = dark ? 'dark' : 'light';
+      }
+      const root = document.documentElement;
+      root.style.colorScheme = scheme;
+      root.setAttribute(THEME_SOURCE_ATTR, preference === 'system' ? 'system' : scheme);
+      const body = document.body;
+      if (!body) return;
+      if (scheme === 'dark') body.setAttribute(DARK_THEME_ATTR, '');
+      else body.removeAttribute(DARK_THEME_ATTR);
+      // 宿主若用自定义主题，会把自己的 token 以内联变量挂在 body 上；本页换成内置浅/深色时
+      // 必须先撤掉它们，否则内置调色板会被旧 token 盖住。
+      try {
+        const snapshot = themeServiceOf(ctx)?.getTheme?.();
+        for (const name of Object.keys(snapshot?.active?.tokens ?? {})) body.style.removeProperty(name);
+      } catch { /* 忽略 */ }
+    }
+
+    /** 把「字号大小」只投影到本页；0 = 恢复官方当前的字号（三种角色都恢复） */
+    function projectFontSizeLocal(ctx, raw) {
+      if (typeof document === 'undefined' || document.body === null) return;
+      const px = Number(raw);
+      let snapshot = null;
+      try { snapshot = themeServiceOf(ctx)?.getTheme?.(); } catch { /* 忽略 */ }
+      const host = snapshot?.fontSizes ?? {
+        text: FACTORY_UI.setFontSize,
+        code: FACTORY_UI.setFontSize,
+        terminal: FACTORY_UI.setFontSize,
+      };
+      const valid = Number.isInteger(px) && px >= 10 && px <= 22;
+      // 与 1.3.8 的语义一致：这一项只改「正文」字号；代码/终端保持官方值。
+      // 改成「出厂值」时三种角色都恢复，免得上一轮的值残留在本页。
+      for (const [role, name] of FONT_SIZE_VARS) {
+        if (valid && role !== 'text') {
+          document.body.style.setProperty(name, `${Number(host[role] ?? FACTORY_UI.setFontSize)}px`);
+        } else {
+          document.body.style.setProperty(name, `${valid ? px : Number(host[role] ?? FACTORY_UI.setFontSize)}px`);
+        }
+      }
+    }
+
+    /** 控制器退出时把本页恢复成宿主自己的主题/字号（不触发任何写盘） */
+    function restoreHostUi(ctx) {
+      if (typeof document === 'undefined' || document.documentElement === null) return;
+      let snapshot = null;
+      try { snapshot = themeServiceOf(ctx)?.getTheme?.(); } catch { /* 忽略 */ }
+      if (!snapshot) return;
+      const scheme = snapshot.active?.colorScheme === 'dark' ? 'dark' : 'light';
+      const root = document.documentElement;
+      root.style.colorScheme = scheme;
+      root.setAttribute(THEME_SOURCE_ATTR, snapshot.preference === 'system' ? 'system' : scheme);
+      const body = document.body;
+      if (body) {
+        if (scheme === 'dark') body.setAttribute(DARK_THEME_ATTR, '');
+        else body.removeAttribute(DARK_THEME_ATTR);
+        for (const [name, value] of Object.entries(snapshot.active?.tokens ?? {})) body.style.setProperty(name, value);
+        for (const [role, name] of FONT_SIZE_VARS) {
+          const px = Number(snapshot.fontSizes?.[role] ?? FACTORY_UI.setFontSize);
+          body.style.setProperty(name, `${px}px`);
+        }
+      }
+    }
 
     /** 「UI 设置」在页面上的生效近况：给设置页那一组显示一行状态 */
     let uiStatus = null;
@@ -1487,7 +1596,17 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         try { return typeof ctx.get === 'function' ? ctx.get('theme') : null; } catch { return null; }
       })();
       if (theme && typeof theme.setTheme === 'function') found.setTheme = (id) => theme.setTheme(id);
-      if (theme && typeof theme.setFontSize === 'function') found.setFontSize = (px) => theme.setFontSize(px);
+      if (theme && typeof theme.setFontSize === 'function') {
+        found.setFontSize = (px) => {
+          // 0.2.0 是 setFontSize(px)；0.2.1 改成 setFontSize(role, px)（text/code/terminal）。
+          // 这个入口只在 0.2.0 的远程页面用；0.2.1 走本页投影，不写宿主。
+          if (theme.setFontSize.length >= 2) {
+            for (const role of ['text', 'code', 'terminal']) theme.setFontSize(role, px);
+          } else {
+            theme.setFontSize(px);
+          }
+        };
+      }
       const developerTools = (() => {
         try {
           const forms = typeof ctx.get === 'function' ? ctx.get('configForms') : null;
@@ -1517,13 +1636,15 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
     }
 
     /**
-     * 把读到的配置套到本页上。返回 { applied, pending }：
-     * applied = 已经套上去的项（中文名，给状态行用）；pending = 入口还没就绪的项。
+     * 把读到的配置套到本页上。返回 { applied, pending, skipped }：
+     * applied = 已经套上去的项（中文名，给状态行用）；pending = 入口还没就绪的项；
+     * skipped = 0.2.1 上「官方只提供写宿主入口、无法只作用于本页」而停用的项。
      * 单项失败只记一条 console.warn —— 官方组件缺席时（比如关掉了 ui-theme）整套照常跑。
      */
-    function applyUiSettings(config, setters) {
+    function applyUiSettings(config, setters, { ctx, localOnly = false } = {}) {
       const applied = [];
       const pending = [];
+      const skipped = [];
       const warn = (label, err) => {
         try { console.warn('[remote-access] 套用「' + label + '」失败：', err); } catch { /* 忽略 */ }
       };
@@ -1532,27 +1653,43 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         if (typeof setter !== 'function') { pending.push(label); return; }
         try { apply(setter); applied.push(label); } catch (err) { warn(label, err); }
       };
-      run('setTheme', '外观', (set) => {
+      const runLocal = (label, apply) => {
+        try { apply(); applied.push(label); } catch (err) { warn(label, err); }
+      };
+      const themeValue = () => {
         const raw = String(config.remoteTheme ?? 'default');
-        set(['dark', 'light', 'system'].includes(raw) ? raw : FACTORY_UI.setTheme);
-      });
-      run('setFontSize', '字号大小', (set) => {
+        return ['dark', 'light', 'system'].includes(raw) ? raw : FACTORY_UI.setTheme;
+      };
+      const fontSizeValue = () => {
         const px = Number(config.remoteFontSize);
-        set(Number.isInteger(px) && px >= 10 && px <= 22 ? px : FACTORY_UI.setFontSize);
-      });
-      run('setTranscriptView', '工作步骤展示', (set) => {
-        const raw = String(config.remoteTranscriptView ?? 'default');
-        set(['compact', 'standard', 'detailed', 'verbose'].includes(raw) ? raw : FACTORY_UI.setTranscriptView);
-      });
-      run('setDeveloperTools', '显示代码工作视图', (set) => {
-        const raw = String(config.remoteDeveloperTools ?? 'default');
-        set(raw === 'on' ? true : raw === 'off' ? false : FACTORY_UI.setDeveloperTools);
-      });
-      run('setPerformanceUsage', '性能与用量', (set) => {
-        const raw = String(config.remotePerformanceUsage ?? 'default');
-        set(['compact', 'detailed'].includes(raw) ? raw : FACTORY_UI.setPerformanceUsage);
-      });
-      return { applied, pending };
+        return Number.isInteger(px) && px >= 10 && px <= 22 ? px : FACTORY_UI.setFontSize;
+      };
+      if (localOnly) {
+        // 0.2.1：只投影到本页，绝不调用会写宿主设置的官方 setter。
+        if (ctx) {
+          runLocal('外观', () => projectThemeLocal(ctx, themeValue()));
+          runLocal('字号大小', () => projectFontSizeLocal(ctx, config.remoteFontSize));
+        } else {
+          pending.push('外观', '字号大小');
+        }
+        skipped.push('工作步骤展示', '显示代码工作视图', '性能与用量');
+      } else {
+        run('setTheme', '外观', (set) => set(themeValue()));
+        run('setFontSize', '字号大小', (set) => set(fontSizeValue()));
+        run('setTranscriptView', '工作步骤展示', (set) => {
+          const raw = String(config.remoteTranscriptView ?? 'default');
+          set(['compact', 'standard', 'detailed', 'verbose'].includes(raw) ? raw : FACTORY_UI.setTranscriptView);
+        });
+        run('setDeveloperTools', '显示代码工作视图', (set) => {
+          const raw = String(config.remoteDeveloperTools ?? 'default');
+          set(raw === 'on' ? true : raw === 'off' ? false : FACTORY_UI.setDeveloperTools);
+        });
+        run('setPerformanceUsage', '性能与用量', (set) => {
+          const raw = String(config.remotePerformanceUsage ?? 'default');
+          set(['compact', 'detailed'].includes(raw) ? raw : FACTORY_UI.setPerformanceUsage);
+        });
+      }
+      return { applied, pending, skipped };
     }
 
     /**
@@ -1571,6 +1708,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       let attempt = 0;
       let retryTimer = null;
       const offs = [];
+      // 0.2.1 的官方设置会跨端写宿主；这时外观/字号只做本页投影，其余三项不覆盖。
+      const localOnly = settingsPersistAcrossPages(ctx);
 
       /** 退避重试：次数用完就停（页面状态行会说明哪几项没接上） */
       function scheduleRetry(run, limit) {
@@ -1584,8 +1723,13 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       function apply() {
         if (stopped || config === null) return;
         if (setters === null) setters = officialUiSetters(ctx);
-        const result = applyUiSettings(config, setters);
-        publishUiStatus({ applied: result.applied, pending: result.pending });
+        const result = applyUiSettings(config, setters, { ctx, localOnly });
+        publishUiStatus({
+          applied: result.applied,
+          pending: result.pending,
+          skipped: result.skipped,
+          localOnly,
+        });
         if (result.pending.length > 0) {
           setters = null; // 入口是「拿到就用」，缺的那几个下次重新找一遍
           scheduleRetry(apply, 8);
@@ -1620,6 +1764,14 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           if (typeof off === 'function') offs.push(off);
         } catch { /* 忽略 */ }
       };
+      // 0.2.1：桌面端改主题也会广播 theme/change，官方 presenter 会先套宿主主题；
+      // 本页的远程外观必须在它之后重新投影一次，否则手机上会瞬间跟着电脑变。
+      on(() => ctx.on('theme/change', () => {
+        if (!localOnly || stopped || config === null) return;
+        const raw = String(config.remoteTheme ?? 'default');
+        projectThemeLocal(ctx, ['dark', 'light', 'system'].includes(raw) ? raw : FACTORY_UI.setTheme);
+        projectFontSizeLocal(ctx, config.remoteFontSize);
+      }));
       on(() => ctx.on('connection/reset', () => { attempt = 0; setters = null; load(); }));
       on(() => ctx.remote.$on?.('settings/document-updated', () => { attempt = 0; load(); }));
       // 官方那两行的注册要等 settings.general.item 被声明之后才拿得到 → 注册一变就重试一次
@@ -1647,6 +1799,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         for (const off of offs) {
           try { off(); } catch { /* 忽略 */ }
         }
+        if (localOnly) restoreHostUi(ctx);
         uiStatus = null;
       };
     }
@@ -2026,9 +2179,14 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const uiHint = uiState
             ? uiState.pending.length > 0
               ? `暂时没接上官方入口：${uiState.pending.join('、')}`
-              : uiState.applied.length > 0
-                ? `已套用到本页：${uiState.applied.join('、')}`
-                : '本页无需套用'
+              : uiState.localOnly
+                ? `已只在本页应用：${uiState.applied.join('、') || '无'}` +
+                  (uiState.skipped.length > 0
+                    ? `；${uiState.skipped.join('、')} 在 DSH 0.2.1 起跟随电脑设置（官方只提供写宿主入口，本插件不替你改电脑）`
+                    : '')
+                : uiState.applied.length > 0
+                  ? `已套用到本页：${uiState.applied.join('、')}`
+                  : '本页无需套用'
             : '保存后，在远程页面打开时生效（本机界面不受影响）';
 
           const renderField = (field) => {

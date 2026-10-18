@@ -17,7 +17,9 @@
  */
 
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
+import tls from 'node:tls';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -458,16 +460,31 @@ function localAddrsIn(cidrs) {
 
 // ---------------------------------------------------------------- 上游探测
 
-function parseUpstream(spec) {
+/**
+ * 解析上游地址。0.2.1 起 Web 可以自己开 HTTPS（`--tls-cert/--tls-key`），
+ * 所以这里必须把协议一起带出来 —— 只记 host/port 会拿 http 去连 https 端口。
+ * @returns {{ protocol: 'http:'|'https:', host: string, port: number } | null}
+ */
+export function parseUpstream(spec) {
   const s = String(spec).trim();
-  let m = /^https?:\/\/([^/:]+)(?::(\d+))?/.exec(s);
-  if (m) return { host: m[1], port: Number(m[2] || (s.startsWith('https') ? 443 : 80)) };
+  let m = /^(https?):\/\/([^/:]+)(?::(\d+))?/.exec(s);
+  if (m) {
+    const secure = m[1] === 'https';
+    return { protocol: secure ? 'https:' : 'http:', host: m[2], port: Number(m[3] || (secure ? 443 : 80)) };
+  }
   m = /^([^:/]+):(\d+)$/.exec(s);
-  if (m) return { host: m[1], port: Number(m[2]) };
+  if (m) return { protocol: 'http:', host: m[1], port: Number(m[2]) };
   return null;
 }
 
-function resolveUpstream(ctx, cfg, note) {
+/**
+ * 探测本机 DSH 界面的地址。
+ *
+ * 0.2.1 的桌面端改成「系统分配端口」，不再固定 19387；因此 auto 优先读
+ * `webServer.getOrigin()`（它同时给出协议和真实监听端口），读不到再退回
+ * `port` / 环境变量。写死端口那套在这里已经不再可靠。
+ */
+export function resolveUpstream(ctx, cfg, note) {
   try {
     const related = Object.keys(ctx ?? {})
       .filter((k) => /web|http|server|connect|browser|profile/i.test(k))
@@ -480,7 +497,7 @@ function resolveUpstream(ctx, cfg, note) {
   if (cfg.upstream && cfg.upstream !== 'auto') {
     const parsed = parseUpstream(cfg.upstream);
     if (parsed) {
-      note('info', `upstream: 使用显式配置 ${parsed.host}:${parsed.port}`);
+      note('info', `upstream: 使用显式配置 ${parsed.protocol}//${parsed.host}:${parsed.port}`);
       return parsed;
     }
     note('warn', `upstream: 配置无法解析 (${cfg.upstream})，回退到自动探测`);
@@ -496,12 +513,28 @@ function resolveUpstream(ctx, cfg, note) {
       note('debug', `探测 ctx.${name}: 不存在`);
       continue;
     }
+    // 0.2.1：webServer.getOrigin() 直接给出「协议 + 真实监听端口」。
+    // 桌面端现在用系统分配端口，只有这里拿到的才是本进程真正在听的那个。
+    try {
+      const origin = typeof svc?.getOrigin === 'function' ? svc.getOrigin() : svc?.origin;
+      const parsed = typeof origin === 'string' ? parseUpstream(origin) : null;
+      if (parsed) {
+        note('debug', `探测 ctx.${name}.getOrigin(): ${origin}`);
+        return parsed;
+      }
+    } catch (err) {
+      note('debug', `探测 ctx.${name}.getOrigin() 失败: ${err?.message}`);
+    }
     const keys = (() => {
       try { return Object.keys(svc).slice(0, 12).join(','); } catch { return '(无法枚举)'; }
     })();
     const port = Number(svc?.port ?? svc?.address?.port ?? NaN);
-    note('debug', `探测 ctx.${name}: 存在，keys=[${keys}]，port=${Number.isFinite(port) ? port : '无'}`);
-    if (Number.isInteger(port) && port > 0) return { host: '127.0.0.1', port };
+    // webStartup 的 tls 是「配了证书」而不是监听结果；webServer 的 protocol 才是事实
+    const secure =
+      svc?.protocol === 'https:' ||
+      (name === 'webStartup' && svc?.tls !== undefined && svc?.tls !== null);
+    note('debug', `探测 ctx.${name}: 存在，keys=[${keys}]，port=${Number.isFinite(port) ? port : '无'}，protocol=${secure ? 'https:' : 'http:'}`);
+    if (Number.isInteger(port) && port > 0) return { protocol: secure ? 'https:' : 'http:', host: '127.0.0.1', port };
   }
 
   for (const key of ['DSH_WEB_PORT', 'DSH_PORT']) {
@@ -656,8 +689,10 @@ function readSmallBody(req, limit = 2048) {
 function upstreamHeaders(headers, up, cfg, peer) {
   const h = { ...headers };
   if (cfg.rewriteHost) {
+    const scheme = up.protocol === 'https:' ? 'https' : 'http';
     h.host = `${up.host}:${up.port}`;
-    if (h.origin !== undefined) h.origin = `http://${up.host}:${up.port}`;
+    // Origin 带协议：DSH 0.2.1 的 Host/Origin 栅栏会比较它，写错协议与没改写一样会被拒
+    if (h.origin !== undefined) h.origin = `${scheme}://${up.host}:${up.port}`;
   }
   if (cfg.forwardClientHeaders) {
     h['x-forwarded-proto'] = 'http';
@@ -1211,7 +1246,7 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
       if (rangeValue) headers.range = rangeValue;
       let req;
       try {
-        req = http.request(
+        req = upstreamClientOf(up).request(
           {
             host: up.host,
             port: up.port,
@@ -1219,6 +1254,7 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
             path: gate.withTicket(url, undefined),
             headers,
             timeout: cfg.timeoutMs > 0 ? cfg.timeoutMs : 0,
+            ...tlsOptionsOf(up),
           },
           (res) => {
             const chunks = [];
@@ -1617,8 +1653,8 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
         repaired = true;
         upRes.resume(); // 丢掉这次的 401 响应
         note('info', `${peer} 的 DSH cookie 已失效 → 带本实例当前的票自动重试一次`);
-        const retry = http.request(
-          { ...options, path: gate.withTicket(req.url, req.headers.cookie, true) },
+        const retry = upstreamClientOf(up).request(
+          { ...options, path: gate.withTicket(req.url, req.headers.cookie, true), ...tlsOptionsOf(up) },
           onUpstream,
         );
         retry.on('error', failUpstream);
@@ -1843,7 +1879,7 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
       });
     };
 
-    const upReq = http.request(options, onUpstream);
+    const upReq = upstreamClientOf(up).request({ ...options, ...tlsOptionsOf(up) }, onUpstream);
     upReq.on('timeout', () => {
       // 打真实来源：options.timeout 是本次请求真正生效的那个值（以后不会再有「0ms 却超时」的鬼话）
       note('debug', `等上游响应头超时（${options.timeout || 'agent 默认'}ms）`);
@@ -1891,18 +1927,33 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
       socket.destroy();
       return;
     }
-    const upstream = net.connect(up.port, up.host, () => {
-      const headers = upstreamHeaders(req.headers, up, cfg, peer);
-      let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
-      for (const [k, v] of Object.entries(headers)) {
-        if (v === undefined) continue;
-        raw += `${k}: ${Array.isArray(v) ? v.join(', ') : v}\r\n`;
+    // 0.2.1 起 Web 可能直接开 HTTPS；WebSocket 也必须跟着走 TLS，
+    // 否则浏览器升级请求会被明文写进 TLS 端口，连 101 都拿不到。
+    const connectUpstream = (cb) =>
+      up.protocol === 'https:'
+        ? tls.connect({ host: up.host, port: up.port, ...tlsOptionsOf(up) }, cb)
+        : net.connect(up.port, up.host, cb);
+    const upstream = connectUpstream(() => {
+      // 这个回调在握手完成后才跑，已经不在 handleUpgrade 的 try/catch 里了；
+      // 写一个已经断掉的 socket 在 Node 24 上是同步抛 —— 一抛就是 uncaughtException 带走宿主。
+      try {
+        const headers = upstreamHeaders(req.headers, up, cfg, peer);
+        let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
+        for (const [k, v] of Object.entries(headers)) {
+          if (v === undefined) continue;
+          raw += `${k}: ${Array.isArray(v) ? v.join(', ') : v}\r\n`;
+        }
+        raw += '\r\n';
+        upstream.write(raw);
+        if (head && head.length) upstream.write(head);
+        socket.pipe(upstream);
+        upstream.pipe(socket);
+      } catch (err) {
+        note('error', `WebSocket 上游握手时抛出异常（已兜住）: ${err?.stack ?? err}`);
+        try { upstream.destroy(); } catch { /* 已经断了 */ }
+        try { socket.destroy(); } catch { /* 已经断了 */ }
+        return;
       }
-      raw += '\r\n';
-      upstream.write(raw);
-      if (head && head.length) upstream.write(head);
-      socket.pipe(upstream);
-      upstream.pipe(socket);
       // WebSocket 也要记账，而且**按通道分开**：重进页面时会话状态与聊天图片是从这里推下来的，
       // HTTP 缓存一条都帮不上忙 —— 「退出重进还是大流量」的答案经常就在这几行。
       if (trafficStats) {
@@ -1997,7 +2048,7 @@ function mintTicket(ctx, up, note) {
     return null;
   }
   try {
-    const tokenized = fn.call(conn, `http://${up.host}:${up.port}`);
+    const tokenized = fn.call(conn, `${up.protocol ?? 'http:'}//${up.host}:${up.port}`);
     if (typeof tokenized === 'string') {
       const m = /[?&]token=([^&\s]+)/.exec(tokenized);
       if (m) return decodeURIComponent(m[1]);
@@ -2020,13 +2071,33 @@ function defaultStatusFile() {
   return path.join(home, 'remote-access-url.txt');
 }
 
+/**
+ * 上游是 https 时，只有**本机回环**才接受 DSH 的自签证书（没有中间人空间）。
+ * 显式配成远端 https 的，仍按 Node 默认校验证书 —— 不能因为一个自签兜底就把远端 TLS 也关掉。
+ */
+function tlsOptionsOf(up) {
+  if (up?.protocol !== 'https:') return {};
+  const host = String(up.host ?? '').toLowerCase();
+  const loopback = host === '127.0.0.1' || host === '::1' || host === 'localhost';
+  return loopback ? { rejectUnauthorized: false } : {};
+}
+
+/** 按上游协议选 http / https 客户端（0.2.1 起 Web 可以自己开 HTTPS） */
+function upstreamClientOf(up) {
+  return up?.protocol === 'https:' ? https : http;
+}
+
 /** 单次探测上游是否可达（任何 HTTP 状态码都算可达） */
 function probeOnce(up) {
   return new Promise((resolve) => {
-    const req = http.get({ host: up.host, port: up.port, path: '/', timeout: 2500 }, (res) => {
-      res.resume();
-      resolve(true);
-    });
+    const client = up.protocol === 'https:' ? https : http;
+    const req = client.get(
+      { host: up.host, port: up.port, path: '/', timeout: 2500, ...tlsOptionsOf(up) },
+      (res) => {
+        res.resume();
+        resolve(true);
+      },
+    );
     req.on('timeout', () => {
       req.destroy();
       resolve(false);
