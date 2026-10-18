@@ -69,6 +69,7 @@ apply(ctx, {
   port: 0,
   upstream: `http://127.0.0.1:${upPort}`,
   urlFile: statusFile,
+  localConfigFile: 'off', // 手动验证不该在真实 ~/.dsh 里留下配置
   logLevel: 'debug',
   cacheEnabled: true,
   cacheTtlMinutes: 1,

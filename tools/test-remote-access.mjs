@@ -7,8 +7,15 @@ import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-const { apply, runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter, contentRevOf, cacheSkipReason, describeAgentError, parseUpstream, resolveUpstream } =
-  await import(new URL('../index.js', import.meta.url).href);
+const indexModule = await import(new URL('../index.js', import.meta.url).href);
+const {
+  runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter,
+  contentRevOf, cacheSkipReason, describeAgentError, parseUpstream, resolveUpstream,
+  localConfigPathOf, readLocalConfigFile, writeLocalConfigFile, diffConfigKeys, mergeLocalConfig,
+} = indexModule;
+// 绝大多数场景测的是「代理本身」，不该在开发机的真实 ~/.dsh 里留下配置；
+// 本用户配置的专项场景再显式给 localConfigFile。
+const apply = (ctx, config) => indexModule.apply(ctx, { localConfigFile: 'off', ...(config ?? {}) });
 
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '   ' + extra : ''}`);
@@ -1847,6 +1854,254 @@ try {
     if (httpsDir) fs.rmSync(httpsDir, { recursive: true, force: true });
   } catch { /* 忽略 */ }
 }
+
+// ---- 场景 12：本用户配置（多个 Windows 用户共用 profile 时各用各的端口）----
+//
+// 背景：把 `.dsh\profiles\desktop` 做成 junction 指到同一个目录时，`cordis.patch.yml`
+// （端口、密码…）也是共享的；两个用户同时开 DSH，第二个实例必然 EADDRINUSE。
+// 1.4.2 起每个用户在 $DSH_HOME 里有一份自己的配置，启动时本地优先。
+check('localConfigPathOf：off → 关闭', localConfigPathOf({ localConfigFile: 'off' }) === '');
+check(
+  'localConfigPathOf：留空 → $DSH_HOME/remote-access-config.json',
+  localConfigPathOf({}).endsWith('remote-access-config.json') && /\\.dsh/.test(localConfigPathOf({})),
+  localConfigPathOf({}),
+);
+const explicitLocal = path.join(os.tmpdir(), 'ra-explicit-local.json');
+check('localConfigPathOf：显式路径原样使用', localConfigPathOf({ localConfigFile: explicitLocal }) === explicitLocal);
+check(
+  'diffConfigKeys：只报变了的键',
+  JSON.stringify(diffConfigKeys({ port: 1, logLevel: 'info' }, { port: 2, logLevel: 'info' })) === '["port"]',
+  JSON.stringify(diffConfigKeys({ port: 1, logLevel: 'info' }, { port: 2, logLevel: 'info' })),
+);
+const mergedLocal = mergeLocalConfig({ port: 19388, logLevel: 'info' }, { port: 54321 });
+check(
+  'mergeLocalConfig：本用户配置覆盖共享值，没写的沿用共享值',
+  mergedLocal.port === 54321 && mergedLocal.logLevel === 'info',
+  JSON.stringify(mergedLocal),
+);
+
+const localHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-home-'));
+const localCfgFile = path.join(localHome, 'remote-access-config.json');
+const localStatusA = path.join(localHome, 'status-a.txt');
+const sharedA = {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: localStatusA,
+  localConfigFile: localCfgFile,
+  remoteTheme: 'dark',
+  maxConnections: 64,
+};
+const disposeA1 = indexModule.apply(makeCtx(), sharedA);
+await sleep(400);
+const seededLocal = readLocalConfigFile(localCfgFile);
+check(
+  '本用户配置：首次启动以共享 profile 为种子建文件',
+  seededLocal.ok && seededLocal.config.remoteTheme === 'dark',
+  JSON.stringify(seededLocal.config?.remoteTheme),
+);
+check(
+  '本用户配置：状态文件写明本用户配置路径',
+  fs.readFileSync(localStatusA, 'utf8').includes('本用户配置:') && fs.readFileSync(localStatusA, 'utf8').includes(localCfgFile),
+);
+disposeA1();
+await sleep(200);
+
+// 手改本用户配置（模拟这个用户自己把主题改成浅色）——重启后应当以它为准
+const seededRaw = JSON.parse(fs.readFileSync(localCfgFile, 'utf8'));
+seededRaw.config.remoteTheme = 'light';
+fs.writeFileSync(localCfgFile, JSON.stringify(seededRaw, null, 2));
+const localStatusB = path.join(localHome, 'status-b.txt');
+const disposeA2 = indexModule.apply(makeCtx(), { ...sharedA, urlFile: localStatusB });
+await sleep(400);
+const localWinsText = fs.readFileSync(localStatusB, 'utf8');
+check(
+  '本用户配置：重启后本地值优先于共享 profile',
+  /"remoteTheme": "light"/.test(localWinsText),
+  (localWinsText.match(/"remoteTheme": "[^"]+"/) ?? [''])[0],
+);
+disposeA2();
+await sleep(200);
+
+// localConfigFile=off：不建文件，状态文件里如实说「已关闭」
+const offLocalStatus = path.join(localHome, 'status-off.txt');
+const offLocalFile = path.join(localHome, 'off-config.json');
+const disposeOff = indexModule.apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: offLocalStatus,
+  localConfigFile: 'off',
+});
+await sleep(300);
+const offLocalText = fs.readFileSync(offLocalStatus, 'utf8');
+check(
+  '本用户配置：off 时不建文件，状态文件写明已关闭',
+  !fs.existsSync(offLocalFile) && /本用户配置: 已关闭/.test(offLocalText),
+  (offLocalText.match(/本用户配置: [^\n]*/) ?? [''])[0],
+);
+disposeOff();
+await sleep(150);
+
+// 坏文件：备份 + 按共享 profile 重建（别让人永久卡在「读不了」）
+const badLocalFile = path.join(localHome, 'bad-config.json');
+fs.writeFileSync(badLocalFile, '{ 这不是 JSON');
+const badLocalStatus = path.join(localHome, 'status-bad.txt');
+const disposeBad = indexModule.apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: badLocalStatus,
+  localConfigFile: badLocalFile,
+  remoteTheme: 'dark',
+});
+await sleep(350);
+const badLocalText = fs.readFileSync(badLocalStatus, 'utf8');
+const badLocalRead = readLocalConfigFile(badLocalFile);
+const badBackups = fs.readdirSync(localHome).filter((name) => name.startsWith('bad-config.json.bad-'));
+check(
+  '本用户配置：内容坏了 → 先备份，再按共享 profile 重建',
+  badLocalRead.ok && badLocalRead.config.remoteTheme === 'dark' && badBackups.length === 1 && /已按共享 profile 重建/.test(badLocalText),
+  `${badBackups.length} 个备份 / ${JSON.stringify(badLocalRead.config?.remoteTheme)}`,
+);
+disposeBad();
+await sleep(150);
+
+// ---- 场景 13：设置页保存只把「这次变了的键」同步进本用户配置 ----
+const syncFile = path.join(localHome, 'sync-config.json');
+const syncStatus = path.join(localHome, 'status-sync.txt');
+let syncRow = {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: syncStatus,
+  localConfigFile: syncFile,
+  remoteTheme: 'dark',
+  maxConnections: 64,
+};
+const syncListeners = [];
+const syncCtx = {
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
+  effect: () => {},
+  on: (name, fn) => {
+    syncListeners.push({ name, fn });
+    return () => {};
+  },
+  get: (name) =>
+    name === 'settings'
+      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...syncRow } }] }
+      : undefined,
+};
+const disposeSync = indexModule.apply(syncCtx, syncRow);
+await sleep(400);
+check('保存同步：首次启动种子正确', readLocalConfigFile(syncFile).config?.remoteTheme === 'dark');
+
+// 模拟设置页保存：只改 remoteTheme，然后 config-reload
+const fireReload = () => {
+  for (const l of syncListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
+};
+syncRow = { ...syncRow, remoteTheme: 'light' };
+fireReload();
+await sleep(500);
+const afterSave = readLocalConfigFile(syncFile);
+check(
+  '保存同步：设置页保存写进本用户配置',
+  afterSave.ok && afterSave.config.remoteTheme === 'light',
+  JSON.stringify(afterSave.config?.remoteTheme),
+);
+check('保存同步：状态文件里的生效值跟着变', /"remoteTheme": "light"/.test(fs.readFileSync(syncStatus, 'utf8')));
+
+// 本用户自己改的其它字段，不该被「别的字段保存」顺手覆盖
+const handEdited = JSON.parse(fs.readFileSync(syncFile, 'utf8'));
+handEdited.config.maxConnections = 7;
+fs.writeFileSync(syncFile, JSON.stringify(handEdited, null, 2));
+syncRow = { ...syncRow, remoteTheme: 'system' };
+fireReload();
+await sleep(500);
+const afterSecondSave = readLocalConfigFile(syncFile);
+check(
+  '保存同步：只同步这次变了的键，本用户其它自定义值保留',
+  afterSecondSave.ok && afterSecondSave.config.remoteTheme === 'system' && afterSecondSave.config.maxConnections === 7,
+  JSON.stringify({ remoteTheme: afterSecondSave.config?.remoteTheme, maxConnections: afterSecondSave.config?.maxConnections }),
+);
+const syncText = fs.readFileSync(syncStatus, 'utf8');
+check('保存同步：状态文件也用了保留后的值', /"maxConnections": 7/.test(syncText));
+disposeSync();
+await sleep(200);
+
+// ---- 场景 13b：保存也可能让 Cordis 直接重启本行（先跑 apply，再发 config-reload）----
+// 同一进程里共享值变了 = 这是刚保存的设置，要采纳进本用户配置（而不是被本地值压回去）。
+const restartFile = path.join(localHome, 'restart-config.json');
+const restartStatus = path.join(localHome, 'status-r.txt');
+const restartShared = {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: restartStatus,
+  localConfigFile: restartFile,
+  remoteTheme: 'dark',
+};
+const disposeR1 = indexModule.apply(makeCtx(), restartShared);
+await sleep(350);
+disposeR1();
+await sleep(150);
+const disposeR2 = indexModule.apply(makeCtx(), { ...restartShared, remoteTheme: 'light' });
+await sleep(400);
+const restartSaved = readLocalConfigFile(restartFile);
+check(
+  '保存即重启本行：同一进程里共享值变了 → 采纳进本用户配置',
+  restartSaved.config?.remoteTheme === 'light' && /"remoteTheme": "light"/.test(fs.readFileSync(restartStatus, 'utf8')),
+  JSON.stringify(restartSaved.config?.remoteTheme),
+);
+disposeR2();
+await sleep(200);
+
+// ---- 场景 14：端口被占用 → 换一个空闲端口并记住（下一次不再撞）----
+const occupier = net.createServer(() => {});
+await new Promise((r) => occupier.listen(0, '127.0.0.1', r));
+const busyPort = occupier.address().port;
+const fbHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-fb-'));
+const fbConfigFile = path.join(fbHome, 'remote-access-config.json');
+const fbStatus1 = path.join(fbHome, 'status-1.txt');
+const fbShared = {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: busyPort,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: fbStatus1,
+  localConfigFile: fbConfigFile,
+};
+const disposeFb1 = indexModule.apply(makeCtx(), fbShared);
+await sleep(900); // 绑定失败 → 探空闲端口 → 重绑，给两步留时间
+const fbText1 = fs.readFileSync(fbStatus1, 'utf8');
+const fbPort1 = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fbText1)?.[1] ?? 0);
+const fbSaved = readLocalConfigFile(fbConfigFile);
+check('端口被占用：没有卡死在 EADDRINUSE，换端口后照常监听', fbPort1 > 0 && fbPort1 !== busyPort, `${busyPort} → ${fbPort1}`);
+check('端口被占用：诊断里写明原因', fbText1.includes('已被占用'));
+check(
+  '端口被占用：实际端口写进本用户配置（下次不再撞）',
+  fbSaved.ok && fbSaved.config.port === fbPort1,
+  JSON.stringify(fbSaved.config?.port),
+);
+disposeFb1();
+await sleep(200);
+
+// 再起一次：共享 profile 仍写着 busyPort，但本用户配置记着 fbPort1 → 直接用 fbPort1
+const fbStatus2 = path.join(fbHome, 'status-2.txt');
+const disposeFb2 = indexModule.apply(makeCtx(), { ...fbShared, urlFile: fbStatus2 });
+await sleep(600);
+const fbPort2 = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(fbStatus2, 'utf8'))?.[1] ?? 0);
+check('端口被占用：重启后仍用记住的那个端口（不再撞）', fbPort2 === fbPort1 && fbPort2 > 0, `${fbPort1} / ${fbPort2}`);
+disposeFb2();
+await new Promise((r) => occupier.close(r));
+try { fs.rmSync(localHome, { recursive: true, force: true }); } catch { /* 忽略 */ }
+try { fs.rmSync(fbHome, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile, lateFile, notifyFile]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }

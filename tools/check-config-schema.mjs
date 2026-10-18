@@ -178,6 +178,7 @@ try {
     'forwardClientHeaders',
     'timeoutMs',
     'urlFile',
+    'localConfigFile',
     'printUrl',
     'banFile',
   ];

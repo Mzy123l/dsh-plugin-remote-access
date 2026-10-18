@@ -146,6 +146,10 @@ export const Config = Schema
         Schema.string().default(''),
         '带票网址写到哪；留空 = <DSH_HOME>/remote-access-url.txt，填 off = 不写',
       ),
+      localConfigFile: field(
+        Schema.string().default(''),
+        '本用户配置文件；留空 = <DSH_HOME>/remote-access-config.json（每个 Windows 用户各一份，优先于共享 profile），填 off = 全走共享 profile',
+      ),
       printUrl: field(Schema.boolean().default(true), '把监听结果与网址同时打到 DSH 日志'),
       // 密码是凭据，但设置页也收（手机端改完就能用）；非法值不会静默生效，见 normalizeConfig 与 apply 的告警
       accessCode: field(
@@ -240,6 +244,7 @@ const DEFAULTS = {
   forwardClientHeaders: true,
   timeoutMs: 0,
   urlFile: '',
+  localConfigFile: '',
   printUrl: true,
   accessCode: '',
   remoteLayout: 'auto',
@@ -1223,8 +1228,10 @@ export function createChoiceCenter(now = () => Date.now()) {
  * @param choice 待答选择中心（`createChoiceCenter()`）；给了就接管 `NOTIFY_PATH`，不给就照旧全转给上游。
  * @param cacheStats 手机端缓存的计数（`createCacheStats()`）；只用于状态文件与设置页自检。
  * @param trafficStats 流量账（`createTrafficStats()`）；按 URL 记字节，只进内存。
+ * @param opts `{ port, onError }`：监听端口（默认 cfg.port）与「监听失败时先别只打日志」的回调
+ *   （`start()` 用它做端口退让：EADDRINUSE 时换一个空闲端口重试）。
  */
-function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, trafficStats) {
+function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, trafficStats, opts = {}) {
   let active = 0;
 
   const deny = (res, code, text) => {
@@ -1986,8 +1993,16 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
     socket.on('error', () => upstream.destroy());
   }
 
-  server.on('error', (err) => note('error', `监听 ${addr} 失败: ${err?.message}`));
-  server.listen({ host: addr, port: cfg.port }, () => {
+  server.on('error', (err) => {
+    if (typeof opts.onError === 'function') {
+      try {
+        opts.onError(err);
+        return;
+      } catch { /* 退回到下面这条唯一的日志 */ }
+    }
+    note('error', `监听 ${addr} 失败: ${err?.message}`);
+  });
+  server.listen({ host: addr, port: opts.port ?? cfg.port }, () => {
     const actual = server.address();
     const port = actual && typeof actual === 'object' ? actual.port : cfg.port;
     note('info', `已在 ${addr}:${port} 监听`);
@@ -2073,10 +2088,109 @@ function mintUrl(ticket, extAddr, port) {
   return ticket ? `${external}?token=${encodeURIComponent(ticket)}` : external;
 }
 
-function defaultStatusFile() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-  return path.join(home, 'remote-access-url.txt');
+/** DSH 用户数据根：默认 `~/.dsh`，`$DSH_HOME` 可覆盖（与 DSH 自己的 home-paths 同一口径） */
+function dshHomeOf() {
+  return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
 }
+
+function defaultStatusFile() {
+  return path.join(dshHomeOf(), 'remote-access-url.txt');
+}
+
+// ---------------------------------------------------------------- 本用户配置
+//
+// 为什么要有它：多个 Windows 用户可以共用同一份 profile（常见做法是把
+// `.dsh\profiles\desktop` 做成 junction / 符号链接指到同一个目录）。那样一来
+// `cordis.patch.yml` 里的 `port`、密码等**也是共享的**：两个人同时开 DSH，
+// 第二个实例必然撞 `EADDRINUSE`，于是「插件明明启用了，手机却连不上」。
+//
+// 所以每个用户在自己的 `$DSH_HOME` 里留一份配置，启动时**本地优先**：
+//   · 首次启动：以共享 profile 的值作种子建一份；
+//   · 设置页保存（写的是共享 profile）：宿主动把「这次变了的键」同步进本文件再生效；
+//   · 端口被占用：自动换一个空闲端口，并把实际端口写回本文件，下次不再撞。
+//
+// 文件是可手改的 JSON（权限 0600）：`config` 是本用户生效值，`sharedBaseline`
+// 只用来判断「共享 profile 这次到底改了什么」，平时不用碰它。
+const LOCAL_CONFIG_FILE_NAME = 'remote-access-config.json';
+
+/** 本用户配置文件路径；`off` → ''（关掉，全部走共享 profile） */
+export function localConfigPathOf(cfg) {
+  const custom = String(unwrap(cfg?.localConfigFile) ?? '').trim();
+  if (custom === 'off') return '';
+  return custom || path.join(dshHomeOf(), LOCAL_CONFIG_FILE_NAME);
+}
+
+/** 只收已知字段，并且**不存 localConfigFile 自己**（否则就没法用 off 把它关掉） */
+function pickLocalConfig(raw) {
+  const out = pickConfig(raw);
+  delete out.localConfigFile;
+  return out;
+}
+
+/**
+ * 读本用户配置。三种结果：
+ *   `{ ok: true, config, baseline }` / `{ ok: false, missing: true }` / `{ ok: false, reason }`。
+ * 手改时既可以写 `{ config, sharedBaseline }` 包装，也可以把字段直接写在顶层。
+ */
+export function readLocalConfigFile(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    return err?.code === 'ENOENT'
+      ? { ok: false, missing: true }
+      : { ok: false, reason: err?.message ?? String(err) };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, reason: `不是合法 JSON：${err?.message ?? err}` };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: '顶层不是对象' };
+  }
+  const wrapped = parsed.config && typeof parsed.config === 'object' && !Array.isArray(parsed.config);
+  return {
+    ok: true,
+    config: pickLocalConfig(wrapped ? parsed.config : parsed),
+    baseline: pickLocalConfig(parsed.sharedBaseline ?? parsed.baseline ?? {}),
+  };
+}
+
+/** 写本用户配置（0600）。写不进去由调用方决定是「警告后继续」还是「退回共享 profile」 */
+export function writeLocalConfigFile(file, { config, baseline }) {
+  const payload = {
+    version: 1,
+    note:
+      '本文件是当前 Windows 用户自己的远程访问配置，优先于共享 profile 的 cordis.patch.yml。' +
+      '改完重启 DSH 生效；删掉它 = 下次启动以共享 profile 为种子重建。',
+    updatedAt: new Date().toISOString(),
+    config: pickLocalConfig(config),
+    sharedBaseline: pickLocalConfig(baseline ?? {}),
+  };
+  fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+}
+
+/** 两份配置里值不同的键（只比已知字段；顺序与 DEFAULTS 一致，日志好读） */
+export function diffConfigKeys(a, b) {
+  return Object.keys(DEFAULTS).filter((key) => JSON.stringify(a?.[key]) !== JSON.stringify(b?.[key]));
+}
+
+/** 共享配置打底、本用户配置覆盖：本用户没写的字段仍用共享值 */
+export function mergeLocalConfig(shared, local) {
+  return { ...pickConfig(shared), ...pickLocalConfig(local) };
+}
+
+/**
+ * 同一进程里最近一次 apply 看到的共享 profile 值。
+ *
+ * 用来区分两种「本地文件与共享 profile 不一致」：
+ *   · 进程还活着、共享值刚变 → 就是这次设置页保存（Cordis 会重启本行 → apply 先跑），
+ *     要**采纳**进本用户配置；
+ *   · 进程刚起（模块第一次加载）→ 可能是别的用户在我们停机时改的，**本地优先**，只追平基线。
+ */
+let lastSharedConfigInProcess = null;
 
 /**
  * 上游是 https 时，只有**本机回环**才接受 DSH 的自签证书（没有中间人空间）。
@@ -2132,7 +2246,96 @@ async function verifyUpstream(up, note, attempts = 8, intervalMs = 2000) {
 export const inject = ['connection'];
 
 export function apply(ctx, config) {
-  let cfg = normalizeConfig(config);
+  // ---------------------------------------------------------------- 本用户配置（本地优先）
+  // 共享 profile 里的那份（设置页保存写的就是它）
+  const sharedConfig = pickLocalConfig(config);
+  const localFile = localConfigPathOf(config);
+  const bootNotes = [];
+  let localConfig = null;
+  if (localFile) {
+    const read = readLocalConfigFile(localFile);
+    if (read.ok) {
+      localConfig = { path: localFile, config: read.config, baseline: read.baseline };
+      const drift = diffConfigKeys(sharedConfig, read.baseline);
+      if (Object.keys(read.baseline).length === 0) {
+        // 手写的扁平文件 / 老格式：没有基线，补一份当前共享值（本地值本身照旧生效）
+        localConfig.baseline = sharedConfig;
+        try { writeLocalConfigFile(localFile, localConfig); } catch { /* 下次再补 */ }
+      } else if (drift.length) {
+        const previousShared = lastSharedConfigInProcess;
+        const changedNow = previousShared ? diffConfigKeys(sharedConfig, previousShared) : [];
+        if (changedNow.length) {
+          // 进程活着、共享值刚变 → 就是这次设置页保存（Cordis 重启本行时先跑 apply）。
+          // 只把「变了的键」采纳进本用户配置，其它本用户自定义的值保持不动。
+          const patch = {};
+          for (const key of changedNow) patch[key] = sharedConfig[key];
+          localConfig.config = { ...localConfig.config, ...patch };
+          localConfig.baseline = sharedConfig;
+          try {
+            writeLocalConfigFile(localFile, localConfig);
+            bootNotes.push(['info', `已把设置保存进本用户配置（${changedNow.join(', ')}）→ ${localFile}`]);
+          } catch (err) {
+            bootNotes.push(['warn', `写本用户配置失败（${err?.message}），这次先只在内存里生效：${localFile}`]);
+          }
+        } else {
+          // 进程刚起：可能是别的 Windows 用户在我们停机时保存的 —— 本用户配置优先，只追平基线
+          localConfig.baseline = sharedConfig;
+          try { writeLocalConfigFile(localFile, localConfig); } catch { /* 下次再追平 */ }
+          bootNotes.push([
+            'info',
+            `共享 profile 与本用户配置不一致（${drift.join(', ')}）—— 仍以本用户配置为准：${localFile}`,
+          ]);
+        }
+      }
+    } else if (read.missing) {
+      // 第一次：以共享 profile 为种子建一份自己的
+      localConfig = { path: localFile, config: sharedConfig, baseline: sharedConfig };
+      try {
+        writeLocalConfigFile(localFile, localConfig);
+        bootNotes.push([
+          'info',
+          `已建立本用户配置 ${localFile}（以共享 profile 为种子；每个 Windows 用户各存一份，端口不再互相抢）`,
+        ]);
+      } catch (err) {
+        localConfig = null;
+        bootNotes.push(['warn', `建本用户配置失败（${err?.message}），本次按共享 profile 运行：${localFile}`]);
+      }
+    } else {
+      // 内容坏了（不是 JSON / 顶层不是对象）：备份后按共享 profile 重建，别让人永久卡在「读不了」。
+      // IO 类错误（权限、被占用）不动原文件 —— 那多半是环境问题，重建也写不进去。
+      const contentProblem = read.reason === '顶层不是对象' || String(read.reason ?? '').startsWith('不是合法 JSON');
+      let backup = '';
+      if (contentProblem) {
+        try {
+          backup = `${localFile}.bad-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+          fs.renameSync(localFile, backup);
+        } catch { backup = ''; }
+        localConfig = { path: localFile, config: sharedConfig, baseline: sharedConfig };
+        try {
+          writeLocalConfigFile(localFile, localConfig);
+          bootNotes.push([
+            'warn',
+            `本用户配置读不了（${read.reason}）${backup ? `，已备份为 ${backup}` : ''}；` +
+              `已按共享 profile 重建：${localFile}`,
+          ]);
+        } catch (err) {
+          localConfig = null;
+          bootNotes.push([
+            'warn',
+            `本用户配置读不了（${read.reason}）且重建失败（${err?.message}），本次按共享 profile 运行：${localFile}`,
+          ]);
+        }
+      } else {
+        bootNotes.push(['warn', `本用户配置读不了（${read.reason}），本次按共享 profile 运行：${localFile}`]);
+      }
+    }
+  }
+  lastSharedConfigInProcess = sharedConfig;
+
+  const effectiveRaw = localConfig ? mergeLocalConfig(sharedConfig, localConfig.config) : sharedConfig;
+  let cfg = normalizeConfig(effectiveRaw);
+  // localConfigFile 是「引导字段」：不参与本用户配置的合并与基线比较，但要原样留在 cfg 里供状态文件显示
+  cfg.localConfigFile = String(unwrap(config?.localConfigFile) ?? '').trim();
   const notes = [];
   let urls = [];
   let servers = [];
@@ -2164,6 +2367,11 @@ export function apply(ctx, config) {
           : '(无)'
       }`,
       `放行密钥: ${secretPathOf(cfg)}（改密码不会踢人；想让所有设备重新输密码就删掉它）`,
+      `本用户配置: ${(() => {
+        if (localConfig) return `${localConfig.path}（优先于共享 profile；每个 Windows 用户各一份）`;
+        if (!localConfigPathOf(cfg)) return '已关闭（localConfigFile=off，全部走共享 profile）';
+        return '没能启用（见下面的诊断）';
+      })()}`,
       `手机端缓存: ${(() => {
         if (cfg.cacheEnabled === false) return '已关闭（cacheEnabled=false）';
         return (
@@ -2253,10 +2461,11 @@ export function apply(ctx, config) {
   };
 
   note('info', `apply 开始；DSH_HOME=${process.env.DSH_HOME ?? '(未设置)'} DSH_PROFILE=${process.env.DSH_PROFILE ?? '(未设置)'}`);
+  for (const [level, msg] of bootNotes) note(level, msg);
   // 写进配置的密码如果没通过校验，**必须**看得见：静默失效会让人以为「设过了」，
   // 然后在手机上撞见 DSH 那句英文 401（以前就是这么坑的）。这里只说长度/字符要求，不回显密码本身。
   {
-    const rawCode = String(unwrap(config?.accessCode) ?? '').trim();
+    const rawCode = String(unwrap(effectiveRaw?.accessCode) ?? '').trim();
     if (rawCode && !cfg.accessCode) {
       note(
         'warn',
@@ -2638,13 +2847,121 @@ export function apply(ctx, config) {
 
   // ---------------------------------------------------------------- 起停
 
+  /** 每次重挂监听都换一个序号：晚到的 listen 回调据此作废，不会把旧端口写回状态文件 */
+  let listenSeq = 0;
+  let currentUp = null;
+  let currentAddrs = [];
+
   function stopServers() {
+    listenSeq += 1;
     for (const server of servers) {
       try { server.closeAllConnections?.(); } catch { /* 忽略 */ }
       try { server.close(); } catch { /* 已关闭 */ }
     }
     servers = [];
     urls = [];
+  }
+
+  /**
+   * 让系统给一个空闲端口。
+   *
+   * 为什么不在 EADDRINUSE 时直接 `port: 0`：一个实例可能同时监听 IPv4/IPv6 两个地址，
+   * 每个 `port: 0` 会拿到**不同**的随机端口，手机端就得记两条不一样的网址。
+   * 先探一个、再用它逐个绑定，两个地址就还是同一个端口。
+   */
+  function findFreePort(host) {
+    return new Promise((resolve) => {
+      const probe = net.createServer();
+      probe.once('error', () => resolve(0));
+      probe.listen({ host, port: 0 }, () => {
+        const actual = probe.address();
+        const port = actual && typeof actual === 'object' ? actual.port : 0;
+        probe.close(() => resolve(port));
+      });
+    });
+  }
+
+  /**
+   * 端口被占用时的退让：记住这次实际用的端口，并**写回本用户配置**。
+   *
+   * 「另一个 Windows 用户也在跑 DSH」是最常见的占用来源：两个人共用同一份
+   * profile（junction）时，`cordis.patch.yml` 里的 port 是同一份；写回本地后，
+   * 这个用户下次启动直接用它，不用再撞一次，手机上的网址也稳定。
+   */
+  function adoptPort(actualPort, busyPort) {
+    if (!Number.isInteger(actualPort) || actualPort <= 0) return;
+    cfg = { ...cfg, port: actualPort };
+    let saved = false;
+    if (localConfig) {
+      const read = readLocalConfigFile(localConfig.path);
+      if (read.ok) {
+        try {
+          const nextConfig = { ...read.config, port: actualPort };
+          writeLocalConfigFile(localConfig.path, { config: nextConfig, baseline: read.baseline });
+          localConfig.config = nextConfig;
+          localConfig.baseline = read.baseline;
+          saved = true;
+        } catch (err) {
+          note('warn', `把端口 ${actualPort} 写进本用户配置失败：${err?.message}`);
+        }
+      }
+    }
+    note(
+      'warn',
+      `端口 ${busyPort} 已被占用（多半是另一个 Windows 用户 / 另一份 DSH 在用同一份配置）→ ` +
+        `本次改用 ${actualPort}` +
+        (saved ? `，并已写进本用户配置（${localConfig.path}），下次仍用它` : '；本用户配置不可写，重启后可能再变'),
+    );
+    flush();
+  }
+
+  function listenOn(wantPort, meta = {}) {
+    const seq = listenSeq;
+    let fellBack = false;
+    for (const addr of currentAddrs) {
+      try {
+        servers.push(
+          startProxy(
+            addr,
+            cfg,
+            currentUp,
+            note,
+            (boundAddr, port) => {
+              if (seq !== listenSeq || closed) return;
+              urls.push(mintUrl(ticket, boundAddr, port));
+              if (cfg.printUrl) note('info', `远程访问网址: ${urls[urls.length - 1]}`);
+              if (meta.adoptPort && !meta.adopted) {
+                meta.adopted = true;
+                adoptPort(port, meta.busyPort);
+              }
+              flush();
+            },
+            gate,
+            choice,
+            cacheStats,
+            trafficStats,
+            {
+              port: wantPort,
+              onError: (err) => {
+                note('error', `监听 ${addr} 失败: ${err?.message}`);
+                // 只对「端口被占用」退让一次：换一个空闲端口继续服务，而不是整个远程入口都打不开。
+                if (seq !== listenSeq || closed || fellBack) return;
+                if (err?.code !== 'EADDRINUSE' || wantPort === 0) return;
+                fellBack = true;
+                note('warn', `端口 ${wantPort} 被占用：换一个空闲端口重试`);
+                findFreePort(addr).then((port) => {
+                  if (seq !== listenSeq || closed) return;
+                  stopServers();
+                  listenOn(port, { adoptPort: true, busyPort: wantPort });
+                }).catch(() => { /* 探不到就维持原来的报错 */ });
+              },
+            },
+          ),
+        );
+      } catch (err) {
+        note('error', `启动 ${addr} 失败: ${err?.message}`);
+      }
+    }
   }
 
   function start() {
@@ -2671,26 +2988,15 @@ export function apply(ctx, config) {
     if (bans.size) note('warn', `当前拉黑 ${bans.size} 个地址: ${[...bans].join(', ')}`);
     if (readPendingBans().length) schedulePendingRetry(); // 上次没写进配置的，接着补写
 
-    const addrs = cfg.listen === 'auto' ? localAddrsIn(cfg.allowCidrs) : cfg.listen;
-    note('info', `本机候选地址(${JSON.stringify(cfg.allowCidrs)}) = ${JSON.stringify(addrs)}`);
-    if (addrs.length === 0) {
+    currentUp = up;
+    currentAddrs = cfg.listen === 'auto' ? localAddrsIn(cfg.allowCidrs) : cfg.listen;
+    note('info', `本机候选地址(${JSON.stringify(cfg.allowCidrs)}) = ${JSON.stringify(currentAddrs)}`);
+    if (currentAddrs.length === 0) {
       note('error', '没有可监听的本机地址：请把 allowCidrs 改成实际网段，或显式设置 listen');
       return;
     }
 
-    for (const addr of addrs) {
-      try {
-        servers.push(
-          startProxy(addr, cfg, up, note, (boundAddr, port) => {
-            urls.push(mintUrl(ticket, boundAddr, port));
-            if (cfg.printUrl) note('info', `远程访问网址: ${urls[urls.length - 1]}`);
-            flush();
-          }, gate, choice, cacheStats, trafficStats),
-        );
-      } catch (err) {
-        note('error', `启动 ${addr} 失败: ${err?.message}`);
-      }
-    }
+    listenOn(cfg.port);
     flush();
   }
 
@@ -2732,9 +3038,57 @@ export function apply(ctx, config) {
     if (closed) return;
     const next = configFromSettings();
     if (!next) return;
-    if (JSON.stringify(next) === JSON.stringify(cfg)) return;
-    const changed = Object.keys(next).filter((key) => JSON.stringify(next[key]) !== JSON.stringify(cfg[key]));
-    cfg = next;
+
+    // 设置页保存写的是共享 profile，而生效的是本用户配置。这里按「基线」判断这一行到底改没改：
+    // 只有本行真的变了才把变了的键同步进本用户配置 —— 别的插件保存也会发 config-reload，
+    // 不能拿共享值把本用户自定义的端口等覆盖掉。
+    let effective = next;
+    const file = localConfigPathOf(next);
+    if (file) {
+      const read = readLocalConfigFile(file);
+      if (read.ok) {
+        const changed = diffConfigKeys(next, read.baseline);
+        let config = read.config;
+        let baseline = read.baseline;
+        if (changed.length) {
+          const patch = {};
+          for (const key of changed) patch[key] = next[key];
+          config = { ...config, ...patch };
+          baseline = next;
+          try {
+            writeLocalConfigFile(file, { config, baseline });
+            note('info', `设置已同步到本用户配置（${changed.join(', ')}）→ ${file}`);
+          } catch (err) {
+            note('warn', `写本用户配置失败，本次先按共享 profile 生效：${err?.message}`);
+            config = next; // 写不进去就这次先按共享值，别让界面显示「已保存」却什么都没变
+          }
+        }
+        localConfig = { path: file, config, baseline };
+        effective = normalizeConfig(mergeLocalConfig(next, config));
+      } else if (read.missing) {
+        try {
+          writeLocalConfigFile(file, { config: next, baseline: next });
+          localConfig = { path: file, config: next, baseline: next };
+          note('info', `已重建本用户配置 ${file}`);
+        } catch {
+          localConfig = null;
+        }
+        effective = next;
+      } else {
+        note('warn', `本用户配置读不了（${read.reason}），本次按共享 profile 生效：${file}`);
+        effective = next;
+      }
+    } else {
+      localConfig = null;
+    }
+    lastSharedConfigInProcess = pickLocalConfig(next);
+
+    // 引导字段不参与本用户配置的比较，但 cfg 里要保留它（状态文件要显示「已关闭 / 路径」）
+    effective.localConfigFile = next.localConfigFile;
+
+    if (JSON.stringify(effective) === JSON.stringify(cfg)) return;
+    const changed = Object.keys(effective).filter((key) => JSON.stringify(effective[key]) !== JSON.stringify(cfg[key]));
+    cfg = effective;
     note('info', `配置热重载（${changed.join(', ') || '无字段差异'}），按新参数重挂监听`);
     start();
   }

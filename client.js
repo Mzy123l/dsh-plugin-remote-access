@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.4.1';
+    const CLIENT_VERSION = '1.4.2';
 
     // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [
@@ -2490,6 +2490,18 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
               { style: { marginTop: 10, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
               `本页客户端 ${CLIENT_VERSION}${linkNote ? ` · ${linkNote}` : ''}`,
             ),
+            // 本用户配置那一行：设置页写的是共享 profile，但宿主真正生效的是
+            // 每个 Windows 用户自己的 `.dsh/remote-access-config.json`（端口不互相抢就靠它）。
+            (() => {
+              const raw = String(source?.localConfigFile ?? '').trim();
+              if (raw === 'off') return null;
+              const where = raw || '$DSH_HOME/remote-access-config.json';
+              return h(
+                'div',
+                { style: { marginTop: 6, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
+                `本用户配置优先：端口等参数以 ${where} 为准（每个 Windows 用户各一份；点保存会同步写进去）。`,
+              );
+            })(),
           );
         }
 

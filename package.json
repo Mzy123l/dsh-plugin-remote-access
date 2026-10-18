@@ -1,8 +1,8 @@
 {
   "name": "dsh-plugin-remote-access",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "type": "module",
-  "description": "Expose this machine's DSH web GUI to a chosen CIDR range (e.g. Tailscale) on DSH 0.2.1+, with an optional numeric access code, a phone layout that only affects remote pages, on-phone resource caching (big assets are not re-sent on every visit; the host stores no bodies), phone Enter = newline, and remote-only appearance/font preferences that never overwrite the desktop settings document.",
+  "description": "Expose this machine's DSH web GUI to a chosen CIDR range (e.g. Tailscale) on DSH 0.2.1+, with an optional numeric access code, a phone layout that only affects remote pages, on-phone resource caching (big assets are not re-sent on every visit; the host stores no bodies), phone Enter = newline, and remote-only appearance/font preferences that never overwrite the desktop settings document. Settings are kept per Windows user under .dsh, so several users sharing one DSH profile no longer fight over the same listening port (a busy port falls back to a free one and is remembered).",
   "license": "MIT",
   "icon": "./icon.svg",
   "repository": {
@@ -49,7 +49,7 @@
   ],
   "meta": {
     "title": "远程访问入口（限网段）",
-    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10），适配 DSH 0.2.1+：只监听网段内的本机地址，网段外一律拒绝；可复制带票网址，也可设数字密码直接访问；自动跟随 0.2.1 的系统分配端口与 HTTPS。手机端可选「手机布局」（横竖屏自适应），回车是换行、只有点「发送」才发送；还会缓存静态大资源（壁纸这类）—— 上游没给缓存头的由本插件补上新鲜期与弱校验器，手机重复打开不再每次重传（正文一个字节都不落宿主盘）。外观与字号可存进本插件配置并只投影到远程页面，不写电脑的设置；0.2.1 起工作步骤展示 / 显示代码工作视图 / 性能与用量跟随电脑设置。配套安卓 App 退到后台后，模型提问（而电脑上 DSH 窗口不可见）会弹状态栏通知。"
+    "description": "把本机 DSH 网页界面开放给指定网段（默认 Tailscale 100.64.0.0/10），适配 DSH 0.2.1+：只监听网段内的本机地址，网段外一律拒绝；可复制带票网址，也可设数字密码直接访问；自动跟随 0.2.1 的系统分配端口与 HTTPS。配置存在每个 Windows 用户自己的 .dsh 里，多个用户共用一份 profile 时各用各的端口（端口被占用会自动换一个空闲端口并记住），不再互相抢。手机端可选「手机布局」（横竖屏自适应），回车是换行、只有点「发送」才发送；还会缓存静态大资源（壁纸这类）—— 上游没给缓存头的由本插件补上新鲜期与弱校验器，手机重复打开不再每次重传（正文一个字节都不落宿主盘）。外观与字号可存进本插件配置并只投影到远程页面，不写电脑的设置；0.2.1 起工作步骤展示 / 显示代码工作视图 / 性能与用量跟随电脑设置。配套安卓 App 退到后台后，模型提问（而电脑上 DSH 窗口不可见）会弹状态栏通知。"
   },
   "dsh": {
     "bundle": {
