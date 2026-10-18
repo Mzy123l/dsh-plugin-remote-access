@@ -23,7 +23,10 @@
       name: '@deepseek-ai/dsh-host-directory-picker-browse'
     - id: ui-directory-picker-browse
       name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
-    - id: remote-access
+    # 不能叫 remote-access：0.2.1 的官方 @deepseek-ai/dsh-api-remote-access 行
+    # 已经占用了这个 loader id，重名会让官方的 remoteAccess 服务不挂载，
+    # 桌面壳启动时 settings/describe 失败。
+    - id: remote-access-cidr
       name: 'dsh-plugin-remote-access'
       config:
         enabled: true

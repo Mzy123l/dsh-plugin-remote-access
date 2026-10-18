@@ -104,6 +104,25 @@ check('导出了 locale/*.json', manifest.exports?.['./locale/*.json'] !== undef
 check('存在中文/英文展示文本', ['zh', 'en'].every((lang) => fs.existsSync(path.join(root, 'locale', `${lang}.json`))));
 check('存在插件图标', fs.existsSync(path.join(root, manifest.icon ?? 'icon.svg')), String(manifest.icon));
 
+// 0.2.1 的 base 行里已经有 `id: remote-access`（@deepseek-ai/dsh-api-remote-access）。
+// loader 行 id 必须全局唯一；插件行重名会让官方的 remoteAccess 服务不挂载，
+// 桌面壳启动时 settings/describe 失败。这里直接拿官方 patch 对表。
+const patchFile = path.join(root, manifest.dsh?.bundle?.patch ?? 'cordis.patch.yml');
+const patchText = fs.existsSync(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '';
+const pluginRow = /-\s+id:\s*([^\s#]+)\s*\n\s+name:\s*'dsh-plugin-remote-access'/.exec(patchText);
+const officialIds = new Set();
+for (const bundle of ['dsh-base', 'dsh-web-app']) {
+  const file = path.join(runtime, 'node_modules', '@deepseek-ai', bundle, 'cordis.patch.yml');
+  if (!fs.existsSync(file)) continue;
+  for (const match of fs.readFileSync(file, 'utf8').matchAll(/^\s*-\s+id:\s*([^\s#]+)/gm)) officialIds.add(match[1]);
+}
+check('bundle patch 找得到插件行 id', pluginRow !== null, String(pluginRow?.[1] ?? '(未找到)'));
+check(
+  '插件行 id 不与 0.2.1 官方行重名',
+  pluginRow !== null && !officialIds.has(pluginRow[1]),
+  `${String(pluginRow?.[1] ?? '?')} vs 官方 ${officialIds.has(pluginRow?.[1] ?? '') ? '有重名' : '无重名'}`,
+);
+
 console.log(results.join('\n'));
 const failed = results.filter((line) => line.startsWith('FAIL')).length;
 console.log(`\n${results.length - failed}/${results.length} passed`);

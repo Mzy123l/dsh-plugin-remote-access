@@ -265,8 +265,15 @@ const DEFAULTS = {
 
 // ---------------------------------------------------------------- 配置
 
-/** Loader 行 id = 设置命名空间 = cordis.patch.yml 里那一行的 id（热重载按它找配置） */
-const ROW_ID = 'remote-access';
+/**
+ * Loader 行 id = 设置命名空间 = cordis.patch.yml 里那一行的 id（热重载按它找配置）。
+ *
+ * 0.2.1 起 DSH 自己也有一个 loader 行 id 叫 `remote-access`
+ * （`@deepseek-ai/dsh-api-remote-access`）。行 id 必须全局唯一；重名会让官方的
+ * `remoteAccess` 服务不挂载，桌面壳启动时 `settings/describe` 直接失败。
+ * 所以插件行改成旧包名式的 `remote-access-cidr`，与官方行彻底分开。
+ */
+const ROW_ID = 'remote-access-cidr';
 
 function asArray(v) {
   if (v === undefined || v === null) return [];

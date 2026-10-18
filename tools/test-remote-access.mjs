@@ -100,7 +100,7 @@ const makeCtx = (extra = {}) => {
  * fail=true 时模拟写盘失败（插件应退回暂存文件并继续拦住该地址）。
  */
 const makeEditor = ({ denyCidrs = [], fail = false } = {}) => {
-  const entry = { options: { id: 'remote-access', name: 'dsh-plugin-remote-access', config: { denyCidrs } } };
+  const entry = { options: { id: 'remote-access-cidr', name: 'dsh-plugin-remote-access', config: { denyCidrs } } };
   const state = { calls: [] };
   return {
     state,
@@ -369,7 +369,7 @@ const ctx4 = {
   },
   get: (name) => {
     if (name === 'configEditor') return editor4;
-    if (name === 'settings') return { describe: () => [{ ns: 'remote-access', base: {}, user: { ...row4 } }] };
+    if (name === 'settings') return { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...row4 } }] };
     return undefined;
   },
 };
@@ -410,7 +410,7 @@ const hotCtx = {
   },
   get: (name) =>
     name === 'settings'
-      ? { describe: () => [{ ns: 'remote-access', base: {}, user: { ...hotRow } }] }
+      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...hotRow } }] }
       : undefined,
 };
 const dispose6 = apply(hotCtx, hotRow);
@@ -455,7 +455,7 @@ const rotCtx = {
   },
   get: (name) =>
     name === 'settings'
-      ? { describe: () => [{ ns: 'remote-access', base: {}, user: { ...rotRow } }] }
+      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...rotRow } }] }
       : undefined,
 };
 const dispose7 = apply(rotCtx, rotRow);

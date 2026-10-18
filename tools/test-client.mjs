@@ -126,7 +126,7 @@ let remoteClosed = false;
 const remoteSettings = {
   async describe() {
     if (remoteClosed) return { ok: false, error: { code: 'connection/closed', message: '连接已断开' } };
-    return { ok: true, value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { ...hostConfig }, revision }] } };
+    return { ok: true, value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access-cidr', value: { ...hostConfig }, revision }] } };
   },
   async mutate(ns, ops, expected) {
     mutateCalls.push({ ns, ops, expected });
@@ -231,7 +231,7 @@ check('找到保存按钮', saveButton !== undefined);
 saveButton.props.onClick();
 await sleep(60);
 
-check('手机页面：保存走 remote.settings.mutate', mutateCalls.length === 1 && mutateCalls[0].ns === 'remote-access',
+check('手机页面：保存走 remote.settings.mutate', mutateCalls.length === 1 && mutateCalls[0].ns === 'remote-access-cidr',
   JSON.stringify(mutateCalls[0]?.ops ?? null));
 check('手机页面：只提交改动过的字段',
   mutateCalls[0]?.ops?.length === 1 && mutateCalls[0].ops[0].path[0] === 'port' && mutateCalls[0].ops[0].value === 19389,
@@ -391,9 +391,9 @@ function applyWithLayout({ isLoopback, remoteLayout }) {
       settings: {
         describe: async () => ({
           ok: true,
-          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { remoteLayout }, revision: 1 }] },
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access-cidr', value: { remoteLayout }, revision: 1 }] },
         }),
-        mutate: async () => ({ ok: true, value: { ns: 'remote-access', value: { remoteLayout }, revision: 2 } }),
+        mutate: async () => ({ ok: true, value: { ns: 'remote-access-cidr', value: { remoteLayout }, revision: 2 } }),
       },
       $on: () => () => {},
     },
@@ -509,9 +509,9 @@ function applyWithUiSettings({ isLoopback, config, withSetters = true }) {
       settings: {
         describe: async () => ({
           ok: true,
-          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { ...config }, revision: 1 }] },
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access-cidr', value: { ...config }, revision: 1 }] },
         }),
-        mutate: async () => ({ ok: true, value: { ns: 'remote-access', value: { ...config }, revision: 2 } }),
+        mutate: async () => ({ ok: true, value: { ns: 'remote-access-cidr', value: { ...config }, revision: 2 } }),
       },
       $on: () => () => {},
     },
@@ -652,9 +652,9 @@ function applyWithUiSettings021(config) {
       settings: {
         describe: async () => ({
           ok: true,
-          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { ...config }, revision: 1 }] },
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access-cidr', value: { ...config }, revision: 1 }] },
         }),
-        mutate: async () => ({ ok: true, value: { ns: 'remote-access', value: { ...config }, revision: 2 } }),
+        mutate: async () => ({ ok: true, value: { ns: 'remote-access-cidr', value: { ...config }, revision: 2 } }),
       },
       $on: () => () => {},
     },
@@ -1197,7 +1197,7 @@ function applyBackController({ isLoopback, remoteLayout, activePanel = null, wit
       settings: {
         describe: async () => ({
           ok: true,
-          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access', value: { remoteLayout, phoneEnterNewline }, revision: 1 }] },
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'remote-access-cidr', value: { remoteLayout, phoneEnterNewline }, revision: 1 }] },
         }),
         mutate: async () => ({ ok: true, value: {} }),
       },

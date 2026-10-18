@@ -42,8 +42,15 @@
 
 > 📛 **改名（1.2.0）：`dsh-remote-access-cidr` → `dsh-plugin-remote-access`。**
 > bundle 的插件行是按**包名**装载的，所以旧来源装的那份不会自己跟过来：到「设置 → 插件」里把旧条目
-> **移除**，再按新名字添加一次。移除有可能一并清掉 profile 里 `cordis.patch.yml` 中 `id: remote-access`
+> **移除**，再按新名字添加一次。移除有可能一并清掉 profile 里 `cordis.patch.yml` 中 `id: remote-access-cidr`
 > 那一行的 `config:`（网段 / 密码 / UI 设置都在里面）—— 想留参数，先把它抄下来，装好再粘回去。
+
+> ⚠️ **1.4.1 的 id 迁移（重要）**：DSH 0.2.1 自己新增了一个 loader 行
+> `id: remote-access`（`@deepseek-ai/dsh-api-remote-access`）。本插件 1.4.0 的行 id 也是
+> `remote-access`，两者重名会让官方的 `remoteAccess` 服务不挂载，桌面壳启动时报
+> `desktop welcome: Web request failed`。1.4.1 起插件行与设置命名空间改为
+> **`remote-access-cidr`**。升级后把旧 `cordis.patch.yml` 里 `id: remote-access` 的整段
+> `config:` 挪到 `id: remote-access-cidr` 下面（或者到设置页重新填一遍参数）。
 
 **② 命令行**（等价于插件页那一步；DSH 正在运行时 profile 写锁会占住）：
 
@@ -670,6 +677,21 @@ node tools/e2e-cache-local.mjs        # 手动：起一个「什么都不发缓�
 | `LICENSE` | MIT |
 
 ## 更新日志
+
+### 1.4.1
+- **修 0.2.1 启动崩溃：loader 行 id 与官方行重名**。0.2.1 新增了
+  `id: remote-access`（`@deepseek-ai/dsh-api-remote-access`），1.4.0 的插件行也叫
+  `remote-access`，重名导致官方 `remoteAccess` 服务不挂载，桌面壳启动时
+  `desktop welcome: Web request failed`（截图里的“应用无法启动”）。1.4.1 把插件行与设置命名空间
+  改为 **`remote-access-cidr`**，与官方行彻底分开。
+- 升级后需要把旧 `cordis.patch.yml` 里 `id: remote-access` 的 `config:` 挪到
+  `id: remote-access-cidr` 下；不挪则参数回默认值，但不会再撞官方行。
+- 这也是插件页「启用」时报 `session-controller: file-upload: Agent resolver is already
+  registered` 的根因；id 分开后，启用 / 停用可走热重载
+  （已在真实 0.2.1 Host 上用 `pluginManager/setBundleEnabled` 实测热启用/停用，
+  并在当前桌面端实测把 bundle 加进 `dsh.profile.bundles` 后 HMR 直接热加载，
+  均返回 `application: applied`、无需重启）。
+- 新增 `tools/check-dsh-compat.mjs` 的重复 id 检查（与 DSH 组合后的 loader 行 id 唯一性）。
 
 ### 1.4.0
 - **适配 DSH 0.2.1**（`engines.dsh = ^0.2.1-rc.1`，0.2.0 及更早请用 1.3.8）。

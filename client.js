@@ -4,7 +4,7 @@
  * 注册位置：settings.section（设置左侧导航的一页）。
  *
  * 两条读写通道，按 0.2.1 的实际行为自动选：
- *   1. 本机（回环）页面 —— 官方通道 ctx.configForms.get('remote-access')：
+ *   1. 本机（回环）页面 —— 官方通道 ctx.configForms.get('remote-access-cidr')：
  *      读 form.getSnapshot() → { status, value, revision, writable }，
  *      写 form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>。
  *   2. 手机等远程页面 —— 0.2.1 的 ui-settings 已经取消了「非回环 → memory」的降级，
@@ -20,7 +20,9 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    const NS = 'remote-access';
+    // 必须与 Host 的 ROW_ID / cordis.patch.yml 的 id 一致。
+    // 不能叫 `remote-access`：0.2.1 的官方 loader 行已经占用了这个 id。
+    const NS = 'remote-access-cidr';
 
     /**
      * 本页客户端代码的版本（与 package.json 对齐；`tools/test-client.mjs` 有一条断言钉着它）。
@@ -31,7 +33,7 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.4.0';
+    const CLIENT_VERSION = '1.4.1';
 
     // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
     const FIELDS = [

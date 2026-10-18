@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-remote-access",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "type": "module",
   "description": "Expose this machine's DSH web GUI to a chosen CIDR range (e.g. Tailscale) on DSH 0.2.1+, with an optional numeric access code, a phone layout that only affects remote pages, on-phone resource caching (big assets are not re-sent on every visit; the host stores no bodies), phone Enter = newline, and remote-only appearance/font preferences that never overwrite the desktop settings document.",
   "license": "MIT",
