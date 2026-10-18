@@ -1945,6 +1945,49 @@ check(
 disposeOff();
 await sleep(150);
 
+// reapply 也必须沿用 apply 时的引导字段：settings 视图里没有 localConfigFile 时，
+// 不能回落成默认路径把文件写进真实的 $DSH_HOME（这是测试踩出来的回归）。
+const prevDshHome = process.env.DSH_HOME;
+const reapplyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-reapply-home-'));
+process.env.DSH_HOME = reapplyHome;
+const reapplyListeners = [];
+let reapplyRow = {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: path.join(reapplyHome, 'status.txt'),
+  remoteTheme: 'dark',
+};
+const reapplyCtx = {
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
+  effect: () => {},
+  on: (name, fn) => {
+    reapplyListeners.push({ name, fn });
+    return () => {};
+  },
+  get: (name) =>
+    name === 'settings'
+      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...reapplyRow } }] }
+      : undefined,
+};
+const disposeReapply = apply(reapplyCtx, { ...reapplyRow, localConfigFile: 'off' });
+await sleep(350);
+reapplyRow = { ...reapplyRow, remoteTheme: 'light' };
+for (const l of reapplyListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
+await sleep(400);
+check(
+  '本用户配置：reapply 沿用 off，不会把默认路径写进 $DSH_HOME',
+  !fs.existsSync(path.join(reapplyHome, 'remote-access-config.json')),
+  fs.existsSync(path.join(reapplyHome, 'remote-access-config.json')) ? '竟然建了文件' : '(无文件)',
+);
+disposeReapply();
+await sleep(150);
+if (prevDshHome === undefined) delete process.env.DSH_HOME;
+else process.env.DSH_HOME = prevDshHome;
+try { fs.rmSync(reapplyHome, { recursive: true, force: true }); } catch { /* 忽略 */ }
+
 // 坏文件：备份 + 按共享 profile 重建（别让人永久卡在「读不了」）
 const badLocalFile = path.join(localHome, 'bad-config.json');
 fs.writeFileSync(badLocalFile, '{ 这不是 JSON');

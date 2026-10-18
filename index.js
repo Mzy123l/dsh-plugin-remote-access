@@ -3043,7 +3043,9 @@ export function apply(ctx, config) {
     // 只有本行真的变了才把变了的键同步进本用户配置 —— 别的插件保存也会发 config-reload，
     // 不能拿共享值把本用户自定义的端口等覆盖掉。
     let effective = next;
-    const file = localConfigPathOf(next);
+    // localConfigFile 是启动期引导字段：路径以 apply 时那份为准，不从热重载的配置里重新推导
+    // （测试的 settings 桩子也不一定带这个字段；真实 DSH 里它本来就不会在运行期变）。
+    const file = localFile;
     if (file) {
       const read = readLocalConfigFile(file);
       if (read.ok) {
@@ -3084,7 +3086,7 @@ export function apply(ctx, config) {
     lastSharedConfigInProcess = pickLocalConfig(next);
 
     // 引导字段不参与本用户配置的比较，但 cfg 里要保留它（状态文件要显示「已关闭 / 路径」）
-    effective.localConfigFile = next.localConfigFile;
+    effective.localConfigFile = cfg.localConfigFile;
 
     if (JSON.stringify(effective) === JSON.stringify(cfg)) return;
     const changed = Object.keys(effective).filter((key) => JSON.stringify(effective[key]) !== JSON.stringify(cfg[key]));
