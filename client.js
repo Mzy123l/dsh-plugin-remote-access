@@ -3,14 +3,15 @@
  *
  * 注册位置：settings.section（设置左侧导航的一页）。
  *
- * 两条读写通道，按 0.2.1 的实际行为自动选：
- *   1. 本机（回环）页面 —— 官方通道 ctx.configForms.get('remote-access-cidr')：
- *      读 form.getSnapshot() → { status, value, revision, writable }，
- *      写 form.mutate([{ op:'set', path:[字段], value }], revision) → Promise<boolean>。
- *   2. 手机等远程页面 —— 0.2.1 的 ui-settings 已经取消了「非回环 → memory」的降级，
- *      configForms 在远程页面上也能写宿主；但为了兼容 0.2.0 以及「远程页面的 Remote
- *      连接还没就绪」的瞬间，这里仍保留 ctx.remote.settings.describe() / mutate() 回退。
- *      两条路写的是同一个地方（profile 的 cordis.patch.yml），都会等写盘完成才返回。
+ * **唯一配置源**：`$DSH_HOME/remote-access-config.json`。
+ * 本页不再走 DSH 的 configForms / ctx.remote.settings —— 那些读写的是共享 profile 的
+ * `cordis.patch.yml`，多个 Windows 用户共用一个 profile 时会互相覆盖。
+ *
+ * 读写都走本插件自己的 `/__remote_access__/config`：
+ *   · GET  → { ok, path, revision, config }
+ *   · POST ← { patch: {字段: 值}, revision } → { ok, path, revision, config }
+ * 本机（回环）页面由上游 webServer 上的同路径路由回答；手机页面由代理转发（先过访问门）。
+ * 两种页面看到的是同一份本用户 JSON，写盘完成才回执。
  *
  * 页面上只说人话：失败给一句「下一步做什么」，内部状态只写开发者控制台。
  */
@@ -20,8 +21,7 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    // 必须与 Host 的 ROW_ID / cordis.patch.yml 的 id 一致。
-    // 不能叫 `remote-access`：0.2.1 的官方 loader 行已经占用了这个 id。
+    // settings.section 的注册 id（与 bundle patch 的行 id 一致，便于排查）。
     const NS = 'remote-access-cidr';
 
     /**
@@ -33,9 +33,9 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.4.4';
+    const CLIENT_VERSION = '1.5.0';
 
-    // 表单字段（与 index.js 的 Config 字段对表由 tools/check-config-schema.mjs 保证）
+    // 表单字段（配置只存在本用户 JSON 里；Host 用 DEFAULTS 做同样的归一化）
     const FIELDS = [
       // 分节（section）只是版式：让设置页读起来像一份配置清单，而不是一串控件。
       // 每一节标题下面是同类参数；`hint` 是字段下方那行小字（手机上比 placeholder 好读）。
@@ -219,7 +219,84 @@ window.__ModuleLoader__.load({
       return next;
     }
 
-    const namespaceOf = (view) => (view?.namespaces ?? []).find((row) => row?.ns === NS);
+    // ---------------------------------------------------------------- 本用户配置的唯一读写通道
+    //
+    // 配置只存在宿主那台机器的 `$DSH_HOME/remote-access-config.json`。本页通过插件自己的
+    // `/__remote_access__/config` 读写它；不碰 DSH 的 configForms / ctx.remote.settings
+    // （那两个读写的是共享 profile，多个 Windows 用户共用时会互相覆盖）。
+    const CONFIG_ENDPOINT = '/__remote_access__/config';
+
+    function createConfigStore() {
+      let snapshot = { status: 'loading', writable: true, revision: undefined, value: undefined, path: '', error: '' };
+      const listeners = new Set();
+      const emit = () => {
+        for (const fn of [...listeners]) {
+          try { fn(); } catch { /* 订阅方自己的问题 */ }
+        }
+      };
+      const applyData = (data) => {
+        snapshot = {
+          status: 'ready',
+          writable: true,
+          revision: data.revision,
+          value: data.config && typeof data.config === 'object' ? data.config : {},
+          path: String(data.path ?? ''),
+          error: '',
+        };
+      };
+      async function load() {
+        if (typeof window.fetch !== 'function') {
+          snapshot = { ...snapshot, status: 'error', writable: false, error: '当前页面没有 fetch' };
+          emit();
+          return;
+        }
+        try {
+          const res = await window.fetch(CONFIG_ENDPOINT, { cache: 'no-store', headers: { accept: 'application/json' } });
+          const data = await res.json().catch(() => null);
+          if (!res.ok || data === null || data.ok !== true) {
+            throw new Error(data?.error ?? `HTTP ${res.status}`);
+          }
+          applyData(data);
+        } catch (err) {
+          snapshot = { ...snapshot, status: 'error', writable: false, error: String(err?.message ?? err) };
+        }
+        emit();
+      }
+      async function mutate(ops, revision) {
+        const patch = {};
+        for (const op of ops) {
+          const key = op?.path?.[0];
+          if (key) patch[key] = op.value;
+        }
+        const res = await window.fetch(CONFIG_ENDPOINT, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ patch, revision }),
+        });
+        const data = await res.json().catch(() => null);
+        if (res.status === 409 && data !== null) {
+          applyData(data);
+          emit();
+          return false; // 页面会提示「重新读取后再试」
+        }
+        if (!res.ok || data === null || data.ok !== true) {
+          throw new Error(data?.error ?? `HTTP ${res.status}`);
+        }
+        applyData(data);
+        emit();
+        return true;
+      }
+      load();
+      return {
+        getSnapshot: () => snapshot,
+        subscribe: (fn) => {
+          listeners.add(fn);
+          return () => listeners.delete(fn);
+        },
+        mutate,
+        reload: load,
+      };
+    }
 
     // ---------------------------------------------------------------- 远程 UI 布局
     //
@@ -431,7 +508,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
     /**
      * 启动布局控制器。返回清理函数；**回环页面直接返回空清理**（这就是「只动远程」的开关）。
      */
-    function startLayoutController(ctx) {
+    function startLayoutController(ctx, store) {
       const noop = () => {};
       if (typeof document === 'undefined') return noop; // 测试桩子 / 无 DOM
       let remote = false;
@@ -441,8 +518,6 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       let mode = 'auto';
       let applied = null;
       let stopped = false;
-      let attempt = 0;
-      let retryTimer = null;
       let raScheduled = false;
       /** 「手机端回车=换行」的开头（配置里读；默认开） */
       let enterNewline = true;
@@ -808,31 +883,22 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         emitLayout();
       }
 
-      /** 读一次「远程UI布局」配置；失败就退到 auto（并重试几次，刚进页面时 Remote 可能还没就绪） */
+      /** 从本用户配置里取「远程UI布局」与「手机端回车=换行」；还没读到时按 auto / 开处理 */
       function loadMode() {
-        Promise.resolve()
-          .then(() => ctx.remote.settings.describe())
-          .then((response) => {
-            if (stopped) return;
-            if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
-            const value = namespaceOf(response.value)?.value ?? {};
-            const next = String(value.remoteLayout ?? 'auto');
-            attempt = 0;
-            mode = ['auto', 'phone', 'desktop'].includes(next) ? next : 'auto';
-            // 「手机端回车=换行」与布局一起读：这一项是输入体验的开关，默认开
-            enterNewline = value.phoneEnterNewline !== false;
-            applyLayout();
-          })
-          .catch((err) => {
-            if (stopped) return;
-            try { console.warn('[remote-access] 读「远程UI布局」失败，先按自动处理', err); } catch { /* 忽略 */ }
-            attempt += 1;
-            if (attempt < 5) retryTimer = window.setTimeout(loadMode, 300 * attempt);
-          });
+        if (stopped) return;
+        const snap = store.getSnapshot();
+        if (snap.status !== 'ready') return;
+        const value = snap.value ?? {};
+        const next = String(value.remoteLayout ?? 'auto');
+        mode = ['auto', 'phone', 'desktop'].includes(next) ? next : 'auto';
+        // 「手机端回车=换行」与布局一起读：这一项是输入体验的开关，默认开
+        enterNewline = value.phoneEnterNewline !== false;
+        applyLayout();
       }
 
       injectStyle();
       applyLayout();
+      const offStore = store.subscribe(loadMode);
       loadMode();
 
       // 视口/指针变化（横竖屏切换、外接屏）→ 重算；只在 auto 下有意义
@@ -1316,17 +1382,13 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
 
       // 配置被改（本机设置页保存 / 另一台设备改了）→ 立刻生效，不必刷新
       const offs = [];
-      try { offs.push(ctx.on('connection/reset', () => { attempt = 0; loadMode(); })); } catch { /* 忽略 */ }
-      try {
-        const off = ctx.remote.$on?.('settings/document-updated', () => { attempt = 0; loadMode(); });
-        if (typeof off === 'function') offs.push(off);
-      } catch { /* 忽略 */ }
+      try { offs.push(ctx.on('connection/reset', () => loadMode())); } catch { /* 忽略 */ }
 
       return () => {
         stopped = true;
         // 收回给外壳的入口：停用之后它必须立刻变成「问不到东西」，而不是拿到一份过期的答案
         try { if (window.__dshRaBack === backApi) delete window.__dshRaBack; } catch { /* 忽略 */ }
-        if (retryTimer) window.clearTimeout(retryTimer);
+        try { offStore?.(); } catch { /* 忽略 */ }
         for (const off of offs) {
           try { off?.(); } catch { /* 忽略 */ }
         }
@@ -1423,30 +1485,16 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
 
     // ---------------------------------------------------------------- UI 设置（只在远程页面生效）
     //
-    // 官方的「通用设置」里有五项界面偏好。
+    // 官方的「通用设置」里有五项界面偏好，本插件把它们存进**本用户配置**（唯一配置源）。
+    // 套用方式：
+    //   · 外观 / 字号：只投影到本页 DOM（不写宿主设置），本机页面一个像素都不动；
+    //   · 工作步骤展示 / 显示代码工作视图 / 性能与用量：官方在 0.2.1 只提供「写宿主」入口，
+    //     本插件不写任何别的配置，因此它们跟随电脑设置，状态行会如实说明。
     //
-    // 0.2.0：非回环页面把设置通道降级成内存态
-    //        （`persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'`），
-    //        官方 setter 只改本页；本插件存一份值，每次打开远程页面重新套一遍。
-    // 0.2.1：这个降级被取消了（ConfigFormController 不再有 persistence/mode），
-    //        远程页面调官方 setter 会**直接写宿主设置**。继续沿用那套，会把「手机选的外观」
-    //        悄悄改成电脑的外观。所以 0.2.1 起：
-    //          · 外观 / 字号：只投影到本页 DOM（不写宿主），本机页面仍一个像素都不动；
-    //          · 工作步骤展示 / 显示代码工作视图 / 性能与用量：官方只保留「写宿主」的入口，
-    //            没有公开的「只改本页」路径，因此不再远程覆盖，状态行会如实说明；
-    //          · 0.2.0 仍走原来的官方入口（本页生效）。
-    //
-    // 三条硬约束不变：
+    // 三条硬约束：
     //   1. 本机（回环）页面一个像素都不动 —— 与布局控制器同一个开关。
     //   2. 宿主的官方配置一个字都不写。
     //   3. 没有 DOM / 没有对应服务的环境必须安静地什么都不做（tools/test-client.mjs 的桩子）。
-    const UI_FIELDS = [
-      'remoteTheme',
-      'remoteFontSize',
-      'remoteTranscriptView',
-      'remoteDeveloperTools',
-      'remotePerformanceUsage',
-    ];
 
     /** 0.2.1 的 ui-layout 用这两个属性切换内置调色板（与官方 ThemePresenter 同一对） */
     const THEME_SOURCE_ATTR = 'data-ds-theme-source';
@@ -1469,24 +1517,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
     const FACTORY_UI = {
       setTheme: 'system',
       setFontSize: 14,
-      // 官方那行的判据分端：桌面客户端 standard，其余（手机浏览器）detailed
-      setTranscriptView: typeof globalThis !== 'undefined' && 'dshDesktop' in globalThis ? 'standard' : 'detailed',
-      setDeveloperTools: true,
-      setPerformanceUsage: 'detailed',
     };
-
-    /**
-     * 0.2.1 起官方设置表单在远程页面上也可写（快照里不再有 0.2.0 的 `mode` 字段）。
-     * 用它决定要不要把「官方 setter 会写宿主」这条路径换成本页投影。
-     */
-    function settingsPersistAcrossPages(ctx) {
-      try {
-        const snapshot = ctx?.configForms?.get?.(NS)?.getSnapshot?.();
-        return snapshot !== undefined && snapshot !== null && !('mode' in snapshot);
-      } catch {
-        return false;
-      }
-    }
 
     function themeServiceOf(ctx) {
       try {
@@ -1546,28 +1577,6 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       }
     }
 
-    /** 控制器退出时把本页恢复成宿主自己的主题/字号（不触发任何写盘） */
-    function restoreHostUi(ctx) {
-      if (typeof document === 'undefined' || document.documentElement === null) return;
-      let snapshot = null;
-      try { snapshot = themeServiceOf(ctx)?.getTheme?.(); } catch { /* 忽略 */ }
-      if (!snapshot) return;
-      const scheme = snapshot.active?.colorScheme === 'dark' ? 'dark' : 'light';
-      const root = document.documentElement;
-      root.style.colorScheme = scheme;
-      root.setAttribute(THEME_SOURCE_ATTR, snapshot.preference === 'system' ? 'system' : scheme);
-      const body = document.body;
-      if (body) {
-        if (scheme === 'dark') body.setAttribute(DARK_THEME_ATTR, '');
-        else body.removeAttribute(DARK_THEME_ATTR);
-        for (const [name, value] of Object.entries(snapshot.active?.tokens ?? {})) body.style.setProperty(name, value);
-        for (const [role, name] of FONT_SIZE_VARS) {
-          const px = Number(snapshot.fontSizes?.[role] ?? FACTORY_UI.setFontSize);
-          body.style.setProperty(name, `${px}px`);
-        }
-      }
-    }
-
     /** 「UI 设置」在页面上的生效近况：给设置页那一组显示一行状态 */
     let uiStatus = null;
     const uiStatusListeners = new Set();
@@ -1584,120 +1593,11 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
     }
 
     /**
-     * 找官方那五项各自的「本页写入入口」。官方只给前两项做了服务，其余挂在那几行设置项的注入面上：
-     *   - 外观 / 字号大小 → ui-theme 的 theme 服务（setTheme / setFontSize）
-     *   - 显示代码工作视图 → ui-settings 的 configForms.developerTools.setEnabled
-     *   - 工作步骤展示 / 性能与用量 → settings.general.item 里 id 为 transcript-view / performance-usage
-     *     那两行的注入面（官方没给服务入口，设置页那两行拿到的就是这两个函数）。
-     * ctx.slots.entries() 是官方公开的「注册视图」，取到 inject 直接调，与用户点那两行同一条路径。
-     * 入口可能比本插件晚就绪，所以缺谁就把谁记进 pending，由调用方退避重试。
+     * 「UI 设置」控制器：只把**外观 / 字号**投影到远程页面的本页 DOM。
+     * 另外三项在 DSH 0.2.1 上只提供「写宿主设置」的入口，而本插件不写任何别的配置，
+     * 所以它们跟随电脑设置（设置页状态行会写明）。
      */
-    function officialUiSetters(ctx) {
-      const found = {};
-      const theme = (() => {
-        try { return typeof ctx.get === 'function' ? ctx.get('theme') : null; } catch { return null; }
-      })();
-      if (theme && typeof theme.setTheme === 'function') found.setTheme = (id) => theme.setTheme(id);
-      if (theme && typeof theme.setFontSize === 'function') {
-        found.setFontSize = (px) => {
-          // 0.2.0 是 setFontSize(px)；0.2.1 改成 setFontSize(role, px)（text/code/terminal）。
-          // 这个入口只在 0.2.0 的远程页面用；0.2.1 走本页投影，不写宿主。
-          if (theme.setFontSize.length >= 2) {
-            for (const role of ['text', 'code', 'terminal']) theme.setFontSize(role, px);
-          } else {
-            theme.setFontSize(px);
-          }
-        };
-      }
-      const developerTools = (() => {
-        try {
-          const forms = typeof ctx.get === 'function' ? ctx.get('configForms') : null;
-          return forms?.developerTools ?? null;
-        } catch { return null; }
-      })();
-      if (developerTools && typeof developerTools.setEnabled === 'function') {
-        found.setDeveloperTools = (enabled) => developerTools.setEnabled(enabled === true);
-      }
-      try {
-        const entries = ctx.slots?.entries?.('settings.general.item') ?? [];
-        for (const entry of entries) {
-          const id = entry?.options?.id;
-          if (id !== 'transcript-view' && id !== 'performance-usage') continue;
-          if (typeof entry.inject !== 'function') continue;
-          let face;
-          try { face = entry.inject(); } catch { continue; }
-          if (id === 'transcript-view' && typeof face?.setTranscriptView === 'function') {
-            found.setTranscriptView = face.setTranscriptView;
-          }
-          if (id === 'performance-usage' && typeof face?.setPerformanceUsage === 'function') {
-            found.setPerformanceUsage = face.setPerformanceUsage;
-          }
-        }
-      } catch { /* 拿不到就等下一次重试 */ }
-      return found;
-    }
-
-    /**
-     * 把读到的配置套到本页上。返回 { applied, pending, skipped }：
-     * applied = 已经套上去的项（中文名，给状态行用）；pending = 入口还没就绪的项；
-     * skipped = 0.2.1 上「官方只提供写宿主入口、无法只作用于本页」而停用的项。
-     * 单项失败只记一条 console.warn —— 官方组件缺席时（比如关掉了 ui-theme）整套照常跑。
-     */
-    function applyUiSettings(config, setters, { ctx, localOnly = false } = {}) {
-      const applied = [];
-      const pending = [];
-      const skipped = [];
-      const warn = (label, err) => {
-        try { console.warn('[remote-access] 套用「' + label + '」失败：', err); } catch { /* 忽略 */ }
-      };
-      const run = (name, label, apply) => {
-        const setter = setters[name];
-        if (typeof setter !== 'function') { pending.push(label); return; }
-        try { apply(setter); applied.push(label); } catch (err) { warn(label, err); }
-      };
-      const runLocal = (label, apply) => {
-        try { apply(); applied.push(label); } catch (err) { warn(label, err); }
-      };
-      const themeValue = () => {
-        const raw = String(config.remoteTheme ?? 'default');
-        return ['dark', 'light', 'system'].includes(raw) ? raw : FACTORY_UI.setTheme;
-      };
-      const fontSizeValue = () => {
-        const px = Number(config.remoteFontSize);
-        return Number.isInteger(px) && px >= 10 && px <= 22 ? px : FACTORY_UI.setFontSize;
-      };
-      if (localOnly) {
-        // 0.2.1：只投影到本页，绝不调用会写宿主设置的官方 setter。
-        if (ctx) {
-          runLocal('外观', () => projectThemeLocal(ctx, themeValue()));
-          runLocal('字号大小', () => projectFontSizeLocal(ctx, config.remoteFontSize));
-        } else {
-          pending.push('外观', '字号大小');
-        }
-        skipped.push('工作步骤展示', '显示代码工作视图', '性能与用量');
-      } else {
-        run('setTheme', '外观', (set) => set(themeValue()));
-        run('setFontSize', '字号大小', (set) => set(fontSizeValue()));
-        run('setTranscriptView', '工作步骤展示', (set) => {
-          const raw = String(config.remoteTranscriptView ?? 'default');
-          set(['compact', 'standard', 'detailed', 'verbose'].includes(raw) ? raw : FACTORY_UI.setTranscriptView);
-        });
-        run('setDeveloperTools', '显示代码工作视图', (set) => {
-          const raw = String(config.remoteDeveloperTools ?? 'default');
-          set(raw === 'on' ? true : raw === 'off' ? false : FACTORY_UI.setDeveloperTools);
-        });
-        run('setPerformanceUsage', '性能与用量', (set) => {
-          const raw = String(config.remotePerformanceUsage ?? 'default');
-          set(['compact', 'detailed'].includes(raw) ? raw : FACTORY_UI.setPerformanceUsage);
-        });
-      }
-      return { applied, pending, skipped };
-    }
-
-    /**
-     * 「UI 设置」控制器。返回清理函数；**回环页面直接返回空清理**（与布局控制器同一个开关）。
-     */
-    function startUiSettingsController(ctx) {
+    function startUiSettingsController(ctx, store) {
       const noop = () => {};
       if (typeof document === 'undefined') return noop;
       let remote = false;
@@ -1705,120 +1605,53 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       if (!remote) return noop;
 
       let stopped = false;
-      let config = null;
-      let setters = null;
-      let attempt = 0;
-      let retryTimer = null;
       const offs = [];
-      // 0.2.1 的官方设置会跨端写宿主；这时外观/字号只做本页投影，其余三项不覆盖。
-      const localOnly = settingsPersistAcrossPages(ctx);
 
-      /** 退避重试：次数用完就停（页面状态行会说明哪几项没接上） */
-      function scheduleRetry(run, limit) {
-        if (stopped) return;
-        attempt += 1;
-        if (attempt > limit) return;
-        retryTimer = window.setTimeout(run, 300 * attempt);
-      }
-
-      /** 配置读到了就套一遍；入口没齐就重试（官方组件可能比本插件晚挂载） */
       function apply() {
-        if (stopped || config === null) return;
-        if (setters === null) setters = officialUiSetters(ctx);
-        const result = applyUiSettings(config, setters, { ctx, localOnly });
-        publishUiStatus({
-          applied: result.applied,
-          pending: result.pending,
-          skipped: result.skipped,
-          localOnly,
-        });
-        if (result.pending.length > 0) {
-          setters = null; // 入口是「拿到就用」，缺的那几个下次重新找一遍
-          scheduleRetry(apply, 8);
-        }
-      }
-
-      function load() {
         if (stopped) return;
-        Promise.resolve()
-          .then(() => ctx.remote.settings.describe())
-          .then((response) => {
-            if (stopped) return;
-            if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
-            const value = namespaceOf(response.value)?.value ?? {};
-            const next = {};
-            for (const key of UI_FIELDS) next[key] = value[key];
-            config = next;
-            attempt = 0;
-            setters = null;
-            apply();
-          })
-          .catch((err) => {
-            if (stopped) return;
-            try { console.warn('[remote-access] 读「UI 设置」失败，稍后重试', err); } catch { /* 忽略 */ }
-            scheduleRetry(load, 5);
-          });
+        const snap = store.getSnapshot();
+        if (snap.status !== 'ready') return;
+        const config = snap.value ?? {};
+        try { projectThemeLocal(ctx, config.remoteTheme); } catch { /* 忽略 */ }
+        try { projectFontSizeLocal(ctx, config.remoteFontSize); } catch { /* 忽略 */ }
+        publishUiStatus({
+          applied: ['外观', '字号大小'],
+          pending: [],
+          skipped: ['工作步骤展示', '显示代码工作视图', '性能与用量'],
+          localOnly: true,
+        });
       }
 
-      const on = (fn) => {
-        try {
-          const off = fn();
-          if (typeof off === 'function') offs.push(off);
-        } catch { /* 忽略 */ }
-      };
-      // 0.2.1：桌面端改主题也会广播 theme/change，官方 presenter 会先套宿主主题；
+      try { offs.push(store.subscribe(apply)); } catch { /* 忽略 */ }
+      // 桌面端改主题也会广播 theme/change，官方 presenter 会先套宿主主题；
       // 本页的远程外观必须在它之后重新投影一次，否则手机上会瞬间跟着电脑变。
-      on(() => ctx.on('theme/change', () => {
-        if (!localOnly || stopped || config === null) return;
-        const raw = String(config.remoteTheme ?? 'default');
-        projectThemeLocal(ctx, ['dark', 'light', 'system'].includes(raw) ? raw : FACTORY_UI.setTheme);
-        projectFontSizeLocal(ctx, config.remoteFontSize);
-      }));
-      on(() => ctx.on('connection/reset', () => { attempt = 0; setters = null; load(); }));
-      on(() => ctx.remote.$on?.('settings/document-updated', () => { attempt = 0; load(); }));
-      // 官方那两行的注册要等 settings.general.item 被声明之后才拿得到 → 注册一变就重试一次
-      on(() => ctx.on('slots/changed', (key) => {
-        if (key !== 'settings.general.item' || config === null) return;
-        attempt = 0;
-        setters = null;
-        apply();
-      }));
-      // 从别处回到这个页面时重读：配置可能是在桌面上改的，这条路径上没有 document-updated 事件
-      const onVisible = () => {
-        if (document.visibilityState !== 'visible') return;
-        attempt = 0;
-        setters = null;
-        load();
-      };
+      try { offs.push(ctx.on('theme/change', () => apply())); } catch { /* 忽略 */ }
+      const onVisible = () => { if (document.visibilityState === 'visible') apply(); };
       document.addEventListener('visibilitychange', onVisible);
       offs.push(() => document.removeEventListener('visibilitychange', onVisible));
 
-      load();
+      apply();
 
       return () => {
         stopped = true;
-        if (retryTimer !== null) window.clearTimeout(retryTimer);
         for (const off of offs) {
           try { off(); } catch { /* 忽略 */ }
         }
-        if (localOnly) restoreHostUi(ctx);
         uiStatus = null;
       };
     }
 
     return {
       // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
-      inject: ['slots', 'configForms', 'remote', 'remote.settings'],
+      inject: ['slots', 'remote'],
       apply(ctx) {
-        // ui-settings 提供的共享表单控制器：同一个条目在浏览器里只有一个实例，
-        // 生命周期归提供方，我们只订阅，不 dispose。
-        const form = ctx.configForms.get(NS);
-        const describe = ctx.configForms.describe();
-        const settings = ctx.remote.settings;
+        // 所有配置读写都走本插件自己的端点（唯一数据源：本用户 JSON）。
+        // 不用 ctx.configForms / ctx.remote.settings —— 它们读写的是共享 profile。
+        const store = createConfigStore();
 
         // 远程页面才有布局改造；本机页面这里直接是个空清理函数（「不动本地」的开关就在这一行）
-        const stopLayout = startLayoutController(ctx);
-        const stopUi = startUiSettingsController(ctx);
+        const stopLayout = startLayoutController(ctx, store);
+        const stopUi = startUiSettingsController(ctx, store);
         // 反过来：只有本机页面才上报窗口可见性（安卓外壳靠它决定要不要弹通知）
         const stopPresence = startPresenceReporter(ctx);
         try {
@@ -1826,31 +1659,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); stopPresence(); });
         } catch { /* 忽略 */ }
 
-        /**
-         * 远程页面（手机）读：Remote 通道。
-         * ctx.remote.* 返回的是 RemoteResult 信封（`{ ok, value }` / `{ ok:false, error }`），
-         * 不是裸数据 —— 官方镜像同样是 `response.ok ? response.value : response.error.message`。
-         * 信封当数据用，就会「找不到命名空间 → 页面全空/全 0」。
-         */
-        async function readRemote() {
-          const response = await settings.describe();
-          if (!response?.ok) throw new Error(response?.error?.message ?? '读取被拒绝');
-          const ns = namespaceOf(response.value);
-          return { config: ns?.value ?? {}, revision: ns?.revision };
-        }
-
-        /** 远程页面写：交给 Host 网关去跑（写盘完成才返回）；value 是单个命名空间视图 */
-        async function writeRemote(changed, revision) {
-          const ops = Object.entries(changed).map(([key, value]) => ({ op: 'set', path: [key], value }));
-          const response = await settings.mutate(NS, ops, revision);
-          if (!response?.ok) throw new Error(response?.error?.message ?? '写入被拒绝');
-          const view = response.value;
-          return { config: view?.value ?? { ...changed }, revision: view?.revision };
-        }
-
         function Panel() {
-          const [snap, setSnap] = React.useState(() => form.getSnapshot());
-          const [remote, setRemote] = React.useState(null);
+          const [snap, setSnap] = React.useState(() => store.getSnapshot());
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
@@ -1860,9 +1670,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const cacheOpen = groupsOpen.cache === true;
           const revisionRef = React.useRef(snap.revision);
 
-          // 回环页面用 configForms（官方通道）；拿不到就退到 Remote 通道（手机）
-          const viaForms = snap.status === 'ready' && snap.writable === true;
-          const source = viaForms ? snap.value : remote?.config;
+          const isLocal = (() => {
+            try { return ctx.remote?.$host?.isLoopback === true; } catch { return false; }
+          })();
+          const source = snap.value;
 
           /**
            * 页脚那句自检：本页跑的是哪一份客户端代码，以及电脑那边的通知接口在不在。
@@ -1873,7 +1684,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
            */
           const [linkNote, setLinkNote] = React.useState('');
           React.useEffect(() => {
-            if (viaForms || typeof window.fetch !== 'function') return undefined;
+            if (isLocal || typeof window.fetch !== 'function') return undefined;
             let alive = true;
             (async () => {
               try {
@@ -1921,9 +1732,14 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
               }
             })();
             return () => { alive = false; };
-          }, [viaForms]);
+          }, [isLocal]);
 
-          React.useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), []);
+          React.useEffect(() => {
+            const off = store.subscribe(() => setSnap(store.getSnapshot()));
+            // 补偿订阅之前已经完成的那次加载：否则「加载比组件挂载还快」时页面会停在 loading
+            setSnap(store.getSnapshot());
+            return off;
+          }, []);
 
           /**
            * 「缓存」那一组的自检：只在手机上、且**展开这一组时**才去问一次宿主。
@@ -1935,7 +1751,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const [cacheInfo, setCacheInfo] = React.useState(null);
           const [cacheBusy, setCacheBusy] = React.useState(false);
           const readCacheInfo = async (reset, alive) => {
-            if (viaForms) {
+            if (isLocal) {
               setCacheNote('本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径');
               return;
             }
@@ -1984,7 +1800,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             return () => { alive = false; };
             // 只在「展开这一组」与「本机 ↔ 远程」切换时读一次（readCacheInfo 每次渲染都是新的，
             // 但它只读一次远端状态，不进 deps 才不会被自己反复触发）
-          }, [cacheOpen, viaForms]);
+          }, [cacheOpen, isLocal]);
 
           // 布局在「手机 ↔ 电脑」之间切换时（改了这一项、或横竖屏转了）让表单跟着重排
           const [, bumpLayout] = React.useState(0);
@@ -2000,51 +1816,6 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             setDraft(null);
           }, [snap.revision]);
 
-          React.useEffect(() => {
-            if (viaForms) {
-              setRemote(null);
-              return undefined;
-            }
-            let alive = true;
-            let timer;
-            let attempt = 0;
-            // 刚进页面时 Remote 连接可能还没就绪：失败就重试几次；
-            // 并且跟着官方镜像，在 connection/reset 与 settings/document-updated 时重读。
-            const load = async () => {
-              try {
-                const next = await readRemote();
-                if (!alive) return;
-                setRemote(next);
-                setStatus('');
-              } catch (err) {
-                if (!alive) return;
-                try { console.error('[remote-access] 读远端配置失败', err); } catch { /* 忽略 */ }
-                attempt += 1;
-                if (attempt < 4) {
-                  timer = setTimeout(load, 250 * attempt);
-                  return;
-                }
-                setRemote({ config: {}, revision: undefined });
-                setStatus(`读不到配置：${err?.message ?? err}`);
-              }
-            };
-            load();
-            let offReset;
-            let offUpdated;
-            try { offReset = ctx.on('connection/reset', () => { attempt = 0; load(); }); } catch { /* 忽略 */ }
-            try {
-              offUpdated = ctx.remote.$on?.('settings/document-updated', () => {
-                attempt = 0;
-                load();
-              });
-            } catch { /* 忽略 */ }
-            return () => {
-              alive = false;
-              clearTimeout(timer);
-              try { offReset?.(); } catch { /* 忽略 */ }
-              try { offUpdated?.(); } catch { /* 忽略 */ }
-            };
-          }, [viaForms]);
 
           const current = draft ?? draftFrom(source);
           const setField = (key, value) => setDraft({ ...current, [key]: value });
@@ -2076,13 +1847,9 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                 setStatus('没有改动。');
                 return;
               }
-              if (viaForms) {
-                const ops = Object.entries(changed).map(([key, value]) => ({ op: 'set', path: [key], value }));
-                const accepted = await form.mutate(ops, snap.revision);
-                if (accepted !== true) throw new Error('写入被拒绝，请点「重新读取」后再试一次。');
-              } else {
-                setRemote(await writeRemote(changed, remote?.revision));
-              }
+              const ops = Object.entries(changed).map(([key, value]) => ({ op: 'set', path: [key], value }));
+              const accepted = await store.mutate(ops, snap.revision);
+              if (accepted !== true) throw new Error('写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。');
               setDraft(null);
               setStatus(`已保存 ${count} 项。`);
             } catch (err) {
@@ -2096,17 +1863,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const onReload = () => {
             setStatus('');
             setDraft(null);
-            if (viaForms) {
-              try {
-                Promise.resolve(describe?.load?.()).then(() => setSnap(form.getSnapshot()));
-              } catch {
-                setSnap(form.getSnapshot());
-              }
-              return;
-            }
-            readRemote()
-              .then(setRemote)
-              .catch(() => setRemote({ config: {}, revision: undefined }));
+            store.reload();
           };
 
           // 手机上一列排（标签在上、控件在下）：300px 宽的设置页塞不下「标签 + 输入框」两列。
@@ -2430,7 +2187,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                     }),
                   ]
                 : [h('div', { key: 'traffic-none', style: statRowStyle }, h('span', { style: statLabelStyle }, cacheNote || '—'))]),
-              !viaForms
+              !isLocal
                 ? h(
                     'div',
                     { style: { marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' } },
@@ -2446,7 +2203,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                     ),
                   )
                 : null,
-              !viaForms
+              !isLocal
                 ? h(
                     'div',
                     { style: { marginTop: 6, fontSize: 11, opacity: 0.55, lineHeight: 1.7 } },
@@ -2490,18 +2247,21 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
               { style: { marginTop: 10, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
               `本页客户端 ${CLIENT_VERSION}${linkNote ? ` · ${linkNote}` : ''}`,
             ),
-            // 本用户配置那一行：设置页写的是共享 profile，但宿主真正生效的是
-            // 每个 Windows 用户自己的 `.dsh/remote-access-config.json`（端口不互相抢就靠它）。
-            (() => {
-              const raw = String(source?.localConfigFile ?? '').trim();
-              if (raw === 'off') return null;
-              const where = raw || '$DSH_HOME/remote-access-config.json';
-              return h(
-                'div',
-                { style: { marginTop: 6, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
-                `本用户配置优先：端口等参数以 ${where} 为准（每个 Windows 用户各一份；点保存会同步写进去）。`,
-              );
-            })(),
+            // 配置读写失败时直接把原因写出来（本页只认这一个文件，读不到就什么都改不了）
+            snap.status === 'error'
+              ? h(
+                  'div',
+                  { style: { marginTop: 10, fontSize: 12, color: 'inherit', opacity: 0.9, lineHeight: 1.6 } },
+                  `读不到本用户配置：${snap.error || '未知错误'}（点「重新读取」重试）`,
+                )
+              : null,
+            // 配置来源那一行：只有本用户 JSON，没有共享 profile
+            h(
+              'div',
+              { style: { marginTop: 6, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
+              `配置只存在：${snap.path || '$DSH_HOME/remote-access-config.json'}` +
+                '（每个 Windows 用户各一份；插件不读也不写共享 profile）。',
+            ),
           );
         }
 

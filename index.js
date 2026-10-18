@@ -5,15 +5,16 @@
  * 设计要点：
  *  1. 只监听「允许网段」里属于本机的地址（listen=auto），别的一律不绑，绝不含 0.0.0.0；
  *  2. 每个连进来的对端也必须落在允许网段内、且不在黑名单 / 拉黑名单里，否则 403；
- *  3. 默认仍走 DSH 自己的令牌/cookie（没票就是 401）；可选用 accessCode 开一个「网段内输一次 6 位密码」
+ *  3. 默认仍走 DSH 自己的令牌/cookie（没票就是 401）；可选用 accessCode 开一个「网段内输一次密码」
  *     的解锁页，解锁后由本插件在服务端补票，浏览器始终看不到 token —— 一次输错就把该地址写进
- *     「排除的网段」(denyCidrs)，在设置页里删掉该项即可解封；写盘失败时它仍立刻被拦，
- *     只是先暂存在拉黑文件里，随后自动补写；
+ *     本用户配置的「排除的网段」(denyCidrs)，在设置页里删掉该项即可解封；
  *  4. 默认把 Host/Origin 改写成上游回环 authority，因此不必去改 client-connection 的配置；
  *  5. 无论成功失败都会写一份「自诊断文件」，把生效配置、上游探测、监听结果写清楚；
- *  6. 设置页保存后靠 `app-boot/config-reload` 原地重挂监听（热重载），不必重启 DSH。
+ *  6. 配置**只**存在 `$DSH_HOME/remote-access-config.json`（每个 Windows 用户各一份），
+ *     插件不读也不写 profile 的 `cordis.patch.yml`：设置页通过本插件自己的
+ *     `/__remote_access__/config` 端点读写这个文件，保存后原地重挂监听。
  *
- * 参数全部走 Config（在「设置 → 远程访问」里改，其余只在 cordis.patch.yml 里配），零第三方依赖。
+ * 零第三方依赖；配置格式是普通 JSON，可手改。
  */
 
 import http from 'node:http';
@@ -24,20 +25,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
-import { AsyncResource } from 'node:async_hooks';
 import { pipeline } from 'node:stream';
-
-/**
- * Host 侧写配置（`configEditor.edit`）本身跑在 HMR 事务里，而 HMR 用 AsyncLocalStorage 判嵌套：
- * 从「我们监听的请求回调」这条异步链里直接调它，必报 “HMR transactions cannot be nested”。
- * 下面这个异步资源在**模块加载时**创建（那时没有 HMR 事务），把写盘放进它的作用域即可绕开。
- * 导出它是为了让独立测试能验证「确实逃出了那个 store」。
- */
-const configWriteScope = new AsyncResource('dsh-plugin-remote-access/config-write');
-
-export function runOutsideHmr(fn) {
-  return configWriteScope.runInAsyncScope(fn);
-}
 
 /** 拉黑的对端地址 → CIDR 文本（IPv4 用 /32，IPv6 用 /128） */
 export function banCidrOf(peer) {
@@ -61,175 +49,9 @@ export function bannedHostsOf(denyCidrs = []) {
   return hosts;
 }
 
-/**
- * 把某个地址合并进「排除的网段」：优先在现有 patch 值上追加，没有就基于继承值，
- * 去重后返回**整份新配置**（`configEditor.edit` 要的就是整份，不是补丁）。
- */
-export function mergeDenyCidrs(current, inherited, cidr) {
-  const pick = (value) =>
-    Array.isArray(value) ? value.map((v) => String(v ?? '').trim()).filter(Boolean) : [];
-  const base = pick(current?.denyCidrs);
-  const merged = [...new Set([...(base.length ? base : pick(inherited?.denyCidrs)), cidr])];
-  return { ...current, denyCidrs: merged };
-}
+// 配置不走 DSH 的 Config 树（也就不需要 schemastery）：
+// 所有参数只存在本用户的 remote-access-config.json 里，见下面的「本用户配置」一节。
 
-/**
- * 真正把拉黑写进配置：按 id 找到 loader 行 → 交给 `configEditor.edit`（在 runOutsideHmr 里跑）。
- * @returns 写进去的 CIDR 文本；抛错表示这次没写成（调用方会退回暂存文件并稍后重试）。
- */
-export async function persistBanToDenyCidrs(editor, peer) {
-  if (!editor) throw new Error('拿不到 configEditor 服务');
-  const entry = editor.entries().find((row) => row?.options?.id === ROW_ID);
-  if (!entry) throw new Error(`找不到配置行 ${ROW_ID}`);
-  const cidr = banCidrOf(peer);
-  await runOutsideHmr(() =>
-    editor.edit(entry, (current, inherited) => mergeDenyCidrs(current, inherited, cidr)),
-  );
-  return cidr;
-}
-
-// DSH 的 Config 协议就是 Schemastery（用 Symbol.for('schemastery') 认领原生 schema）。
-// 该包由 DSH 安装目录随运行时提供，但**借它要声明**：DSH 把 profile 里以 link: 安装的插件
-// 当作 "linked" 层，其 routeLinked() 只对「某个祖先目录的 package.json 在 peerDependencies
-// 里列过」的裸名放行（否则退回原生解析，必然找不到）。所以 package.json 里那一条 peer 是必需的。
-// 在纯 node 环境（tools/ 下的独立测试）解析不到，就降级成「无 schema」，插件照常工作，
-// 只是「设置 → 远程访问」写不进去——所以解析结果会写进状态文件，失败必须看得见。
-let schemaSource = '未尝试';
-let Schema = null;
-try {
-  const schemastery = await import('@deepseek-ai/schemastery');
-  Schema = schemastery?.default ?? schemastery?.Schema ?? null;
-  schemaSource = Schema ? '@deepseek-ai/schemastery（裸名 import，DSH 从安装目录供给）' : '模块已加载，但没有默认导出';
-} catch (err) {
-  schemaSource = `${err?.code ?? 'IMPORT_FAILED'}: ${err?.message ?? err}`;
-}
-
-/**
- * 字段必须标 volatile，Host 才会把它放进「设置」的表单里：
- * Host 的设置文档由 volatileForm / isVolatilePath 过滤，只服务「含 volatile 字段」的条目，
- * 没有 volatile 字段的条目根本不出现在设置文档里（configForms.set 会静默返回 false）。
- * 这不是「免重启」：Cordis 收到配置变化一律走 fiber.restart()，本插件会重新挂载。
- * 本插件的字段都是运行期参数，所以全部标 volatile。
- */
-const hot = (s) => (s && typeof s.volatile === 'function' ? s.volatile() : s);
-const withDesc = (s, text) => (s && typeof s.description === 'function' ? s.description(text) : s);
-/** volatile + 说明文案，一步到位 */
-const field = (s, text) => withDesc(hot(s), text);
-
-/** 这一行的配置表单（Schema 缺失时导出 undefined） */
-export const Config = Schema
-  ? Schema.object({
-      enabled: field(Schema.boolean().default(true), '总开关：关掉即停止监听，不需要卸载插件'),
-      allowCidrs: field(
-        Schema.array(Schema.string()).default(['100.64.0.0/10']),
-        '允许来访的网段（唯一的安全边界）；listen 为 auto 时也用它挑选本机要监听的地址',
-      ),
-      denyCidrs: field(
-        Schema.array(Schema.string()).default([]),
-        '白名单内的例外黑名单；输错访问密码的地址会自动加到这里（形如 100.x.y.z/32），删掉该项即解封',
-      ),
-      listen: field(
-        Schema.array(Schema.string()).default(['auto']),
-        "要监听的本机地址；['auto'] = 只监听 allowCidrs 里属于本机的地址",
-      ),
-      port: field(Schema.natural().max(65535).default(0), '监听端口；0 = 系统随机（想存书签就固定，如 19388）'),
-      maxConnections: field(Schema.natural().default(64), '并发连接上限；0 = 不限制'),
-      allowWebSocket: field(Schema.boolean().default(true), '是否透传 WebSocket —— 界面靠它实时推送，一般别关'),
-      upstream: field(
-        Schema.string().default('auto'),
-        "DSH 界面地址；'auto' = 自动探测，也可显式写 http://127.0.0.1:19387",
-      ),
-      rewriteHost: field(Schema.boolean().default(true), '把 Host/Origin 改写成上游回环地址（省去改 client-connection）'),
-      forwardClientHeaders: field(Schema.boolean().default(true), '转发 x-forwarded-for / x-forwarded-proto'),
-      timeoutMs: field(Schema.natural().default(0), '上游请求超时（毫秒）；0 = 不超时'),
-      urlFile: field(
-        Schema.string().default(''),
-        '带票网址写到哪；留空 = <DSH_HOME>/remote-access-url.txt，填 off = 不写',
-      ),
-      localConfigFile: field(
-        Schema.string().default(''),
-        '本用户配置文件；留空 = <DSH_HOME>/remote-access-config.json（每个 Windows 用户各一份，优先于共享 profile），填 off = 全走共享 profile',
-      ),
-      printUrl: field(Schema.boolean().default(true), '把监听结果与网址同时打到 DSH 日志'),
-      // 密码是凭据，但设置页也收（手机端改完就能用）；非法值不会静默生效，见 normalizeConfig 与 apply 的告警
-      accessCode: field(
-        Schema.string().default(''),
-        '网段内的解锁密码（4–12 位数字或字母）；留空 = 关闭解锁页，必须用带票网址访问。设了它，手机直接打开裸地址输一次密码即可；输错一次就把该地址写进「排除的网段」',
-      ),
-      remoteLayout: field(
-        Schema.string().default('auto'),
-        '远程页面的界面布局：auto = 按视口自动判断，phone = 强制手机布局（横竖屏自适应），desktop = 与桌面一致。只作用于远程页面，本机界面不受影响',
-      ),
-      phoneEnterNewline: field(
-        Schema.boolean().default(true),
-        '手机端按回车 = 换行，不发送：只有点「发送」按钮才真正发送（Ctrl/Cmd+Enter 仍是发送）。只作用于远程页面，本机界面不受影响',
-      ),
-      // 安卓外壳的状态栏通知（外壳自己在后台轮询 /__remote_access__/notify）
-      notifyOnChoice: field(
-        Schema.boolean().default(true),
-        '模型提问（ask_user_question）且没人回答时，让安卓 App 弹状态栏通知。关掉只是不再上报待答状态，App 那边也就不会再提醒',
-      ),
-      notifyOnlyWhenWindowHidden: field(
-        Schema.boolean().default(true),
-        '只在「电脑上的 DSH 窗口不可见」（收进托盘 / 最小化 / 页面已关）时才通知手机；关掉则只要 App 不在前台就通知',
-      ),
-      notifyOnFinish: field(
-        Schema.boolean().default(true),
-        '一轮结束时通知手机（正常跑完与异常结束都算，异常会带上分类：模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）。与「提问时通知手机」是同一个触发条件、互不影响',
-      ),
-
-      // 「UI 设置」一组：只作用于远程页面的官方界面偏好。官方在非回环页面上把设置通道降级成内存态
-      // （ui-settings: persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'），手机端改了刷新就还原；
-      // 所以这几项由本插件的配置负责持久化，远程页面每次打开时重新套用。'default' 一律表示「出厂值」。
-      remoteTheme: field(
-        Schema.string().default('default'),
-        '远程页面的外观：default = 出厂值（跟随系统），dark = 深色，light = 浅色，system = 跟随系统。只作用于远程页面',
-      ),
-      remoteFontSize: field(
-        Schema.number().default(0),
-        '远程页面的正文字号（10–22，单位 px）：0 = 出厂值（14）。只作用于远程页面',
-      ),
-      remoteTranscriptView: field(
-        Schema.string().default('default'),
-        '远程页面的工作步骤展示：default = 出厂值，compact = 简洁，standard = 标准，detailed = 详细，verbose = 完全展开。只作用于远程页面',
-      ),
-      remoteDeveloperTools: field(
-        Schema.string().default('default'),
-        '远程页面的「显示代码工作视图」：default = 出厂值（开启），on = 开启，off = 关闭。只作用于远程页面',
-      ),
-      remotePerformanceUsage: field(
-        Schema.string().default('default'),
-        '远程页面的「性能与用量」：default = 出厂值（详细），compact = 简洁，detailed = 详细。只作用于远程页面',
-      ),
-      // 手机端缓存：缓存本体在手机的 WebView 里，宿主只负责把响应头喂对（见「手机端缓存策略」那一节）。
-      // 宿主不落任何大文件，所以没有 cacheDir / 容量上限这类字段。
-      cacheEnabled: field(
-        Schema.boolean().default(true),
-        '手机端资源缓存：给上游没给缓存头的静态资源（图片 / 视频 / 字体 / 打包产物…）补上新鲜期与弱校验器，手机重复打开不再重传。API、HTML、no-store 一律不碰',
-      ),
-      cacheTtlMinutes: field(
-        Schema.natural().default(10),
-        '上面那类资源的手机端新鲜期（分钟，1–1440）：期内手机一次请求都不发；过期后先出旧的、后台只做一次头部级核对（零字节）',
-      ),
-      cacheProbe: field(
-        Schema.boolean().default(true),
-        '过期核对时额外取首/尾各 64 KB 做指纹（治「换了图但字节数一模一样」）：不整份哈希、不落盘；关掉就只按长度+类型核对',
-      ),
-      cacheOverrideNoStore: field(
-        Schema.boolean().default(false),
-        '连上游标了 no-store 的大静态媒体（图片 / 音频 / 视频，≥64 KB）也缓存：壁纸那类实时抓帧一取就是几 MB，默认每次进页面都要重传。开着最多会看到 TTL 这么久之前的旧帧/旧音轨',
-      ),
-      cacheFullRange: field(
-        Schema.boolean().default(false),
-        '把「从 0 取到结尾」的整段 Range 请求当成整份来缓存：媒体元素取大文件时会发 Range，而浏览器永远不缓存 206 —— 于是每次进页面都要重下整段（实测壁纸音轨 3.8 MB × 2）。默认关：个别播放器可能因此失去拖动定位',
-      ),
-      banFile: field(
-        Schema.string().default(''),
-        '拉黑暂存文件；只有「写进排除的网段」失败时才用得上（留空 = 与状态文件同目录的 remote-access-bans.txt）。平时不用碰它',
-      ),
-      logLevel: field(Schema.string().default('info'), '日志详细程度：silent / info / debug（默认 info）'),
-    })
-  : undefined;
 
 const DEFAULTS = {
   enabled: true,
@@ -244,7 +66,6 @@ const DEFAULTS = {
   forwardClientHeaders: true,
   timeoutMs: 0,
   urlFile: '',
-  localConfigFile: '',
   printUrl: true,
   accessCode: '',
   remoteLayout: 'auto',
@@ -264,21 +85,14 @@ const DEFAULTS = {
   cacheProbe: true,
   cacheOverrideNoStore: false,
   cacheFullRange: false,
-  banFile: '',
   logLevel: 'info',
 };
 
 // ---------------------------------------------------------------- 配置
-
-/**
- * Loader 行 id = 设置命名空间 = cordis.patch.yml 里那一行的 id（热重载按它找配置）。
- *
- * 0.2.1 起 DSH 自己也有一个 loader 行 id 叫 `remote-access`
- * （`@deepseek-ai/dsh-api-remote-access`）。行 id 必须全局唯一；重名会让官方的
- * `remoteAccess` 服务不挂载，桌面壳启动时 `settings/describe` 直接失败。
- * 所以插件行改成旧包名式的 `remote-access-cidr`，与官方行彻底分开。
- */
-const ROW_ID = 'remote-access-cidr';
+//
+// 配置**不**放在 DSH 的 profile（`cordis.patch.yml`）里，也不注册 DSH Config 表单：
+// 每个 Windows 用户只认自己的 `$DSH_HOME/remote-access-config.json`。
+// 设置页通过 `/__remote_access__/config` 端点读写它（见 apply 里的端点）。
 
 function asArray(v) {
   if (v === undefined || v === null) return [];
@@ -365,7 +179,6 @@ function normalizeConfig(rawIn) {
   c.remoteTranscriptView = pickUiOne(c.remoteTranscriptView, ['default', 'compact', 'standard', 'detailed', 'verbose']);
   c.remoteDeveloperTools = pickUiOne(c.remoteDeveloperTools, ['default', 'on', 'off']);
   c.remotePerformanceUsage = pickUiOne(c.remotePerformanceUsage, ['default', 'compact', 'detailed']);
-  c.banFile = String(unwrap(c.banFile) ?? '').trim();
   c.logLevel = ['silent', 'info', 'debug'].includes(String(c.logLevel)) ? String(c.logLevel) : 'info';
   return c;
 }
@@ -374,14 +187,6 @@ function normalizeConfig(rawIn) {
 function statusPathOf(cfg) {
   if (cfg.urlFile === 'off') return '';
   return cfg.urlFile && cfg.urlFile !== '' ? cfg.urlFile : defaultStatusFile();
-}
-
-/** 拉黑名单文件路径 */
-function banPathOf(cfg) {
-  if (cfg.banFile) return cfg.banFile;
-  const statusPath = statusPathOf(cfg);
-  const dir = statusPath ? path.dirname(statusPath) : path.dirname(defaultStatusFile());
-  return path.join(dir, 'remote-access-bans.txt');
 }
 
 /**
@@ -576,6 +381,13 @@ const NOTIFY_PATH = '/__remote_access__/notify';
 const PRESENCE_PATH = '/__remote_access__/presence';
 /** 手机端缓存策略的自检端点（设置页「缓存」子菜单里读它） */
 const CACHE_PATH = '/__remote_access__/cache';
+/**
+ * 本插件配置的读写端点。同一套路径挂两处：
+ *   · 上游 webServer（本机回环页面直接打）；
+ *   · 本插件代理（手机页面，需要先通过访问门）。
+ * 只读写 `$DSH_HOME/remote-access-config.json`，不碰 DSH 的 settings / profile。
+ */
+const CONFIG_PATH = '/__remote_access__/config';
 
 /** 极简解锁页：只在手机上调一次，够用就好，不依赖任何外部资源 */
 function unlockPageHtml(hint) {
@@ -1548,6 +1360,18 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
       return;
     }
 
+    // 本插件配置：手机上的设置页直接读写宿主那台机器的本用户 JSON。
+    // 必须先过访问门 —— 这里能读到访问密码、也能改监听端口。
+    if (String(req.url).split('?')[0] === CONFIG_PATH && typeof opts.config === 'function') {
+      if (!gate.authorize(req)) {
+        res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+        return;
+      }
+      opts.config(req, res);
+      return;
+    }
+
     // 解锁提交：一次不过就拉黑
     if (req.method === 'POST' && String(req.url).startsWith(UNLOCK_PATH) && gate.accessCode) {
       readSmallBody(req).then((body) => {
@@ -2097,42 +1921,37 @@ function defaultStatusFile() {
   return path.join(dshHomeOf(), 'remote-access-url.txt');
 }
 
-// ---------------------------------------------------------------- 本用户配置
+// ---------------------------------------------------------------- 本用户配置（唯一配置源）
 //
 // 为什么要有它：多个 Windows 用户可以共用同一份 profile（常见做法是把
 // `.dsh\profiles\desktop` 做成 junction / 符号链接指到同一个目录）。那样一来
 // `cordis.patch.yml` 里的 `port`、密码等**也是共享的**：两个人同时开 DSH，
 // 第二个实例必然撞 `EADDRINUSE`，于是「插件明明启用了，手机却连不上」。
 //
-// 所以每个用户在自己的 `$DSH_HOME` 里留一份配置，启动时**本地优先**：
-//   · 首次启动：以共享 profile 的值作种子建一份；
-//   · 设置页保存（写的是共享 profile）：宿主动把「这次变了的键」同步进本文件再生效；
-//   · 端口被占用：自动换一个空闲端口，并把实际端口写回本文件，下次不再撞。
+// 所以配置只放本用户的 `$DSH_HOME/remote-access-config.json`：
+//   · 插件**不读也不写** profile 的 `cordis.patch.yml`（也不注册 DSH Config 表单）；
+//   · 设置页通过 `/__remote_access__/config` 端点读写这个文件，保存后原地重挂监听；
+//   · 首次启动按代码里的默认值建一份；端口被占用时自动换空闲端口并写回本文件。
 //
-// 文件是可手改的 JSON（权限 0600）：`config` 是本用户生效值，`sharedBaseline`
-// 只用来判断「共享 profile 这次到底改了什么」，平时不用碰它。
+// 文件是可手改的 JSON（权限 0600）：`config` 是全部生效值。
 const LOCAL_CONFIG_FILE_NAME = 'remote-access-config.json';
 
-/** 本用户配置文件路径；`off` → ''（关掉，全部走共享 profile） */
-export function localConfigPathOf(cfg) {
-  const custom = String(unwrap(cfg?.localConfigFile) ?? '').trim();
-  if (custom === 'off') return '';
-  return custom || path.join(dshHomeOf(), LOCAL_CONFIG_FILE_NAME);
+/** 本用户配置文件路径（固定 $DSH_HOME/remote-access-config.json） */
+export function localConfigPath() {
+  return path.join(dshHomeOf(), LOCAL_CONFIG_FILE_NAME);
 }
 
-/** 只收已知字段，并且**不存 localConfigFile 自己**（否则就没法用 off 把它关掉） */
+/** 只收已知字段（手改文件里多写的键直接忽略） */
 function pickLocalConfig(raw) {
-  const out = pickConfig(raw);
-  delete out.localConfigFile;
-  return out;
+  return pickConfig(raw);
 }
 
 /**
  * 读本用户配置。三种结果：
- *   `{ ok: true, config, baseline }` / `{ ok: false, missing: true }` / `{ ok: false, reason }`。
- * 手改时既可以写 `{ config, sharedBaseline }` 包装，也可以把字段直接写在顶层。
+ *   `{ ok: true, config }` / `{ ok: false, missing: true }` / `{ ok: false, reason }`。
+ * 手改时既可以写 `{ config }` 包装，也可以把字段直接写在顶层。
  */
-export function readLocalConfigFile(file) {
+export function readLocalConfigFile(file = localConfigPath()) {
   let text;
   try {
     text = fs.readFileSync(file, 'utf8');
@@ -2151,54 +1970,21 @@ export function readLocalConfigFile(file) {
     return { ok: false, reason: '顶层不是对象' };
   }
   const wrapped = parsed.config && typeof parsed.config === 'object' && !Array.isArray(parsed.config);
-  return {
-    ok: true,
-    config: pickLocalConfig(wrapped ? parsed.config : parsed),
-    baseline: pickLocalConfig(parsed.sharedBaseline ?? parsed.baseline ?? {}),
-  };
+  return { ok: true, config: pickLocalConfig(wrapped ? parsed.config : parsed) };
 }
 
-/** 写本用户配置（0600）。写不进去由调用方决定是「警告后继续」还是「退回共享 profile」 */
-export function writeLocalConfigFile(file, { config, baseline }) {
+/** 写本用户配置（0600）。调用方负责把写失败说清楚（状态文件 + 日志） */
+export function writeLocalConfigFile(file, config) {
   const payload = {
     version: 1,
     note:
-      '本文件是当前 Windows 用户自己的远程访问配置，优先于共享 profile 的 cordis.patch.yml。' +
-      '改完重启 DSH 生效；删掉它 = 下次启动以共享 profile 为种子重建。',
+      '本文件是当前 Windows 用户自己的远程访问配置（唯一配置源）。' +
+      '插件不读也不写 profile 的 cordis.patch.yml；改完保存即热重载，删掉它 = 下次启动按默认值重建。',
     updatedAt: new Date().toISOString(),
     config: pickLocalConfig(config),
-    sharedBaseline: pickLocalConfig(baseline ?? {}),
   };
   fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
 }
-
-/**
- * 两份配置里值不同的键（只比已知字段；顺序与 DEFAULTS 一致，日志好读）。
- *
- * `localConfigFile` 是**启动期引导字段**，不存进本用户配置文件，也不该被当成
- * 「共享 profile 改了」的证据 —— 否则每次 config-reload 都会误报一次差异并白写一遍文件。
- */
-const BOOTSTRAP_KEYS = new Set(['localConfigFile']);
-export function diffConfigKeys(a, b) {
-  return Object.keys(DEFAULTS).filter(
-    (key) => !BOOTSTRAP_KEYS.has(key) && JSON.stringify(a?.[key]) !== JSON.stringify(b?.[key]),
-  );
-}
-
-/** 共享配置打底、本用户配置覆盖：本用户没写的字段仍用共享值 */
-export function mergeLocalConfig(shared, local) {
-  return { ...pickConfig(shared), ...pickLocalConfig(local) };
-}
-
-/**
- * 同一进程里最近一次 apply 看到的共享 profile 值。
- *
- * 用来区分两种「本地文件与共享 profile 不一致」：
- *   · 进程还活着、共享值刚变 → 就是这次设置页保存（Cordis 会重启本行 → apply 先跑），
- *     要**采纳**进本用户配置；
- *   · 进程刚起（模块第一次加载）→ 可能是别的用户在我们停机时改的，**本地优先**，只追平基线。
- */
-let lastSharedConfigInProcess = null;
 
 /**
  * 上游是 https 时，只有**本机回环**才接受 DSH 的自签证书（没有中间人空间）。
@@ -2253,99 +2039,50 @@ async function verifyUpstream(up, note, attempts = 8, intervalMs = 2000) {
 /** Connection 服务（authenticatedUrl 来自它）；不声明 inject 会抛 without inject */
 export const inject = ['connection'];
 
-export function apply(ctx, config) {
-  // ---------------------------------------------------------------- 本用户配置（本地优先）
-  // 共享 profile 里的那份（设置页保存写的就是它）
-  const sharedConfig = pickLocalConfig(config);
-  const localFile = localConfigPathOf(config);
+export function apply(ctx) {
+  // ---------------------------------------------------------------- 唯一配置源：本用户 JSON
+  // 注意：这里**不看** DSH 传进来的 config —— 插件不读也不写 profile 的 cordis.patch.yml。
+  const configFile = localConfigPath();
   const bootNotes = [];
-  let localConfig = null;
-  if (localFile) {
-    const read = readLocalConfigFile(localFile);
-    if (read.ok) {
-      localConfig = { path: localFile, config: read.config, baseline: read.baseline };
-      const drift = diffConfigKeys(sharedConfig, read.baseline);
-      if (Object.keys(read.baseline).length === 0) {
-        // 手写的扁平文件 / 老格式：没有基线，补一份当前共享值（本地值本身照旧生效）
-        localConfig.baseline = sharedConfig;
-        try { writeLocalConfigFile(localFile, localConfig); } catch { /* 下次再补 */ }
-      } else if (drift.length) {
-        const previousShared = lastSharedConfigInProcess;
-        const changedNow = previousShared ? diffConfigKeys(sharedConfig, previousShared) : [];
-        if (changedNow.length) {
-          // 进程活着、共享值刚变 → 就是这次设置页保存（Cordis 重启本行时先跑 apply）。
-          // 只把「变了的键」采纳进本用户配置，其它本用户自定义的值保持不动。
-          const patch = {};
-          for (const key of changedNow) patch[key] = sharedConfig[key];
-          localConfig.config = { ...localConfig.config, ...patch };
-          localConfig.baseline = sharedConfig;
-          try {
-            writeLocalConfigFile(localFile, localConfig);
-            bootNotes.push(['info', `已把设置保存进本用户配置（${changedNow.join(', ')}）→ ${localFile}`]);
-          } catch (err) {
-            bootNotes.push(['warn', `写本用户配置失败（${err?.message}），这次先只在内存里生效：${localFile}`]);
-          }
-        } else {
-          // 进程刚起：可能是别的 Windows 用户在我们停机时保存的 —— 本用户配置优先，只追平基线
-          localConfig.baseline = sharedConfig;
-          try { writeLocalConfigFile(localFile, localConfig); } catch { /* 下次再追平 */ }
-          bootNotes.push([
-            'info',
-            `共享 profile 与本用户配置不一致（${drift.join(', ')}）—— 仍以本用户配置为准：${localFile}`,
-          ]);
-        }
-      }
-    } else if (read.missing) {
-      // 第一次：以共享 profile 为种子建一份自己的（归一化后存，字段齐全、方便手改）
-      const seeded = normalizeConfig(sharedConfig);
-      localConfig = { path: localFile, config: seeded, baseline: seeded };
+  let cfg;
+  const read = readLocalConfigFile(configFile);
+  if (read.ok) {
+    cfg = normalizeConfig(read.config);
+  } else if (read.missing) {
+    cfg = normalizeConfig({});
+    try {
+      writeLocalConfigFile(configFile, cfg);
+      bootNotes.push([
+        'info',
+        `已建立本用户配置 ${configFile}（按代码默认值；插件不读也不写共享 profile）`,
+      ]);
+    } catch (err) {
+      bootNotes.push(['warn', `建本用户配置失败（${err?.message}），本次只在内存里用默认值：${configFile}`]);
+    }
+  } else {
+    // 内容坏了：先备份、再按默认值重建；IO 类错误（权限 / 被占用）不动原文件
+    const contentProblem = read.reason === '顶层不是对象' || String(read.reason ?? '').startsWith('不是合法 JSON');
+    let backup = '';
+    cfg = normalizeConfig({});
+    if (contentProblem) {
       try {
-        writeLocalConfigFile(localFile, localConfig);
+        backup = `${configFile}.bad-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        fs.renameSync(configFile, backup);
+      } catch { backup = ''; }
+      try {
+        writeLocalConfigFile(configFile, cfg);
         bootNotes.push([
-          'info',
-          `已建立本用户配置 ${localFile}（以共享 profile 为种子；每个 Windows 用户各存一份，端口不再互相抢）`,
+          'warn',
+          `本用户配置读不了（${read.reason}）${backup ? `，已备份为 ${backup}` : ''}；已按默认值重建：${configFile}`,
         ]);
       } catch (err) {
-        localConfig = null;
-        bootNotes.push(['warn', `建本用户配置失败（${err?.message}），本次按共享 profile 运行：${localFile}`]);
+        bootNotes.push(['warn', `本用户配置读不了（${read.reason}）且重建失败（${err?.message}），本次只用默认值`]);
       }
     } else {
-      // 内容坏了（不是 JSON / 顶层不是对象）：备份后按共享 profile 重建，别让人永久卡在「读不了」。
-      // IO 类错误（权限、被占用）不动原文件 —— 那多半是环境问题，重建也写不进去。
-      const contentProblem = read.reason === '顶层不是对象' || String(read.reason ?? '').startsWith('不是合法 JSON');
-      let backup = '';
-      if (contentProblem) {
-        try {
-          backup = `${localFile}.bad-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-          fs.renameSync(localFile, backup);
-        } catch { backup = ''; }
-        const rebuilt = normalizeConfig(sharedConfig);
-        localConfig = { path: localFile, config: rebuilt, baseline: rebuilt };
-        try {
-          writeLocalConfigFile(localFile, localConfig);
-          bootNotes.push([
-            'warn',
-            `本用户配置读不了（${read.reason}）${backup ? `，已备份为 ${backup}` : ''}；` +
-              `已按共享 profile 重建：${localFile}`,
-          ]);
-        } catch (err) {
-          localConfig = null;
-          bootNotes.push([
-            'warn',
-            `本用户配置读不了（${read.reason}）且重建失败（${err?.message}），本次按共享 profile 运行：${localFile}`,
-          ]);
-        }
-      } else {
-        bootNotes.push(['warn', `本用户配置读不了（${read.reason}），本次按共享 profile 运行：${localFile}`]);
-      }
+      bootNotes.push(['warn', `本用户配置读不了（${read.reason}），本次只用默认值：${configFile}`]);
     }
   }
-  lastSharedConfigInProcess = sharedConfig;
-
-  const effectiveRaw = localConfig ? mergeLocalConfig(sharedConfig, localConfig.config) : sharedConfig;
-  let cfg = normalizeConfig(effectiveRaw);
-  // localConfigFile 是「引导字段」：不参与本用户配置的合并与基线比较，但要原样留在 cfg 里供状态文件显示
-  cfg.localConfigFile = String(unwrap(config?.localConfigFile) ?? '').trim();
+  let configRevision = 1;
   const notes = [];
   let urls = [];
   let servers = [];
@@ -2369,19 +2106,10 @@ export function apply(ctx, config) {
       urls.length ? `远程访问网址: ${urls.join('  ')}` : '远程访问网址: （尚未生成）',
       cfg.accessCode && urls.length ? `手机访问: ${urls[0].split('?')[0]} —— 直接打开，输一次访问密码即可` : '',
       `解锁密码: ${cfg.accessCode ? '已设置（网段内一次不过即拉黑）' : '未设置（必须用带票网址访问）'}`,
-      `已拉黑: ${[...new Set([...bannedHostsOf(cfg.denyCidrs), ...readPendingBans()])].join(', ') || '(无)'}` +
+      `已拉黑: ${[...new Set([...bannedHostsOf(cfg.denyCidrs), ...bans])].join(', ') || '(无)'}` +
         '（在「设置 → 远程访问 → 排除的网段」里删掉对应项即可解封）',
-      `拉黑暂存: ${
-        readPendingBans().length
-          ? `${readPendingBans().join(', ')}（写盘失败才暂存，位置 ${banPathOf(cfg)}）`
-          : '(无)'
-      }`,
       `放行密钥: ${secretPathOf(cfg)}（改密码不会踢人；想让所有设备重新输密码就删掉它）`,
-      `本用户配置: ${(() => {
-        if (localConfig) return `${localConfig.path}（优先于共享 profile；每个 Windows 用户各一份）`;
-        if (!localConfigPathOf(cfg)) return '已关闭（localConfigFile=off，全部走共享 profile）';
-        return '没能启用（见下面的诊断）';
-      })()}`,
+      `本用户配置: ${configFile}（唯一配置源；插件不读也不写共享 profile）`,
       `手机端缓存: ${(() => {
         if (cfg.cacheEnabled === false) return '已关闭（cacheEnabled=false）';
         return (
@@ -2472,27 +2200,17 @@ export function apply(ctx, config) {
 
   note('info', `apply 开始；DSH_HOME=${process.env.DSH_HOME ?? '(未设置)'} DSH_PROFILE=${process.env.DSH_PROFILE ?? '(未设置)'}`);
   for (const [level, msg] of bootNotes) note(level, msg);
-  // 写进配置的密码如果没通过校验，**必须**看得见：静默失效会让人以为「设过了」，
+  // 文件里的密码如果没通过校验，**必须**看得见：静默失效会让人以为「设过了」，
   // 然后在手机上撞见 DSH 那句英文 401（以前就是这么坑的）。这里只说长度/字符要求，不回显密码本身。
   {
-    const rawCode = String(unwrap(effectiveRaw?.accessCode) ?? '').trim();
+    const rawCode = String(unwrap(read.ok ? read.config?.accessCode : '') ?? '').trim();
     if (rawCode && !cfg.accessCode) {
       note(
         'warn',
         '「访问密码」没生效：只接受 4–12 位数字或字母，当前写的值里有不接受的字符。' +
-          '到「设置 → 远程访问 → 访问密码」改掉它，或清空并改用带票网址。',
+          `到「设置 → 远程访问 → 访问密码」改掉它，或直接编辑 ${configFile}。`,
       );
     }
-  }
-  if (Schema) {
-    note('debug', `Config schema 已就绪（${schemaSource}）→「设置 → 远程访问」可写`);
-  } else {
-    note(
-      'error',
-      `Config schema 没拿到（${schemaSource}）→「设置 → 远程访问」点保存会失败。` +
-        'profile 里以 link: 安装的插件，必须在自己的 package.json 的 peerDependencies 里' +
-        '列出要从 DSH 安装目录借用的包（DSH 的 routeLinked 只对声明过的裸名放行）；改完需重启 DSH。',
-    );
   }
 
   // ---------------------------------------------------------------- 待答选择与窗口可见性
@@ -2690,6 +2408,72 @@ export function apply(ctx, config) {
     }).catch(() => done(400, '400 bad request\n'));
   }
 
+  /**
+   * 本插件配置的读写（唯一数据源 `$DSH_HOME/remote-access-config.json`）。
+   *
+   * GET  → `{ ok, path, revision, config }`
+   * POST ← `{ patch: {字段: 值}, revision }`，返回写盘后的完整配置；revision 对不上回 409。
+   *
+   * 鉴权由挂载处负责：代理那侧要求先过访问门；上游 webServer 那侧只服务本机回环页面。
+   */
+  function handleConfig(req, res) {
+    const send = (code, body) => {
+      try {
+        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(body));
+      } catch { try { res.destroy(); } catch { /* 已经断了 */ } }
+    };
+    if (req.method === 'GET') {
+      send(200, { ok: true, path: configFile, revision: configRevision, config: { ...pickConfig(cfg) } });
+      return;
+    }
+    if (req.method !== 'POST') {
+      send(405, { ok: false, error: '405 method not allowed' });
+      return;
+    }
+    if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+      send(415, { ok: false, error: '415 unsupported media type: send application/json' });
+      return;
+    }
+    readSmallBody(req, 64 * 1024).then((body) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        send(400, { ok: false, error: 'body is not JSON' });
+        return;
+      }
+      const patch = parsed?.patch;
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+        send(400, { ok: false, error: 'expected {"patch": {…}}' });
+        return;
+      }
+      if (parsed.revision !== undefined && Number(parsed.revision) !== configRevision) {
+        send(409, {
+          ok: true,
+          error: 'revision mismatch',
+          path: configFile,
+          revision: configRevision,
+          config: { ...pickConfig(cfg) },
+        });
+        return;
+      }
+      try {
+        const next = persistConfig({ ...pickConfig(cfg), ...patch }, '设置页', { restart: false });
+        send(200, { ok: true, path: configFile, revision: configRevision, config: { ...pickConfig(next) } });
+        // 先把回执发出去，再重挂监听：start() 会 closeAllConnections()，
+        // 同步做会把正在回执的这条 POST 自己掐掉（远程页面看到的是「连接被重置」）。
+        setImmediate(() => {
+          if (!closed) {
+            try { start(); } catch (err) { note('error', `按新配置重挂监听失败: ${err?.message}`); }
+          }
+        });
+      } catch (err) {
+        send(500, { ok: false, error: String(err?.message ?? err) });
+      }
+    }).catch(() => send(400, { ok: false, error: 'bad request' }));
+  }
+
   try {
     const webServer = typeof ctx.get === 'function' ? ctx.get('webServer') : undefined;
     if (webServer && typeof webServer.register === 'function') {
@@ -2707,10 +2491,25 @@ export function apply(ctx, config) {
         },
       }), 'remote-access: 窗口可见性回报');
       note('debug', `已注册 ${PRESENCE_PATH}：本机页面用它回报窗口可见性`);
+
+      // 本机页面的设置表单走这条：只读写本用户 JSON，不碰 DSH 的 settings / profile
+      ctx.effect(() => webServer.register({
+        kind: 'exact',
+        path: CONFIG_PATH,
+        handler: (req, res) => {
+          try {
+            handleConfig(req, res);
+          } catch (err) {
+            note('error', `处理配置请求时抛出异常（已兜住）: ${err?.message}`);
+            try { res.destroy(); } catch { /* 已经断了 */ }
+          }
+        },
+      }), 'remote-access: 本用户配置');
+      note('debug', `已注册 ${CONFIG_PATH}（本机）：设置页读写 ${configFile}`);
     } else {
       note(
         'debug',
-        '拿不到 webServer，本机页面没法回报窗口可见性 —— 手机端一律按「窗口不可见」处理（照常通知）',
+        '拿不到 webServer，本机页面没法回报窗口可见性、也读写不了配置 —— 手机端一律按「窗口不可见」处理（照常通知）',
       );
     }
   } catch (err) {
@@ -2718,46 +2517,12 @@ export function apply(ctx, config) {
   }
 
   // ---------------------------------------------------------------- 拉黑
-  // 一次密码输错就把该地址写进「排除的网段」(denyCidrs) —— 于是在设置页里能直接看到、删掉即解封。
-  // 写盘必须走 configEditor.edit（Host 网关那条路），而它跑在 HMR 事务里：从监听的请求回调里直接调
-  // 会撞 "HMR transactions cannot be nested"，所以统一放进 runOutsideHmr 的异步作用域。
-  // 万一写不进去：地址**立刻**就被拦（内存里），并暂存到 banFile，随后定时/重载/重启时继续补写。
-
-  let pendingRetryTimer = null;
-
-  function readPendingBans() {
-    try {
-      return fs
-        .readFileSync(banPathOf(cfg), 'utf8')
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith('#'));
-    } catch {
-      return [];
-    }
-  }
-
-  /** 暂存文件只记「还没写进配置」的地址；空了就删掉，免得留下误导 */
-  function writePendingBans(list) {
-    const file = banPathOf(cfg);
-    const unique = [...new Set(list)];
-    try {
-      if (unique.length === 0) {
-        fs.rmSync(file, { force: true });
-      } else {
-        const head =
-          '# dsh-plugin-remote-access 拉黑暂存：这些地址还没写进「排除的网段」，会自动补写；\n' +
-          '# 正常情况下不用碰这个文件 —— 拉黑请在「设置 → 远程访问 → 排除的网段」里管理。\n';
-        fs.writeFileSync(file, `${head}${unique.join('\n')}\n`, { mode: 0o600 });
-      }
-      bansCheckedAt = 0;
-    } catch { /* 写不进去也不影响内存里的拉黑 */ }
-  }
+  // 一次密码输错就把该地址写进**本用户配置**的「排除的网段」(denyCidrs) ——
+  // 它只在 `$DSH_HOME/remote-access-config.json` 里，设置页能看到、删掉即解封；不碰 profile。
 
   /**
-   * 拉黑来源两处：配置里的单主机 denyCidrs（权威）+ 暂存文件（还没写进配置的）。
-   * force=true 才按配置**重建**（设置页删掉某项 → 热重载 → 到这儿生效）；
-   * 平时只做增量补齐 —— 否则「配置已写成功但重载还没到」的这一瞬间会把刚拉黑的地址放回去。
+   * 拉黑来源：配置里的单主机 denyCidrs（权威）+ 本次进程里写盘失败、只留在内存的地址。
+   * force=true 才按配置**重建**（设置页删掉某项 → 重挂监听 → 到这儿生效）。
    */
   function refreshBans(force) {
     const now = Date.now();
@@ -2765,48 +2530,20 @@ export function apply(ctx, config) {
     bansCheckedAt = now;
     if (force) bans = new Set();
     for (const host of bannedHostsOf(cfg.denyCidrs)) bans.add(host);
-    for (const peer of readPendingBans()) bans.add(peer);
   }
 
   async function ban(peer) {
     refreshBans(false);
     bans.add(peer); // 先拦下来，再谈落盘
     bansCheckedAt = 0;
-    const pending = readPendingBans();
-    if (!pending.includes(peer)) writePendingBans([...pending, peer]);
+    const cidr = banCidrOf(peer);
+    const denyCidrs = [...new Set([...(cfg.denyCidrs ?? []), cidr])];
     try {
-      const cidr = await persistBanToDenyCidrs(ctx.get('configEditor'), peer);
-      note('warn', `${peer} 密码错误，已拉黑：写进「排除的网段」(${cidr})，在设置页删掉该项即可解封`);
-      writePendingBans(readPendingBans().filter((one) => one !== peer)); // 配置才是权威，暂存里撤掉
+      persistConfig({ ...pickConfig(cfg), denyCidrs }, `拉黑 ${peer}`, { restart: false });
+      note('warn', `${peer} 密码错误，已写进本用户配置的「排除的网段」(${cidr})；删掉该项即可解封`);
     } catch (err) {
-      note(
-        'error',
-        `${peer} 密码错误，已拉黑（暂时只在内存 + ${banPathOf(cfg)}）：写进「排除的网段」失败 —— ${err?.message}`,
-      );
-      schedulePendingRetry();
+      note('error', `${peer} 密码错误，已拉黑（只在内存里）：写本用户配置失败 —— ${err?.message}`);
     }
-  }
-
-  /** 写配置失败时的兜底重试：只碰暂存文件与配置，不阻塞任何请求 */
-  function schedulePendingRetry() {
-    if (pendingRetryTimer) return;
-    pendingRetryTimer = setTimeout(async () => {
-      pendingRetryTimer = null;
-      if (closed) return;
-      let left = readPendingBans();
-      for (const peer of left) {
-        try {
-          await persistBanToDenyCidrs(ctx.get('configEditor'), peer);
-          left = left.filter((one) => one !== peer);
-        } catch { /* 留到下次 */ }
-      }
-      writePendingBans(left);
-      if (left.length) {
-        note('warn', `还有 ${left.length} 个拉黑地址没写进「排除的网段」，稍后继续重试：${left.join(', ')}`);
-        schedulePendingRetry();
-      }
-    }, 5000);
-    pendingRetryTimer.unref?.(); // 别拖住进程退出
   }
 
   // ---------------------------------------------------------------- 访问门
@@ -2814,7 +2551,6 @@ export function apply(ctx, config) {
 
   const gate = {
     get accessCode() { return cfg.accessCode; },
-    get banPath() { return banPathOf(cfg); },
     get statusPath() { return statusPathOf(cfg); },
     get cookieValue() { return cookieValue; },
     banned(peer) {
@@ -2850,10 +2586,8 @@ export function apply(ctx, config) {
     },
   };
 
-  // 远程页面改配置**不需要** Host 半区做什么：手机上那一页直接调 ctx.remote.settings.mutate，
-  // 由 Host 网关去跑 settings 控制器 → configEditor.edit，跑在网关自己的上下文里。
-  // （曾在这里自建过一个 POST /config 端点：它撞 HMR 事务必失败，而且回执早于写盘、会把旧值
-  //   当成功回报 —— 用户看到的就是「显示已保存、实则回退」。已删除，别再走那条路。）
+  // 设置页读写的是本插件自己的 `/__remote_access__/config` 端点（见下面的 handleConfig）：
+  // 它只碰 `$DSH_HOME/remote-access-config.json`，不经过 DSH 的 settings / configEditor。
 
   // ---------------------------------------------------------------- 起停
 
@@ -2894,33 +2628,24 @@ export function apply(ctx, config) {
   /**
    * 端口被占用时的退让：记住这次实际用的端口，并**写回本用户配置**。
    *
-   * 「另一个 Windows 用户也在跑 DSH」是最常见的占用来源：两个人共用同一份
-   * profile（junction）时，`cordis.patch.yml` 里的 port 是同一份；写回本地后，
-   * 这个用户下次启动直接用它，不用再撞一次，手机上的网址也稳定。
+   * 两个 Windows 用户共用同一份 profile 时，各自的配置仍然是独立文件；谁先占住
+   * 同一个端口，另一个就换一个空闲端口并写回自己的文件，下次直接用。
    */
   function adoptPort(actualPort, busyPort) {
     if (!Number.isInteger(actualPort) || actualPort <= 0) return;
     cfg = { ...cfg, port: actualPort };
     let saved = false;
-    if (localConfig) {
-      const read = readLocalConfigFile(localConfig.path);
-      if (read.ok) {
-        try {
-          const nextConfig = { ...read.config, port: actualPort };
-          writeLocalConfigFile(localConfig.path, { config: nextConfig, baseline: read.baseline });
-          localConfig.config = nextConfig;
-          localConfig.baseline = read.baseline;
-          saved = true;
-        } catch (err) {
-          note('warn', `把端口 ${actualPort} 写进本用户配置失败：${err?.message}`);
-        }
-      }
+    try {
+      writeLocalConfigFile(configFile, { ...pickConfig(cfg), port: actualPort });
+      saved = true;
+    } catch (err) {
+      note('warn', `把端口 ${actualPort} 写进本用户配置失败：${err?.message}`);
     }
     note(
       'warn',
-      `端口 ${busyPort} 已被占用（多半是另一个 Windows 用户 / 另一份 DSH 在用同一份配置）→ ` +
+      `端口 ${busyPort} 已被占用（多半是另一个 Windows 用户 / 另一份 DSH 也在用）→ ` +
         `本次改用 ${actualPort}` +
-        (saved ? `，并已写进本用户配置（${localConfig.path}），下次仍用它` : '；本用户配置不可写，重启后可能再变'),
+        (saved ? `，并已写进本用户配置（${configFile}），下次仍用它` : '；本用户配置不可写，重启后可能再变'),
     );
     flush();
   }
@@ -2952,6 +2677,7 @@ export function apply(ctx, config) {
             trafficStats,
             {
               port: wantPort,
+              config: handleConfig,
               onError: (err) => {
                 note('error', `监听 ${addr} 失败: ${err?.message}`);
                 // 只对「端口被占用」退让一次：换一个空闲端口继续服务，而不是整个远程入口都打不开。
@@ -2983,7 +2709,7 @@ export function apply(ctx, config) {
 
     const up = resolveUpstream(ctx, cfg, note);
     if (!up) {
-      note('error', '找不到 DSH 界面端口：把 cordis.patch.yml 里那一行的 upstream 设成 http://127.0.0.1:<端口>');
+      note('error', '找不到 DSH 界面端口：把本用户配置里的 upstream 设成 http://127.0.0.1:<端口>');
       return;
     }
     note('info', `上游确定为 ${up.host}:${up.port}`);
@@ -2996,7 +2722,6 @@ export function apply(ctx, config) {
       note('info', '解锁密码已启用：网段内直接打开裸地址、输一次密码即可（输错一次即写进「排除的网段」）');
     }
     if (bans.size) note('warn', `当前拉黑 ${bans.size} 个地址: ${[...bans].join(', ')}`);
-    if (readPendingBans().length) schedulePendingRetry(); // 上次没写进配置的，接着补写
 
     currentUp = up;
     currentAddrs = cfg.listen === 'auto' ? localAddrsIn(cfg.allowCidrs) : cfg.listen;
@@ -3013,116 +2738,39 @@ export function apply(ctx, config) {
   function dispose() {
     if (closed) return;
     closed = true;
-    if (pendingRetryTimer) {
-      clearTimeout(pendingRetryTimer);
-      pendingRetryTimer = null;
-    }
     stopServers();
     note('info', '已停止监听');
   }
 
-  // ---------------------------------------------------------------- 热重载
-  // 设置页保存 → configEditor 写 patch 并重组 → 根上下文发 app-boot/config-reload
-  // （settings provider 自己也听这个事件）。我们跟着重读生效配置、原地重挂监听，不必重启 DSH。
+  // ---------------------------------------------------------------- 配置读写（唯一入口）
 
-  /** 从 settings 服务读这一行的生效配置：user 是刚写进 patch 的那层，base 是它下面继承的层 */
-  function configFromSettings() {
-    let settings;
-    try {
-      settings = typeof ctx.get === 'function' ? ctx.get('settings') : undefined;
-    } catch {
-      return undefined;
-    }
-    if (!settings || typeof settings.describe !== 'function') return undefined;
-    try {
-      const view = settings.describe({ redactSecrets: true }).find((row) => row?.ns === ROW_ID);
-      if (!view) return undefined;
-      return normalizeConfig({ ...(view.base ?? {}), ...(view.user ?? {}) });
-    } catch (err) {
-      note('warn', `热重载读配置失败: ${err?.message}`);
-      return undefined;
-    }
-  }
-
-  function reapply() {
-    if (closed) return;
-    const next = configFromSettings();
-    if (!next) return;
-
-    // 设置页保存写的是共享 profile，而生效的是本用户配置。这里按「基线」判断这一行到底改没改：
-    // 只有本行真的变了才把变了的键同步进本用户配置 —— 别的插件保存也会发 config-reload，
-    // 不能拿共享值把本用户自定义的端口等覆盖掉。
-    let effective = next;
-    // localConfigFile 是启动期引导字段：路径以 apply 时那份为准，不从热重载的配置里重新推导
-    // （测试的 settings 桩子也不一定带这个字段；真实 DSH 里它本来就不会在运行期变）。
-    const file = localFile;
-    if (file) {
-      const read = readLocalConfigFile(file);
-      if (read.ok) {
-        const changed = diffConfigKeys(next, read.baseline);
-        let config = read.config;
-        let baseline = read.baseline;
-        if (changed.length) {
-          const patch = {};
-          for (const key of changed) patch[key] = next[key];
-          config = { ...config, ...patch };
-          baseline = next;
-          try {
-            writeLocalConfigFile(file, { config, baseline });
-            note('info', `设置已同步到本用户配置（${changed.join(', ')}）→ ${file}`);
-          } catch (err) {
-            note('warn', `写本用户配置失败，本次先按共享 profile 生效：${err?.message}`);
-            config = next; // 写不进去就这次先按共享值，别让界面显示「已保存」却什么都没变
-          }
-        }
-        localConfig = { path: file, config, baseline };
-        effective = normalizeConfig(mergeLocalConfig(next, config));
-      } else if (read.missing) {
-        try {
-          writeLocalConfigFile(file, { config: next, baseline: next });
-          localConfig = { path: file, config: next, baseline: next };
-          note('info', `已重建本用户配置 ${file}`);
-        } catch {
-          localConfig = null;
-        }
-        effective = next;
-      } else {
-        note('warn', `本用户配置读不了（${read.reason}），本次按共享 profile 生效：${file}`);
-        effective = next;
-      }
-    } else {
-      localConfig = null;
-    }
-    lastSharedConfigInProcess = pickLocalConfig(next);
-
-    // 引导字段不参与本用户配置的比较，但 cfg 里要保留它（状态文件要显示「已关闭 / 路径」）
-    effective.localConfigFile = cfg.localConfigFile;
-
-    if (JSON.stringify(effective) === JSON.stringify(cfg)) return;
-    const changed = Object.keys(effective).filter((key) => JSON.stringify(effective[key]) !== JSON.stringify(cfg[key]));
-    cfg = effective;
-    note('info', `配置热重载（${changed.join(', ') || '无字段差异'}），按新参数重挂监听`);
-    start();
+  /**
+   * 把一份完整配置写进本用户 JSON，然后按新参数重挂监听。
+   *
+   * @param nextRaw 完整配置（会先 normalize，非法值退回默认）
+   * @param source  日志里写「谁改的」
+   * @param opts.restart=false 时只写盘 + 重建内存里的拉黑集合，不重挂监听（拉黑用）
+   * @returns 归一化后的新配置
+   */
+  function persistConfig(nextRaw, source, { restart = true } = {}) {
+    const next = normalizeConfig(nextRaw);
+    writeLocalConfigFile(configFile, next);
+    const changed = Object.keys(next).filter((key) => JSON.stringify(next[key]) !== JSON.stringify(cfg[key]));
+    cfg = next;
+    configRevision += 1;
+    note('info', `配置已更新（${source}${changed.length ? `：${changed.join(', ')}` : ''}）→ ${configFile}`);
+    if (restart) start();
+    else refreshBans(true);
+    flush();
+    return next;
   }
 
   // ---------------------------------------------------------------- 首次启动 + 收尾
-  // 注意：这里**不再**重复打一遍「apply 开始」与 schema 结论 —— 那两句在上面已经写过一次，
-  // 每次加载都在状态文件里留两份只会让人以为插件被加载了两次。
 
   start();
 
   try {
     if (typeof ctx?.effect === 'function') ctx.effect(() => dispose);
   } catch { /* 靠返回值清理 */ }
-  try {
-    if (typeof ctx?.on === 'function') {
-      ctx.on('app-boot/config-reload', reapply);
-      note('debug', '已挂上 app-boot/config-reload：设置页保存后热重载');
-    } else {
-      note('debug', '这个上下文没有 ctx.on，热重载没挂上（保存后需重启 DSH）');
-    }
-  } catch (err) {
-    note('warn', `热重载没挂上: ${err?.message}`);
-  }
   return dispose;
 }

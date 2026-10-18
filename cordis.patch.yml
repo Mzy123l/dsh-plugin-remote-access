@@ -1,6 +1,10 @@
 # dsh-plugin-remote-access 的 bundle patch。
 #
-# 1) 插入本插件的 Host 行（参数默认值由 Config 声明提供，「设置 → 远程访问」里可改）。
+# 1) 插入本插件的 Host 行。
+#    **注意：这一行不带 config。** 本插件的配置只存在每个 Windows 用户自己的
+#    `$DSH_HOME/remote-access-config.json` 里；插件不读也不写 profile 的
+#    `cordis.patch.yml`，设置页通过 `/__remote_access__/config` 端点读写那份 JSON。
+#    首次启动会按代码里的默认值建文件（允许网段默认 100.64.0.0/10，upstream=auto）。
 # 2) 把目录选择器固定成「应用内浏览」：远程客户端（手机）用不了原生选目录器 ——
 #    dsh-host-directory-picker-native 是在**宿主屏幕上**弹系统对话框，手机那边只会一直等；
 #    dsh-host-directory-picker-auto 判定「回环绑定 + 有显示会话」就会挑中 native。
@@ -28,12 +32,3 @@
     # 桌面壳启动时 settings/describe 失败。
     - id: remote-access-cidr
       name: 'dsh-plugin-remote-access'
-      config:
-        enabled: true
-        # 允许来访的网段（唯一的安全边界）；listen=auto 时也用它挑选本机要监听的地址
-        allowCidrs:
-          - 100.64.0.0/10
-        # DSH 界面地址。0.2.1 的桌面端改用「系统分配端口」，固定 19387 会连不上；
-        # auto 会读 ctx.webServer.getOrigin()（协议 + 真实监听端口，含 HTTPS）。
-        # 要写死就写完整地址，例如 http://127.0.0.1:3080 或 https://127.0.0.1:3080
-        upstream: auto

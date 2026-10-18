@@ -6,16 +6,27 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { AsyncLocalStorage } from 'node:async_hooks';
 const indexModule = await import(new URL('../index.js', import.meta.url).href);
 const {
-  runOutsideHmr, banCidrOf, bannedHostsOf, mergeDenyCidrs, normalizeAccessCode, createChoiceCenter,
+  banCidrOf, bannedHostsOf, normalizeAccessCode, createChoiceCenter,
   contentRevOf, cacheSkipReason, describeAgentError, parseUpstream, resolveUpstream,
-  localConfigPathOf, readLocalConfigFile, writeLocalConfigFile, diffConfigKeys, mergeLocalConfig,
+  localConfigPath, readLocalConfigFile, writeLocalConfigFile,
 } = indexModule;
-// 绝大多数场景测的是「代理本身」，不该在开发机的真实 ~/.dsh 里留下配置；
-// 本用户配置的专项场景再显式给 localConfigFile。
-const apply = (ctx, config) => indexModule.apply(ctx, { localConfigFile: 'off', ...(config ?? {}) });
+
+// 每个场景一棵独立的 $DSH_HOME：插件**只**读那里的 remote-access-config.json。
+// 第二个参数（DSH profile 的 config）现在会被完全忽略 —— 测试也借此把这一点钉住。
+const tempHomes = [];
+let currentHome = '';
+const apply = (ctx, config) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-home-'));
+  currentHome = home;
+  process.env.DSH_HOME = home;
+  tempHomes.push(home);
+  writeLocalConfigFile(path.join(home, 'remote-access-config.json'), config ?? {});
+  return indexModule.apply(ctx);
+};
+/** 当前场景的本用户配置（插件写盘后的那份） */
+const currentConfig = () => readLocalConfigFile(localConfigPath()).config ?? {};
 
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '   ' + extra : ''}`);
@@ -86,7 +97,7 @@ const upPort = upstream.address().port;
 const statusFile = path.join(os.tmpdir(), `ra-test-${Date.now()}.txt`);
 const logs = [];
 const makeCtx = (extra = {}) => {
-  const { configEditor, webServer, ...rest } = extra;
+  const { webServer, ...rest } = extra;
   return {
     logger: { info: (m) => logs.push(m), warn: (m) => logs.push('WARN ' + m), error: (m) => logs.push('ERR ' + m) },
     connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
@@ -95,31 +106,8 @@ const makeCtx = (extra = {}) => {
     effect: (fn) => {
       try { fn(); } catch { /* 忽略 */ }
     },
-    // 插件是用 ctx.get('configEditor') 取服务的（cordis 的访问器），所以这里要装成 get()
-    get: (name) =>
-      name === 'configEditor' ? configEditor : name === 'webServer' ? webServer : undefined,
+    get: (name) => (name === 'webServer' ? webServer : undefined),
     ...rest,
-  };
-};
-
-/**
- * 假 configEditor：记录 edit() 收到的整份配置，用来断言「拉黑写进了排除的网段」。
- * fail=true 时模拟写盘失败（插件应退回暂存文件并继续拦住该地址）。
- */
-const makeEditor = ({ denyCidrs = [], fail = false } = {}) => {
-  const entry = { options: { id: 'remote-access-cidr', name: 'dsh-plugin-remote-access', config: { denyCidrs } } };
-  const state = { calls: [] };
-  return {
-    state,
-    current: () => entry.options.config,
-    entries: () => [entry],
-    edit: async (row, change) => {
-      if (fail) throw new Error('（测试）模拟写盘失败');
-      const next = change(structuredClone(row.options.config), {});
-      row.options.config = next;
-      state.calls.push(next);
-      return next;
-    },
   };
 };
 
@@ -233,25 +221,23 @@ await new Promise((r) => setTimeout(r, 400));
 const s3 = readUrl(statusFile);
 check('无 authenticatedUrl 时也写出状态与地址', s3.url.startsWith('http://127.0.0.1:'), s3.url);
 
-// ---- 场景 5：解锁密码（网段内输一次即进；输错一次写进「排除的网段」）----
+// ---- 场景 5：解锁密码（网段内输一次即进；输错一次写进本用户配置的「排除的网段」）----
 const statusFile2 = path.join(os.tmpdir(), `ra-unlock-${Date.now()}.txt`);
-const banFile = path.join(os.tmpdir(), `ra-ban-${Date.now()}.txt`);
 const unlockCfg = {
   allowCidrs: ['127.0.0.0/8'],
   listen: ['127.0.0.1'],
   port: 0,
   upstream: `http://127.0.0.1:${upPort}`,
   urlFile: statusFile2,
-  banFile,
   accessCode: '864209',
 };
-const editor = makeEditor();
-const dispose4 = apply(makeCtx({ configEditor: editor }), unlockCfg);
+const dispose4 = apply(makeCtx(), unlockCfg);
 await sleep(400);
 const s4 = readUrl(statusFile2);
 const port4 = s4.url ? Number(new URL(s4.url).port) : 0;
 check('解锁模式：状态文件给出裸地址与密码状态', /手机访问: http:\/\/127\.0\.0\.1:\d+\//.test(s4.text) && s4.text.includes('未设置') === false);
 check('解锁模式：密码不进状态文件', !s4.text.includes('864209'));
+check('本用户配置：状态文件写明唯一配置源', s4.text.includes(localConfigPath()) && s4.text.includes('唯一配置源'));
 
 const nav = await call(port4, { headers: { accept: 'text/html' } });
 check('裸地址拿到解锁页（不复制 token）', nav.status === 200 && nav.body.includes('/__remote_access__/unlock'), `HTTP ${nav.status}`);
@@ -259,8 +245,8 @@ check('裸地址拿到解锁页（不复制 token）', nav.status === 200 && nav
 const empty = await unlockO(port4, 'code=');
 check(
   '空密码不算一次尝试（不拉黑）',
-  empty.status === 200 && !fs.existsSync(banFile) && editor.state.calls.length === 0,
-  `HTTP ${empty.status}`,
+  empty.status === 200 && (currentConfig().denyCidrs ?? []).length === 0,
+  `HTTP ${empty.status} deny=${JSON.stringify(currentConfig().denyCidrs)}`,
 );
 
 const stale = await call(port4, { path: '/?token=STALE-FROM-ANOTHER-INSTANCE', headers: { accept: 'text/html' } });
@@ -274,22 +260,17 @@ check('本实例当前的票可用', fresh.status === 200 && fresh.body.includes
 
 const wrong = await unlockO(port4, 'code=000000');
 check('密码错误 → 403', wrong.status === 403, `HTTP ${wrong.status}`);
-await sleep(300); // 等它把「排除的网段」写完
+await sleep(300); // 等它把「排除的网段」写进本用户配置
 check(
-  '错一次就写进「排除的网段」',
-  JSON.stringify(editor.state.calls).includes('127.0.0.1/32'),
-  JSON.stringify(editor.state.calls),
-);
-check(
-  '写进配置后就不再占着暂存文件',
-  !fs.existsSync(banFile),
-  fs.existsSync(banFile) ? fs.readFileSync(banFile, 'utf8').trim() : '(无文件)',
+  '错一次就写进本用户配置的「排除的网段」',
+  (currentConfig().denyCidrs ?? []).includes('127.0.0.1/32'),
+  JSON.stringify(currentConfig().denyCidrs),
 );
 const banned = await call(port4, { headers: { accept: 'text/html' } });
 check('拉黑后一律 403', banned.status === 403, `HTTP ${banned.status}`);
 
-// 解封 = 在设置页把「排除的网段」里那一项删掉（新实例的配置里已无它，暂存文件也是空的）
-const dispose5 = apply(makeCtx({ configEditor: makeEditor() }), unlockCfg);
+// 解封 = 把「排除的网段」里那一项删掉（新实例按新配置起来）
+const dispose5 = apply(makeCtx(), unlockCfg);
 await sleep(400);
 const port5 = Number(new URL(readUrl(statusFile2).url).port);
 const ok = await unlockO(port5, 'code=864209');
@@ -331,213 +312,152 @@ check(
   noTicket.body,
 );
 
-// ---- 场景 5b：写配置失败时，仍然立刻拦住 + 暂存下来（失败必须可见）----
-const statusFile3 = path.join(os.tmpdir(), `ra-failban-${Date.now()}.txt`);
-const banFile3 = path.join(os.tmpdir(), `ra-failban-ban-${Date.now()}.txt`);
-const failCfg = { ...unlockCfg, urlFile: statusFile3, banFile: banFile3 };
-const dispose5b = apply(makeCtx({ configEditor: makeEditor({ fail: true }) }), failCfg);
+// ---- 场景 5b：配置端点（本机 webServer）——只读写本用户 JSON ----
+const cfgRoutes = [];
+const cfgWebServer = { register: (route) => { cfgRoutes.push(route); return () => {}; } };
+const cfgStatus = path.join(os.tmpdir(), `ra-cfg-${Date.now()}.txt`);
+const disposeCfg = apply(makeCtx({ webServer: cfgWebServer }), { ...unlockCfg, urlFile: cfgStatus });
 await sleep(400);
-const port5b = Number(new URL(readUrl(statusFile3).url).port);
-const wrong5b = await unlockO(port5b, 'code=000000');
-await sleep(300);
-const failText = fs.existsSync(statusFile3) ? fs.readFileSync(statusFile3, 'utf8') : '';
-check('写盘失败：仍然 403', wrong5b.status === 403, `HTTP ${wrong5b.status}`);
+const cfgRoute = cfgRoutes.find((r) => r.path === '/__remote_access__/config');
+check('配置端点：本机 webServer 上已注册', !!cfgRoute);
+// 上面的最小 req 不足以驱动 readSmallBody；用一个真正的事件发射器重做
+const cfgCallReal = (method, body, headers = { 'content-type': 'application/json' }) => new Promise((resolve) => {
+  const listeners = new Map();
+  const req = {
+    method,
+    url: '/__remote_access__/config',
+    headers,
+    on(name, fn) { listeners.set(name, fn); return this; },
+  };
+  const res = {
+    status: 0,
+    writeHead(code, h) { this.status = code; this.headers = h; },
+    end(text) { resolve({ status: this.status, headers: this.headers, body: JSON.parse(text || '{}') }); },
+    destroyed: false,
+    writableEnded: false,
+    destroy() {},
+  };
+  cfgRoute.handler(req, res);
+  if (body !== undefined) {
+    listeners.get('data')?.(Buffer.from(body));
+    listeners.get('end')?.();
+  }
+});
+const gotCfg = await cfgCallReal('GET');
 check(
-  '写盘失败：地址先暂存进拉黑文件',
-  fs.existsSync(banFile3) && fs.readFileSync(banFile3, 'utf8').includes('127.0.0.1'),
-  fs.existsSync(banFile3) ? '有文件' : '没有文件',
+  '配置端点：GET 返回本用户配置与固定路径',
+  gotCfg.status === 200 && gotCfg.body.ok === true && gotCfg.body.config.accessCode === '864209' && gotCfg.body.path === localConfigPath(),
+  JSON.stringify({ status: gotCfg.status, path: gotCfg.body.path }),
 );
-check('写盘失败：状态文件里写明原因', failText.includes('写进「排除的网段」失败'));
-const stillBanned = await call(port5b, { headers: { accept: 'text/html' } });
-check('写盘失败：暂存期间一样被拦', stillBanned.status === 403, `HTTP ${stillBanned.status}`);
-dispose5b(); // 顺手清掉它的重试定时器
+const revCfg = gotCfg.body.revision;
+const postCfg = await cfgCallReal('POST', JSON.stringify({ patch: { maxConnections: 9 }, revision: revCfg }));
+check(
+  '配置端点：POST 写盘并热重挂（配置只在 JSON 里）',
+  postCfg.status === 200 && currentConfig().maxConnections === 9,
+  JSON.stringify({ status: postCfg.status, maxConnections: currentConfig().maxConnections }),
+);
+const staleCfg = await cfgCallReal('POST', JSON.stringify({ patch: { maxConnections: 10 }, revision: revCfg }));
+check(
+  '配置端点：revision 过旧回 409 并带回当前值',
+  staleCfg.status === 409 && staleCfg.body.config.maxConnections === 9,
+  JSON.stringify({ status: staleCfg.status, maxConnections: staleCfg.body.config?.maxConnections }),
+);
+const putCfg = await cfgCallReal('PUT', '{}');
+check('配置端点：只接受 GET/POST', putCfg.status === 405, `HTTP ${putCfg.status}`);
+const badTypeCfg = await cfgCallReal('POST', '{}', { 'content-type': 'text/plain' });
+check('配置端点：POST 要求 application/json', badTypeCfg.status === 415, `HTTP ${badTypeCfg.status}`);
+disposeCfg();
 
-// ---- 场景 5c：拉黑写进配置后，热重载/重启都不会忘（配置才是权威，删项才解封）----
-const statusFile4 = path.join(os.tmpdir(), `ra-banreload-${Date.now()}.txt`);
-const banFile4 = path.join(os.tmpdir(), `ra-banreload-ban-${Date.now()}.txt`);
-let row4 = {
+// ---- 场景 5c：端口被占用 → 换空闲端口并写回本用户配置 ----
+const occupier = net.createServer(() => {});
+await new Promise((r) => occupier.listen(0, '127.0.0.1', r));
+const busyPort = occupier.address().port;
+const fbStatus1 = path.join(os.tmpdir(), `ra-fb1-${Date.now()}.txt`);
+const disposeFb1 = apply(makeCtx(), {
   allowCidrs: ['127.0.0.0/8'],
   listen: ['127.0.0.1'],
-  port: 0,
+  port: busyPort,
   upstream: `http://127.0.0.1:${upPort}`,
-  urlFile: statusFile4,
-  banFile: banFile4,
-  accessCode: '864209',
-};
-const listened4 = [];
-const editor4 = makeEditor();
-const ctx4 = {
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-  effect: () => {},
-  on: (name, fn) => {
-    listened4.push({ name, fn });
-    return () => {};
-  },
-  get: (name) => {
-    if (name === 'configEditor') return editor4;
-    if (name === 'settings') return { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...row4 } }] };
-    return undefined;
-  },
-};
-const dispose5c = apply(ctx4, row4);
-await sleep(400);
-const port5c = Number(new URL(readUrl(statusFile4).url).port);
-const wrong5c = await unlockO(port5c, 'code=000000');
-await sleep(300);
-check('写进配置后：暂存文件已清空', !fs.existsSync(banFile4), fs.existsSync(banFile4) ? '还有文件' : '(无文件)');
-// 真实 DSH 里是 configEditor.edit 落盘 → settings 重新描述；这里手动反映到「生效配置」再触发重载
-row4 = { ...row4, denyCidrs: editor4.current().denyCidrs };
-for (const l of listened4.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
+  urlFile: fbStatus1,
+});
+await sleep(900);
+const fbText1 = readUrl(fbStatus1).text;
+const fbPort1 = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fbText1)?.[1] ?? 0);
+check('端口被占用：没有卡死，换端口后照常监听', fbPort1 > 0 && fbPort1 !== busyPort, `${busyPort} → ${fbPort1}`);
+check('端口被占用：诊断里写明原因', fbText1.includes('已被占用'));
+check('端口被占用：实际端口写进本用户配置', currentConfig().port === fbPort1, JSON.stringify(currentConfig().port));
+const fbHome = currentHome;
+disposeFb1();
+await sleep(200);
+// 同一个 $DSH_HOME 再起一次：共享 profile 没有参与，靠的是本用户 JSON 里记住的端口
+const fbStatus2 = path.join(os.tmpdir(), `ra-fb2-${Date.now()}.txt`);
+const disposeFb2 = indexModule.apply(Object.assign(makeCtx(), {}));
 await sleep(600);
-const port5cAfter = Number(new URL(readUrl(statusFile4).url).port);
-const afterReload = await call(port5cAfter, { headers: { accept: 'text/html' } });
-check('热重载后依旧被拦（配置才是权威，不会忘）', afterReload.status === 403, `HTTP ${afterReload.status}`);
-dispose5c();
+const fbPort2 = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(readUrl(fbStatus1).text)?.[1] ?? 0);
+check('端口被占用：重启后仍用记住的端口', fbPort2 === fbPort1 && fbPort2 > 0, `${fbPort1} / ${fbPort2}`);
+disposeFb2();
+await new Promise((r) => occupier.close(r));
 
-// ---- 场景 6：热重载（app-boot/config-reload → 原地重挂监听）----
-const hotFile = path.join(os.tmpdir(), `ra-hot-${Date.now()}.txt`);
-const hotListeners = [];
-let hotRow = {
-  enabled: true,
-  allowCidrs: ['127.0.0.0/8'],
-  listen: ['127.0.0.1'],
-  port: 0,
-  upstream: `http://127.0.0.1:${upPort}`,
-  urlFile: hotFile,
-  maxConnections: 64,
-};
-const hotCtx = {
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-  effect: () => {},
-  on: (name, fn) => {
-    hotListeners.push({ name, fn });
-    return () => {};
-  },
-  get: (name) =>
-    name === 'settings'
-      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...hotRow } }] }
-      : undefined,
-};
-const dispose6 = apply(hotCtx, hotRow);
-await sleep(400);
-const hotBefore = readUrl(hotFile);
-const portBefore = Number(new URL(hotBefore.url).port);
-check('热重载：已挂上 app-boot/config-reload', hotListeners.some((l) => l.name === 'app-boot/config-reload'));
-
-hotRow = { ...hotRow, maxConnections: 7 };
-for (const l of hotListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
-await sleep(500);
-const hotAfter = readUrl(hotFile);
-const portAfter = Number(new URL(hotAfter.url).port);
-check('热重载：生效配置跟着更新', /"maxConnections": 7/.test(hotAfter.text), (hotAfter.text.match(/"maxConnections": \d+/) ?? [''])[0]);
-check('热重载：监听端口已换（真的重挂了）', portAfter > 0 && portAfter !== portBefore, `${portBefore} → ${portAfter}`);
-const oldPort = await call(portBefore, {});
-check('热重载：旧监听已关闭', oldPort.status === 0, `status=${oldPort.status}`);
-const newPort = await call(portAfter, {});
-check('热重载：新监听可用', newPort.status === 200 && newPort.body.includes('upstream host='), `status=${newPort.status}`);
-
-// ---- 场景 7：改密码不影响已登录状态（放行密钥与 accessCode 解耦）----
+// ---- 场景 5e：改密码不影响已登录状态（放行密钥与 accessCode 解耦）----
 const rotFile = path.join(os.tmpdir(), `ra-rot-${Date.now()}.txt`);
-const rotBan = path.join(os.tmpdir(), `ra-rotban-${Date.now()}.txt`);
-const rotListeners = [];
-let rotRow = {
-  enabled: true,
+const rotCfg = {
   allowCidrs: ['127.0.0.0/8'],
   listen: ['127.0.0.1'],
   port: 0,
   upstream: `http://127.0.0.1:${upPort}`,
   urlFile: rotFile,
-  banFile: rotBan,
   accessCode: '864209',
 };
-const rotCtx = {
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-  effect: () => {},
-  on: (name, fn) => {
-    rotListeners.push({ name, fn });
-    return () => {};
-  },
-  get: (name) =>
-    name === 'settings'
-      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...rotRow } }] }
-      : undefined,
-};
-const dispose7 = apply(rotCtx, rotRow);
+const dispose7 = apply(makeCtx(), rotCfg);
 await sleep(400);
+const rotHome = currentHome;
 const port7 = Number(new URL(readUrl(rotFile).url).port);
-
 const firstUnlock = await unlockO(port7, 'code=864209');
 const cookie7 = String(firstUnlock.headers['set-cookie'] ?? '').split(';')[0];
 const beforeRotate = await call(port7, { headers: { cookie: cookie7, accept: 'text/html' } });
 check('改密码前：放行 cookie 可用', beforeRotate.status === 200 && beforeRotate.body.includes('upstream host='), `HTTP ${beforeRotate.status}`);
-
-// 模拟「在设置页把密码改成新的」→ 热重载
-rotRow = { ...rotRow, accessCode: '246813' };
-for (const l of rotListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
-await sleep(500);
+dispose7();
+await sleep(200);
+writeLocalConfigFile(localConfigPath(), { ...currentConfig(), accessCode: '246813' });
+process.env.DSH_HOME = rotHome;
+const dispose7b = indexModule.apply(makeCtx());
+await sleep(400);
 const port7b = Number(new URL(readUrl(rotFile).url).port);
 const afterRotate = await call(port7b, { headers: { cookie: cookie7, accept: 'text/html' } });
-check('改密码后：同一个 cookie 仍然可用（不踢人）',
-  afterRotate.status === 200 && afterRotate.body.includes('upstream host='), `HTTP ${afterRotate.status}`);
-
+check('改密码后：同一个 cookie 仍然可用（不踢人）', afterRotate.status === 200 && afterRotate.body.includes('upstream host='), `HTTP ${afterRotate.status}`);
 const staleCode = await unlockO(port7b, 'code=864209');
 check('改密码后：旧密码不再放行', staleCode.status === 403, `HTTP ${staleCode.status}`);
 
-for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose6, dispose7]) {
-  try {
-    d();
-  } catch {
-    /* 忽略 */
-  }
+for (const d of [dispose1, dispose2, dispose3, dispose4, dispose5, dispose7b]) {
+  try { d(); } catch { /* 忽略 */ }
 }
 upstream.close();
-for (const f of [
-  statusFile,
-  statusFile2,
-  statusFile3,
-  statusFile4,
-  banFile,
-  banFile3,
-  banFile4,
-  hotFile,
-  rotFile,
-  rotBan,
-  path.join(os.tmpdir(), 'remote-access-secret'),
-]) {
+for (const f of [statusFile, statusFile2, rotFile, cfgStatus, fbStatus1]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
 }
 
-// ---- 纯函数：拉黑地址 → CIDR、合并进「排除的网段」、以及逃出 HMR 的异步上下文 ----
+// ---- 纯函数：拉黑地址 → CIDR；本用户配置文件的读写形态 ----
 check('banCidrOf：IPv4 用 /32', banCidrOf('100.64.0.5') === '100.64.0.5/32', banCidrOf('100.64.0.5'));
 check('banCidrOf：IPv6 用 /128', banCidrOf('fe80::1') === 'fe80::1/128', banCidrOf('fe80::1'));
-const mergedCidrs = mergeDenyCidrs({ denyCidrs: ['10.0.0.0/8'] }, {}, '10.0.0.5/32');
-check(
-  'mergeDenyCidrs：追加在原有项后面',
-  mergedCidrs.denyCidrs.join(',') === '10.0.0.0/8,10.0.0.5/32',
-  mergedCidrs.denyCidrs.join(','),
-);
-check('mergeDenyCidrs：重复项不会写两遍', mergeDenyCidrs(mergedCidrs, {}, '10.0.0.5/32').denyCidrs.length === 2);
-check(
-  'mergeDenyCidrs：patch 里没有该字段时基于继承值',
-  mergeDenyCidrs({}, { denyCidrs: ['172.16.0.0/12'] }, '172.16.0.9/32').denyCidrs.join(',') ===
-    '172.16.0.0/12,172.16.0.9/32',
-);
 const singleHosts = bannedHostsOf(['10.0.0.0/8', '100.64.0.5/32', '::1/128', '1.2.3.4']);
 check(
   'bannedHostsOf：只挑单主机项（网段不算）',
   [...singleHosts].sort().join(',') === '1.2.3.4,100.64.0.5,::1',
   [...singleHosts].join(','),
 );
-const als = new AsyncLocalStorage();
-const seenStore = als.run({ hmr: true }, () => runOutsideHmr(() => als.getStore() ?? null));
-check(
-  'runOutsideHmr：能逃出 HMR 的 AsyncLocalStorage（否则写配置必报嵌套）',
-  seenStore === null,
-  String(seenStore),
-);
+check('localConfigPath：固定为 $DSH_HOME/remote-access-config.json', localConfigPath().endsWith('remote-access-config.json') && localConfigPath() === path.join(process.env.DSH_HOME, 'remote-access-config.json'));
+const shapeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-shape-'));
+const shapeFile = path.join(shapeHome, 'remote-access-config.json');
+writeLocalConfigFile(shapeFile, { port: 19388, accessCode: 'abcd12', unknownKey: 'x' });
+const shapeRaw = JSON.parse(fs.readFileSync(shapeFile, 'utf8'));
+check('writeLocalConfigFile：写 {version, config} 包装、只保留已知字段', shapeRaw.version === 1 && shapeRaw.config.port === 19388 && !('unknownKey' in shapeRaw.config));
+check('writeLocalConfigFile：不写 sharedBaseline（没有共享 profile 这回事）', !('sharedBaseline' in shapeRaw));
+check('readLocalConfigFile：读回 config', readLocalConfigFile(shapeFile).config?.accessCode === 'abcd12');
+fs.writeFileSync(shapeFile, JSON.stringify({ port: 19389, logLevel: 'debug' }));
+check('readLocalConfigFile：兼容手写的扁平 JSON', readLocalConfigFile(shapeFile).config?.port === 19389 && readLocalConfigFile(shapeFile).config?.logLevel === 'debug');
+fs.writeFileSync(shapeFile, '{ bad json');
+check('readLocalConfigFile：坏 JSON 报原因（不抛）', readLocalConfigFile(shapeFile).ok === false && String(readLocalConfigFile(shapeFile).reason).includes('JSON'));
+fs.rmSync(shapeHome, { recursive: true, force: true });
 
 // ---- 场景 8：访问密码的规则（曾经静默丢弃非法值 → 用户以为设好了，手机却撞见英文 401）----
 //
@@ -1855,311 +1775,105 @@ try {
   } catch { /* 忽略 */ }
 }
 
-// ---- 场景 12：本用户配置（多个 Windows 用户共用 profile 时各用各的端口）----
-//
-// 背景：把 `.dsh\profiles\desktop` 做成 junction 指到同一个目录时，`cordis.patch.yml`
-// （端口、密码…）也是共享的；两个用户同时开 DSH，第二个实例必然 EADDRINUSE。
-// 1.4.2 起每个用户在 $DSH_HOME 里有一份自己的配置，启动时本地优先。
-check('localConfigPathOf：off → 关闭', localConfigPathOf({ localConfigFile: 'off' }) === '');
-check(
-  'localConfigPathOf：留空 → $DSH_HOME/remote-access-config.json',
-  localConfigPathOf({}).endsWith('remote-access-config.json') && /\\.dsh/.test(localConfigPathOf({})),
-  localConfigPathOf({}),
-);
-const explicitLocal = path.join(os.tmpdir(), 'ra-explicit-local.json');
-check('localConfigPathOf：显式路径原样使用', localConfigPathOf({ localConfigFile: explicitLocal }) === explicitLocal);
-check(
-  'diffConfigKeys：只报变了的键',
-  JSON.stringify(diffConfigKeys({ port: 1, logLevel: 'info' }, { port: 2, logLevel: 'info' })) === '["port"]',
-  JSON.stringify(diffConfigKeys({ port: 1, logLevel: 'info' }, { port: 2, logLevel: 'info' })),
-);
-check(
-  'diffConfigKeys：引导字段 localConfigFile 不参与比较',
-  JSON.stringify(diffConfigKeys({ localConfigFile: 'off' }, { localConfigFile: '' })) === '[]',
-  JSON.stringify(diffConfigKeys({ localConfigFile: 'off' }, { localConfigFile: '' })),
-);
-const mergedLocal = mergeLocalConfig({ port: 19388, logLevel: 'info' }, { port: 54321 });
-check(
-  'mergeLocalConfig：本用户配置覆盖共享值，没写的沿用共享值',
-  mergedLocal.port === 54321 && mergedLocal.logLevel === 'info',
-  JSON.stringify(mergedLocal),
-);
-
-const localHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-home-'));
-const localCfgFile = path.join(localHome, 'remote-access-config.json');
-const localStatusA = path.join(localHome, 'status-a.txt');
-const sharedA = {
+// ---- 场景 12：配置只认本用户 JSON（DSH profile 的 config 被完全忽略）----
+const tailUp = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('tail-upstream'); });
+await new Promise((r) => tailUp.listen(0, '127.0.0.1', r));
+const tailUpPort = tailUp.address().port;
+const onlyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-only-home-'));
+process.env.DSH_HOME = onlyHome;
+const onlyFile = path.join(onlyHome, 'remote-access-config.json');
+const onlyStatus = path.join(onlyHome, 'status.txt');
+writeLocalConfigFile(onlyFile, {
   allowCidrs: ['127.0.0.0/8'],
   listen: ['127.0.0.1'],
   port: 0,
-  upstream: `http://127.0.0.1:${authPort}`,
-  urlFile: localStatusA,
-  localConfigFile: localCfgFile,
-  remoteTheme: 'dark',
-  maxConnections: 64,
-};
-const disposeA1 = indexModule.apply(makeCtx(), sharedA);
+  upstream: `http://127.0.0.1:${tailUpPort}`,
+  urlFile: onlyStatus,
+  logLevel: 'silent',
+});
+const disposeOnly = indexModule.apply(makeCtx(), {
+  port: 9999,
+  allowCidrs: ['10.0.0.0/8'],
+  accessCode: 'SHOULD-NOT-EXIST',
+  logLevel: 'debug',
+});
 await sleep(400);
-const seededLocal = readLocalConfigFile(localCfgFile);
+const onlyText = fs.readFileSync(onlyStatus, 'utf8');
 check(
-  '本用户配置：首次启动以共享 profile 为种子建文件',
-  seededLocal.ok && seededLocal.config.remoteTheme === 'dark',
-  JSON.stringify(seededLocal.config?.remoteTheme),
+  '配置来源：DSH 传入的 config 被完全忽略（端口 / 网段 / 密码都不采用）',
+  !onlyText.includes('9999') && !onlyText.includes('10.0.0.0/8') && !onlyText.includes('SHOULD-NOT-EXIST'),
+  (onlyText.match(/"accessCode": "[^"]*"/) ?? [''])[0],
 );
 check(
-  '本用户配置：状态文件写明本用户配置路径',
-  fs.readFileSync(localStatusA, 'utf8').includes('本用户配置:') && fs.readFileSync(localStatusA, 'utf8').includes(localCfgFile),
+  '配置来源：生效配置就是 JSON 里那份',
+  /"port": 0/.test(onlyText) && /"allowCidrs": \[\s*"127\.0\.0\.0\/8"/.test(onlyText),
+  (onlyText.match(/"port": \d+/) ?? [''])[0],
 );
-disposeA1();
-await sleep(200);
+const onlyPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(onlyText)?.[1] ?? 0);
+check('配置来源：按 JSON 里的 allowCidrs 监听成功', onlyPort > 0, String(onlyPort));
 
-// 手改本用户配置（模拟这个用户自己把主题改成浅色）——重启后应当以它为准
-const seededRaw = JSON.parse(fs.readFileSync(localCfgFile, 'utf8'));
-seededRaw.config.remoteTheme = 'light';
-fs.writeFileSync(localCfgFile, JSON.stringify(seededRaw, null, 2));
-const localStatusB = path.join(localHome, 'status-b.txt');
-const disposeA2 = indexModule.apply(makeCtx(), { ...sharedA, urlFile: localStatusB });
-await sleep(400);
-const localWinsText = fs.readFileSync(localStatusB, 'utf8');
+// 远程（手机）页面的配置端点：走代理，先过访问门
+const noAuthCfg = await call(onlyPort, { path: '/__remote_access__/config', headers: { accept: 'application/json' } });
+check('配置端点（远程）：没票 401（能读到访问密码，不能白给）', noAuthCfg.status === 401, `HTTP ${noAuthCfg.status}`);
+const remoteGet = await call(onlyPort, { path: '/__remote_access__/config?token=TESTTOKEN', headers: { accept: 'application/json' } });
+let remoteGetJson = null;
+try { remoteGetJson = JSON.parse(remoteGet.body); } catch { /* 非 JSON */ }
 check(
-  '本用户配置：重启后本地值优先于共享 profile',
-  /"remoteTheme": "light"/.test(localWinsText),
-  (localWinsText.match(/"remoteTheme": "[^"]+"/) ?? [''])[0],
+  '配置端点（远程）：带票 GET 读到本用户配置',
+  remoteGet.status === 200 && remoteGetJson?.ok === true && remoteGetJson?.path === onlyFile,
+  `HTTP ${remoteGet.status}`,
 );
-disposeA2();
-await sleep(200);
+const remoteRev = remoteGetJson?.revision;
+const remotePost = await call(onlyPort, {
+  method: 'POST',
+  path: '/__remote_access__/config?token=TESTTOKEN',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ patch: { remoteTheme: 'light' }, revision: remoteRev }),
+});
+let remotePostJson = null;
+try { remotePostJson = JSON.parse(remotePost.body); } catch { /* 非 JSON */ }
+check(
+  '配置端点（远程）：POST 写进同一个 JSON',
+  remotePost.status === 200 && readLocalConfigFile(onlyFile).config?.remoteTheme === 'light',
+  `HTTP ${remotePost.status}`,
+);
+disposeOnly();
+await new Promise((r) => tailUp.close(r));
 
-// localConfigFile=off：不建文件，状态文件里如实说「已关闭」
-const offLocalStatus = path.join(localHome, 'status-off.txt');
-const offLocalFile = path.join(localHome, 'off-config.json');
-const disposeOff = indexModule.apply(makeCtx(), {
+// ---- 场景 13：首次启动按默认值建文件；坏文件先备份再重建 ----
+const seedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-seed-home-'));
+process.env.DSH_HOME = seedHome;
+const seedStatus = path.join(seedHome, 'status.txt');
+const seedUp = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('seed-up'); });
+await new Promise((r) => seedUp.listen(0, '127.0.0.1', r));
+const seedUpPort = seedUp.address().port;
+const disposeSeed = indexModule.apply(makeCtx(), {
   allowCidrs: ['127.0.0.0/8'],
   listen: ['127.0.0.1'],
   port: 0,
-  upstream: `http://127.0.0.1:${authPort}`,
-  urlFile: offLocalStatus,
-  localConfigFile: 'off',
+  upstream: `http://127.0.0.1:${seedUpPort}`,
+  urlFile: seedStatus,
+  localConfigFile: 'off', // 这个键现在不存在，会被忽略
 });
 await sleep(300);
-const offLocalText = fs.readFileSync(offLocalStatus, 'utf8');
-check(
-  '本用户配置：off 时不建文件，状态文件写明已关闭',
-  !fs.existsSync(offLocalFile) && /本用户配置: 已关闭/.test(offLocalText),
-  (offLocalText.match(/本用户配置: [^\n]*/) ?? [''])[0],
-);
-disposeOff();
+const seeded = readLocalConfigFile(path.join(seedHome, 'remote-access-config.json'));
+check('首次启动：文件不存在 → 按代码默认值建一份', seeded.ok && seeded.config?.allowCidrs?.[0] === '100.64.0.0/10' && seeded.config?.port === 0, JSON.stringify(seeded.config?.allowCidrs));
+disposeSeed();
 await sleep(150);
-
-// reapply 也必须沿用 apply 时的引导字段：settings 视图里没有 localConfigFile 时，
-// 不能回落成默认路径把文件写进真实的 $DSH_HOME（这是测试踩出来的回归）。
-const prevDshHome = process.env.DSH_HOME;
-const reapplyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-reapply-home-'));
-process.env.DSH_HOME = reapplyHome;
-const reapplyListeners = [];
-let reapplyRow = {
-  allowCidrs: ['127.0.0.0/8'],
-  listen: ['127.0.0.1'],
-  port: 0,
-  upstream: `http://127.0.0.1:${authPort}`,
-  urlFile: path.join(reapplyHome, 'status.txt'),
-  remoteTheme: 'dark',
-};
-const reapplyCtx = {
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-  effect: () => {},
-  on: (name, fn) => {
-    reapplyListeners.push({ name, fn });
-    return () => {};
-  },
-  get: (name) =>
-    name === 'settings'
-      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...reapplyRow } }] }
-      : undefined,
-};
-const disposeReapply = apply(reapplyCtx, { ...reapplyRow, localConfigFile: 'off' });
-await sleep(350);
-reapplyRow = { ...reapplyRow, remoteTheme: 'light' };
-for (const l of reapplyListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
-await sleep(400);
-check(
-  '本用户配置：reapply 沿用 off，不会把默认路径写进 $DSH_HOME',
-  !fs.existsSync(path.join(reapplyHome, 'remote-access-config.json')),
-  fs.existsSync(path.join(reapplyHome, 'remote-access-config.json')) ? '竟然建了文件' : '(无文件)',
-);
-disposeReapply();
-await sleep(150);
-if (prevDshHome === undefined) delete process.env.DSH_HOME;
-else process.env.DSH_HOME = prevDshHome;
-try { fs.rmSync(reapplyHome, { recursive: true, force: true }); } catch { /* 忽略 */ }
-
-// 坏文件：备份 + 按共享 profile 重建（别让人永久卡在「读不了」）
-const badLocalFile = path.join(localHome, 'bad-config.json');
-fs.writeFileSync(badLocalFile, '{ 这不是 JSON');
-const badLocalStatus = path.join(localHome, 'status-bad.txt');
-const disposeBad = indexModule.apply(makeCtx(), {
-  allowCidrs: ['127.0.0.0/8'],
-  listen: ['127.0.0.1'],
-  port: 0,
-  upstream: `http://127.0.0.1:${authPort}`,
-  urlFile: badLocalStatus,
-  localConfigFile: badLocalFile,
-  remoteTheme: 'dark',
-});
-await sleep(350);
-const badLocalText = fs.readFileSync(badLocalStatus, 'utf8');
-const badLocalRead = readLocalConfigFile(badLocalFile);
-const badBackups = fs.readdirSync(localHome).filter((name) => name.startsWith('bad-config.json.bad-'));
-check(
-  '本用户配置：内容坏了 → 先备份，再按共享 profile 重建',
-  badLocalRead.ok && badLocalRead.config.remoteTheme === 'dark' && badBackups.length === 1 && /已按共享 profile 重建/.test(badLocalText),
-  `${badBackups.length} 个备份 / ${JSON.stringify(badLocalRead.config?.remoteTheme)}`,
-);
-disposeBad();
-await sleep(150);
-
-// ---- 场景 13：设置页保存只把「这次变了的键」同步进本用户配置 ----
-const syncFile = path.join(localHome, 'sync-config.json');
-const syncStatus = path.join(localHome, 'status-sync.txt');
-let syncRow = {
-  allowCidrs: ['127.0.0.0/8'],
-  listen: ['127.0.0.1'],
-  port: 0,
-  upstream: `http://127.0.0.1:${authPort}`,
-  urlFile: syncStatus,
-  localConfigFile: syncFile,
-  remoteTheme: 'dark',
-  maxConnections: 64,
-};
-const syncListeners = [];
-const syncCtx = {
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=TESTTOKEN` },
-  effect: () => {},
-  on: (name, fn) => {
-    syncListeners.push({ name, fn });
-    return () => {};
-  },
-  get: (name) =>
-    name === 'settings'
-      ? { describe: () => [{ ns: 'remote-access-cidr', base: {}, user: { ...syncRow } }] }
-      : undefined,
-};
-const disposeSync = indexModule.apply(syncCtx, syncRow);
-await sleep(400);
-check('保存同步：首次启动种子正确', readLocalConfigFile(syncFile).config?.remoteTheme === 'dark');
-
-// 模拟设置页保存：只改 remoteTheme，然后 config-reload
-const fireReload = () => {
-  for (const l of syncListeners.filter((x) => x.name === 'app-boot/config-reload')) l.fn();
-};
-// 什么都没改的 config-reload 不该重写本用户配置（localConfigFile 这类引导字段不算差异）
-const seededUpdatedAt = JSON.parse(fs.readFileSync(syncFile, 'utf8')).updatedAt;
-fireReload();
-await sleep(400);
-check(
-  '保存同步：没有改动时不会重写本用户配置（引导字段不算差异）',
-  JSON.parse(fs.readFileSync(syncFile, 'utf8')).updatedAt === seededUpdatedAt,
-  `${seededUpdatedAt} → ${JSON.parse(fs.readFileSync(syncFile, 'utf8')).updatedAt}`,
-);
-syncRow = { ...syncRow, remoteTheme: 'light' };
-fireReload();
-await sleep(500);
-const afterSave = readLocalConfigFile(syncFile);
-check(
-  '保存同步：设置页保存写进本用户配置',
-  afterSave.ok && afterSave.config.remoteTheme === 'light',
-  JSON.stringify(afterSave.config?.remoteTheme),
-);
-check('保存同步：状态文件里的生效值跟着变', /"remoteTheme": "light"/.test(fs.readFileSync(syncStatus, 'utf8')));
-
-// 本用户自己改的其它字段，不该被「别的字段保存」顺手覆盖
-const handEdited = JSON.parse(fs.readFileSync(syncFile, 'utf8'));
-handEdited.config.maxConnections = 7;
-fs.writeFileSync(syncFile, JSON.stringify(handEdited, null, 2));
-syncRow = { ...syncRow, remoteTheme: 'system' };
-fireReload();
-await sleep(500);
-const afterSecondSave = readLocalConfigFile(syncFile);
-check(
-  '保存同步：只同步这次变了的键，本用户其它自定义值保留',
-  afterSecondSave.ok && afterSecondSave.config.remoteTheme === 'system' && afterSecondSave.config.maxConnections === 7,
-  JSON.stringify({ remoteTheme: afterSecondSave.config?.remoteTheme, maxConnections: afterSecondSave.config?.maxConnections }),
-);
-const syncText = fs.readFileSync(syncStatus, 'utf8');
-check('保存同步：状态文件也用了保留后的值', /"maxConnections": 7/.test(syncText));
-disposeSync();
+// 默认值里没有 upstream/urlFile，监听会失败；上面那条只关心文件。
+const badHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-bad-home-'));
+process.env.DSH_HOME = badHome;
+fs.writeFileSync(path.join(badHome, 'remote-access-config.json'), '{ 这不是 JSON');
+const disposeBad2 = indexModule.apply(makeCtx());
 await sleep(200);
-
-// ---- 场景 13b：保存也可能让 Cordis 直接重启本行（先跑 apply，再发 config-reload）----
-// 同一进程里共享值变了 = 这是刚保存的设置，要采纳进本用户配置（而不是被本地值压回去）。
-const restartFile = path.join(localHome, 'restart-config.json');
-const restartStatus = path.join(localHome, 'status-r.txt');
-const restartShared = {
-  allowCidrs: ['127.0.0.0/8'],
-  listen: ['127.0.0.1'],
-  port: 0,
-  upstream: `http://127.0.0.1:${authPort}`,
-  urlFile: restartStatus,
-  localConfigFile: restartFile,
-  remoteTheme: 'dark',
-};
-const disposeR1 = indexModule.apply(makeCtx(), restartShared);
-await sleep(350);
-disposeR1();
-await sleep(150);
-const disposeR2 = indexModule.apply(makeCtx(), { ...restartShared, remoteTheme: 'light' });
-await sleep(400);
-const restartSaved = readLocalConfigFile(restartFile);
-check(
-  '保存即重启本行：同一进程里共享值变了 → 采纳进本用户配置',
-  restartSaved.config?.remoteTheme === 'light' && /"remoteTheme": "light"/.test(fs.readFileSync(restartStatus, 'utf8')),
-  JSON.stringify(restartSaved.config?.remoteTheme),
-);
-disposeR2();
-await sleep(200);
-
-// ---- 场景 14：端口被占用 → 换一个空闲端口并记住（下一次不再撞）----
-const occupier = net.createServer(() => {});
-await new Promise((r) => occupier.listen(0, '127.0.0.1', r));
-const busyPort = occupier.address().port;
-const fbHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-fb-'));
-const fbConfigFile = path.join(fbHome, 'remote-access-config.json');
-const fbStatus1 = path.join(fbHome, 'status-1.txt');
-const fbShared = {
-  allowCidrs: ['127.0.0.0/8'],
-  listen: ['127.0.0.1'],
-  port: busyPort,
-  upstream: `http://127.0.0.1:${authPort}`,
-  urlFile: fbStatus1,
-  localConfigFile: fbConfigFile,
-};
-const disposeFb1 = indexModule.apply(makeCtx(), fbShared);
-await sleep(900); // 绑定失败 → 探空闲端口 → 重绑，给两步留时间
-const fbText1 = fs.readFileSync(fbStatus1, 'utf8');
-const fbPort1 = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fbText1)?.[1] ?? 0);
-const fbSaved = readLocalConfigFile(fbConfigFile);
-check('端口被占用：没有卡死在 EADDRINUSE，换端口后照常监听', fbPort1 > 0 && fbPort1 !== busyPort, `${busyPort} → ${fbPort1}`);
-check('端口被占用：诊断里写明原因', fbText1.includes('已被占用'));
-check(
-  '端口被占用：实际端口写进本用户配置（下次不再撞）',
-  fbSaved.ok && fbSaved.config.port === fbPort1,
-  JSON.stringify(fbSaved.config?.port),
-);
-disposeFb1();
-await sleep(200);
-
-// 再起一次：共享 profile 仍写着 busyPort，但本用户配置记着 fbPort1 → 直接用 fbPort1
-const fbStatus2 = path.join(fbHome, 'status-2.txt');
-const disposeFb2 = indexModule.apply(makeCtx(), { ...fbShared, urlFile: fbStatus2 });
-await sleep(600);
-const fbPort2 = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(fbStatus2, 'utf8'))?.[1] ?? 0);
-check('端口被占用：重启后仍用记住的那个端口（不再撞）', fbPort2 === fbPort1 && fbPort2 > 0, `${fbPort1} / ${fbPort2}`);
-disposeFb2();
-await new Promise((r) => occupier.close(r));
-try { fs.rmSync(localHome, { recursive: true, force: true }); } catch { /* 忽略 */ }
-try { fs.rmSync(fbHome, { recursive: true, force: true }); } catch { /* 忽略 */ }
-
+const badRebuilt = readLocalConfigFile(path.join(badHome, 'remote-access-config.json'));
+const badBackups = fs.readdirSync(badHome).filter((n) => n.startsWith('remote-access-config.json.bad-'));
+check('坏文件：先备份、再按默认值重建', badRebuilt.ok && badBackups.length === 1, `${badBackups.length} 个备份`);
+disposeBad2();
+await new Promise((r) => seedUp.close(r));
+for (const dir of [onlyHome, seedHome, badHome]) {
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+}
 for (const f of [illegalFile, alphaFile, noCredFile, reUnlockFile, slowFile, headFile, brokenFile, lateFile, notifyFile]) {
   try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
 }

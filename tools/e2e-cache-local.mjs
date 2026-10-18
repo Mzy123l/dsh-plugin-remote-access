@@ -55,6 +55,8 @@ await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
 const upPort = upstream.address().port;
 
 const statusFile = path.join(os.tmpdir(), `ra-e2e-${Date.now()}.txt`);
+const e2eHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-e2e-home-'));
+process.env.DSH_HOME = e2eHome;
 const ctx = {
   logger: { info: () => {}, warn: () => {}, error: (m) => console.log('ERR', m) },
   connection: { authenticatedUrl: (base) => `${base.replace(/\/+$/, '')}/?token=E2ETOKEN` },
@@ -63,18 +65,19 @@ const ctx = {
   on: () => () => {},
 };
 
-apply(ctx, {
+const { writeLocalConfigFile } = await import(new URL('../index.js', import.meta.url).href);
+writeLocalConfigFile(path.join(e2eHome, 'remote-access-config.json'), {
   allowCidrs: ['127.0.0.0/8'],
   listen: ['127.0.0.1'],
   port: 0,
   upstream: `http://127.0.0.1:${upPort}`,
   urlFile: statusFile,
-  localConfigFile: 'off', // 手动验证不该在真实 ~/.dsh 里留下配置
   logLevel: 'debug',
   cacheEnabled: true,
   cacheTtlMinutes: 1,
   cacheProbe: true,
 });
+apply(ctx);
 await new Promise((r) => setTimeout(r, 600));
 
 const text = fs.existsSync(statusFile) ? fs.readFileSync(statusFile, 'utf8') : '';
