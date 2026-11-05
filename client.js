@@ -23,139 +23,1012 @@ window.__ModuleLoader__.load({
 
     /**
      * Active UI language. DSH's own locale layer keeps `<html lang>` in sync
-     * (zh -> "zh-CN", en -> "en"), so the plugin follows it instead of adding a
+     * (zh -> "zh-CN", en -> "en", ja -> "ja", …), so the plugin follows it instead of adding a
      * second language setting that could disagree with the app around it.
+     *
+     * **支持 DSH 可切换的全部 8 种语言**：zh / en / ja / es / fr / de / ru / pt。
+     * 这个清单来自官方 `@deepseek-ai/dsh-client-locale/locale/` 目录 —— 那里有几个文件
+     * 就代表 DSH 能切几种语言，别自己另立一套。
+     *
+     * **响应式**：早先这里是一个算一次就定死的常量，用户把 DSH 切成别的语言后插件这一节
+     * 不会跟着变，必须刷新页面才生效。现在改成「读当前值」的函数 + 一份订阅者名单：
+     * `bindLocale()` 在 apply 里订阅 locale 快照（拿不到就退回监听 locale/change 事件），
+     * 语言真的变了才重算 LANG 并通知订阅者。
+     * 读不到 document 的环境（测试桩子）一律算 zh，与之前完全一致。
      */
-    const LANG = (typeof document !== 'undefined' && document.documentElement && /^en/i.test(document.documentElement.lang || '')) ? 'en' : 'zh';
+    /** DSH 支持的全部界面语言（与官方 locale 目录一一对应） */
+    const SUPPORTED_LANGS = ['zh', 'en', 'ja', 'es', 'fr', 'de', 'ru', 'pt'];
+    /** 认不出的一律回落到中文（本插件的主语言） */
+    const FALLBACK_LANG = 'zh';
 
     /**
-     * English copy, keyed by the Chinese source string (gettext-style msgid),
-     * so call sites stay untouched and a missing entry falls back to the source
-     * text instead of rendering an empty label.
+     * 把 `<html lang>` 或 locale id 归一成受支持的短码。
+     * 官方的值可能是 `zh-CN` / `en-US` / `ja` / `pt-BR` 这类带地区的写法，
+     * 一律取前两段的主语言部分；不在清单里的回落到 zh。
      */
-    const EN = {
-      "服务": "Service",
-      "收起侧边栏": "Collapse sidebar",
-      "出厂值": "Factory default",
-      "详细": "Detailed",
-      "手机通知": "Phone notifications",
-      "收起右侧边栏": "Collapse right sidebar",
-      "换行分割": "newline-separated",
-      "远程界面": "Remote UI",
-      "外观": "Appearance",
-      "字号大小": "Font size",
-      "工作步骤展示": "Work step display",
-      "简洁": "Compact",
-      "显示代码工作视图": "Show code work view",
-      "性能与用量": "Performance & usage",
-      "保存中…": "Saving…",
-      "启用": "Enabled",
-      "关掉即停止监听，不需要卸载插件": "Turning this off stops the listener; no need to uninstall the plugin",
-      "端口": "Port",
-      "0=随机": "0 = random",
-      "固定下来才好存书签（默认 0 = 系统随机）": "Pin it to keep a bookmarkable URL (default 0 = OS-assigned)",
-      "允许的网段": "Allowed network ranges",
-      "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "The only security boundary; with listen=auto it also picks which local address to bind",
-      "排除的网段": "Excluded network ranges",
-      "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Exceptions to the allowlist; an address that fails the access code is added here automatically - delete it to unblock",
-      "并发上限": "Connection limit",
-      "0=不限制": "0 = unlimited",
-      "日志级别": "Log level",
-      "静默": "Silent",
-      "普通": "Normal",
-      "访问控制": "Access control",
-      "访问密码": "Access code",
-      "4-12位数字或字母": "4-12 digits or letters",
-      "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "Set it and you never copy a token: open the bare address on the phone and enter it once. One wrong entry blocks that address.",
-      "提问时通知手机": "Notify the phone when the model asks",
-      "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Have the app raise a status-bar notification when the model asks a question (ask_user_question) and nobody answers",
-      "一轮结束时通知手机": "Notify the phone when a turn ends",
-      "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Covers normal completion and failures; failures carry a category (malformed model output / out of balance or quota / network unreachable / rate limited...)",
-      "仅窗口不可见时通知": "Only when the window is hidden",
-      "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "No interruption while the DSH window is visible; turn this off and the app reminds you whenever it is not in the foreground",
-      "远程UI布局": "Remote UI layout",
-      "手机（横竖屏自适应）": "Phone (adapts to orientation)",
-      "电脑": "Desktop",
-      "自动": "Auto",
-      "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
-      "手机端回车=换行": "Enter inserts a newline on the phone",
-      "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "Only the Send button sends; Ctrl/Cmd+Enter still sends, and IME composition always passes through",
-      "浅色": "Light",
-      "深色": "Dark",
-      "跟随系统": "Follow system",
-      "10-22，0=出厂值": "10-22, 0 = factory default",
-      "标准": "Standard",
-      "完全展开": "Fully expanded",
-      "开启": "On",
-      "关闭": "Off",
-      "启用手机端资源缓存": "Enable on-phone asset caching",
-      "新鲜期（分钟）": "Freshness (minutes)",
-      "1-1440，默认 10": "1-1440, default 10",
-      "过期核对用首/尾片段指纹": "Revalidate with first/last chunk fingerprints",
-      "接管 no-store 的大媒体": "Take over large no-store media",
-      "整段 Range 视为整份": "Treat a full-range request as the whole file",
-      "当前页面没有 fetch": "This page has no fetch",
-      "分栏": "Split view",
-      "退出全屏": "Exit fullscreen",
-      "左抽屉": "Left drawer",
-      "右栏": "Right sidebar",
-      "打开侧边栏": "Open sidebar",
-      "打开右侧边栏": "Open right sidebar",
-      "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "The plugin on the computer has no notification endpoint yet (added in 1.3.1) - update the plugin and restart DSH once",
-      "通知接口需要重新解锁：刷新本页、再输一次访问密码": "The notification endpoint needs a fresh unlock: refresh this page and enter the access code again",
-      "电脑上关掉了「提问时通知手机」": "Notify the phone when the model asks is turned off on the computer",
-      "电脑上的插件已支持提问通知 ✓": "The plugin on the computer supports question notifications ✓",
-      "读不到电脑上的插件状态": "Cannot read the plugin status on the computer",
-      "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "This local page does not go through the cache proxy; open this section on the phone to see the policy actually in effect there",
-      "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "The plugin on the computer has no cache endpoint yet (added in 1.3.8) - update the plugin and restart DSH once",
-      "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "The cache endpoint needs a fresh unlock: refresh this page and enter the access code again",
-      "电脑上关掉了手机端缓存": "On-phone caching is turned off on the computer",
-      "读不到电脑上的缓存状态": "Cannot read the cache status on the computer",
-      "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Access code not changed: only 4-12 digits or letters are accepted (no spaces or symbols).",
-      "没有改动。": "No changes.",
-      "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Write rejected (the config was changed elsewhere). Click Reload and try again.",
-      "[remote-access] 保存失败": "[remote-access] save failed",
-      "本页无需套用": "Nothing to apply on this page",
-      "保存后，在远程页面打开时生效（本机界面不受影响）": "Applied to remote pages after saving (the local UI is untouched)",
-      "开 · 已接管": "On · taken over",
-      "生效策略": "Effective policy",
-      "内容寻址产物": "Content-addressed assets",
-      "immutable（一年内不重取）": "immutable (not re-fetched for a year)",
-      "其它静态资源": "Other static assets",
-      "过期核对": "Revalidation",
-      "长度 + 类型": "Length + type",
-      "首/尾各 64 KB 片段指纹": "First/last 64 KB fingerprints",
-      "no-store 大媒体": "no-store large media",
-      "尊重上游": "Respect upstream",
-      "整段 Range": "Full-range requests",
-      "原样透传 206": "Pass 206 through",
-      "正文落盘": "Body on disk",
-      "不落宿主盘（零字节）": "Never on the host disk (zero bytes)",
-      "本次会话": "This session",
-      "304（零字节）": "304 (zero bytes)",
-      "小资源缓冲": "Small-asset buffering",
-      "片段探针": "Chunk probes",
-      "接管 no-store": "no-store takeover",
-      "本轮流量账（按 URL 排字节）": "Traffic this round (bytes by URL)",
-      "送出 / 收到": "Sent / received",
-      "送出": "Sent",
-      "次数": "Count",
-      "读取中…": "Loading…",
-      "刷新": "Refresh",
-      "处理中…": "Working…",
-      "清零本轮统计": "Reset this round",
-      "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Usage: click Reset this round -> fully quit the app (swipe it off recents) -> open it again; what you see here is that round's real cost.",
-      "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "Live polling (audio spectra) and the session channel (the RPC that carries chat images) are outside the cache's reach; large numbers there are expected.",
-      "UI 设置": "UI settings",
-      "缓存": "Cache",
-      "保存": "Save",
-      "重新读取": "Reload",
-      "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(one per Windows user; the plugin never reads or writes the shared profile).",
-      "远程访问": "Remote access",
+    function normalizeLang(value) {
+      const text = String(value ?? '').trim().toLowerCase();
+      if (!text) return FALLBACK_LANG;
+      const primary = text.split(/[-_]/)[0];
+      return SUPPORTED_LANGS.includes(primary) ? primary : FALLBACK_LANG;
+    }
+
+    function detectLang() {
+      try {
+        return normalizeLang(document.documentElement.lang);
+      } catch {
+        return FALLBACK_LANG;
+      }
+    }
+
+    let LANG = detectLang();
+
+    /** 语言变化的订阅者：拿到新语言就重渲染（设置面板 / 已经挂上去的 section 标签） */
+    const langListeners = new Set();
+    function onLangChange(fn) {
+      langListeners.add(fn);
+      return () => langListeners.delete(fn);
+    }
+    function setLang(next) {
+      if (next === LANG) return;
+      LANG = next;
+      for (const fn of [...langListeners]) {
+        try { fn(LANG); } catch { /* 订阅方自己的问题 */ }
+      }
+    }
+
+    /**
+     * 把语言接到 DSH 的 locale 服务上。三条途径，按可靠性排序：
+     *   1. `ctx.get('locale')` 的 getSnapshot/subscribe —— 与官方组件同一口径（LocaleFace）；
+     *   2. `locale/change` 事件（只带 active id）；
+     *   3. **监听 `<html lang>` 属性变化**（MutationObserver）—— 这是最兜底、也最可靠的一条：
+     *      官方的 syncDocumentLanguage 一定会把结果写到这个属性上，而前两条都依赖
+     *      「能拿到 locale 服务 / 能收到事件」，插件没声明 inject 时根本拿不到。
+     *
+     * 为什么必须有第 3 条：`<html>` 在静态 HTML 里就带着 `lang="en"`（DSH 的 index.html 写死），
+     * 而模块加载发生在 locale 同步**之前** —— 于是 `detectLang()` 读到 en、`LANG` 定成 en，
+     * 之后官方把它改成 zh-CN 时如果我们没在听，这个错误就会一直留着。
+     * 后果不只是文案语言：`clickLabel('Collapse sidebar')` 会去点一个根本不存在的英文按钮，
+     * 于是抽屉关不掉、遮罩一直盖着、手势与返回键全部失效。**这是它最严重的一次表现。**
+     */
+    function bindLocale(ctx) {
+      let off = null;
+      const applyActive = (active) => {
+        // locale 服务给的是 active id（zh / en / ja / …，可能带地区后缀），统一归一化
+        if (active) setLang(normalizeLang(active));
+        else setLang(detectLang());
+      };
+      try {
+        const locale = typeof ctx?.get === 'function' ? ctx.get('locale') : null;
+        if (locale && typeof locale.subscribe === 'function') {
+          const read = () => {
+            try {
+              const snap = typeof locale.getSnapshot === 'function' ? locale.getSnapshot() : null;
+              if (snap && typeof snap.active === 'string') return snap.active;
+            } catch { /* 退回 html lang */ }
+            return null;
+          };
+          off = locale.subscribe(() => applyActive(read()));
+        }
+      } catch { /* 忽略：没有 locale 服务 */ }
+      if (typeof off !== 'function') {
+        try {
+          off = ctx.on('locale/change', (snapshot) => {
+            applyActive(typeof snapshot === 'string' ? snapshot : snapshot?.active);
+          });
+        } catch { /* 忽略 */ }
+      }
+      // 兜底 1：先按当前 DOM 校正一次（模块加载与 apply 之间语言可能已经定了）
+      setLang(detectLang());
+      // 兜底 2：盯住 <html lang>。官方每次同步语言都会写这个属性，
+      // 所以哪怕上面两条都拿不到，这里也一定能跟上。没有 MutationObserver 的环境安静跳过。
+      let observer = null;
+      try {
+        if (typeof MutationObserver === 'function' && document?.documentElement) {
+          observer = new MutationObserver(() => setLang(detectLang()));
+          observer.observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+        }
+      } catch { /* 忽略 */ }
+      return () => {
+        try { if (typeof off === 'function') off(); } catch { /* 忽略 */ }
+        try { if (observer) observer.disconnect(); } catch { /* 忽略 */ }
+      };
+    }
+
+    /**
+     * 设置页文案的多语言字典。键是**中文原文**（也是 t() 的 msgid），
+     * 值是各语言下的说法；查不到就回落到中文原文，绝不会渲染成空白。
+     *
+     * 支持的语言与 DSH 的界面语言一一对应（zh / en / ja / es / fr / de / ru / pt），
+     * 清单来自官方 `@deepseek-ai/dsh-client-locale/locale/` 目录。
+     * **只用于设置页**：其它地方（缓存统计、通知状态那类内联文案）保持中英双语。
+     */
+    const DICTS = {
+      en: {
+        "服务": "Service",
+        "收起侧边栏": "Collapse sidebar",
+        "出厂值": "Factory default",
+        "详细": "Detailed",
+        "手机通知": "Phone notifications",
+        "收起右侧边栏": "Collapse right sidebar",
+        "换行分割": "newline-separated",
+        "远程界面": "Remote UI",
+        "外观": "Appearance",
+        "字号大小": "Font size",
+        "工作步骤展示": "Work step display",
+        "简洁": "Compact",
+        "显示代码工作视图": "Show code work view",
+        "性能与用量": "Performance & usage",
+        "保存中…": "Saving…",
+        "启用": "Enabled",
+        "关掉即停止监听，不需要卸载插件": "Turning this off stops the listener; no need to uninstall the plugin",
+        "端口": "Port",
+        "0=随机": "0 = random",
+        "固定下来才好存书签（默认 0 = 系统随机）": "Pin it to keep a bookmarkable URL (default 0 = OS-assigned)",
+        "允许的网段": "Allowed network ranges",
+        "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "The only security boundary; with listen=auto it also picks which local address to bind",
+        "排除的网段": "Excluded network ranges",
+        "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Exceptions to the allowlist; an address that fails the access code is added here automatically - delete it to unblock",
+        "并发上限": "Connection limit",
+        "0=不限制": "0 = unlimited",
+        "日志级别": "Log level",
+        "静默": "Silent",
+        "普通": "Normal",
+        "访问控制": "Access control",
+        "访问密码": "Access code",
+        "4-12位数字或字母": "4-12 digits or letters",
+        "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "Set it and you never copy a token: open the bare address on the phone and enter it once. One wrong entry blocks that address.",
+        "提问时通知手机": "Notify the phone when the model asks",
+        "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Have the app raise a status-bar notification when the model asks a question (ask_user_question) and nobody answers",
+        "一轮结束时通知手机": "Notify the phone when a turn ends",
+        "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Covers normal completion and failures; failures carry a category (malformed model output / out of balance or quota / network unreachable / rate limited...)",
+        "仅窗口不可见时通知": "Only when the window is hidden",
+        "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "No interruption while the DSH window is visible; turn this off and the app reminds you whenever it is not in the foreground",
+        "远程UI布局": "Remote UI layout",
+        "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+        "电脑": "Desktop",
+        "自动": "Auto",
+        "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+        "手机端回车=换行": "Enter inserts a newline on the phone",
+        "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "Only the Send button sends; Ctrl/Cmd+Enter still sends, and IME composition always passes through",
+        "浅色": "Light",
+        "深色": "Dark",
+        "跟随系统": "Follow system",
+        "10-22，0=出厂值": "10-22, 0 = factory default",
+        "标准": "Standard",
+        "完全展开": "Fully expanded",
+        "开启": "On",
+        "关闭": "Off",
+        "启用手机端资源缓存": "Enable on-phone asset caching",
+        "新鲜期（分钟）": "Freshness (minutes)",
+        "1-1440，默认 10": "1-1440, default 10",
+        "过期核对用首/尾片段指纹": "Revalidate with first/last chunk fingerprints",
+        "接管 no-store 的大媒体": "Take over large no-store media",
+        "整段 Range 视为整份": "Treat a full-range request as the whole file",
+        "当前页面没有 fetch": "This page has no fetch",
+        "收起态图标栏": "Collapsed sidebar rail",
+        "保留图标栏（默认）": "Keep the icon rail (default)",
+        "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+        "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
+        "分栏": "Split view",
+        "退出全屏": "Exit fullscreen",
+        "左抽屉": "Left drawer",
+        "右栏": "Right sidebar",
+        "打开侧边栏": "Open sidebar",
+        "打开右侧边栏": "Open right sidebar",
+        "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "The plugin on the computer has no notification endpoint yet (added in 1.3.1) - update the plugin and restart DSH once",
+        "通知接口需要重新解锁：刷新本页、再输一次访问密码": "The notification endpoint needs a fresh unlock: refresh this page and enter the access code again",
+        "电脑上关掉了「提问时通知手机」": "Notify the phone when the model asks is turned off on the computer",
+        "电脑上的插件已支持提问通知 ✓": "The plugin on the computer supports question notifications ✓",
+        "读不到电脑上的插件状态": "Cannot read the plugin status on the computer",
+        "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "This local page does not go through the cache proxy; open this section on the phone to see the policy actually in effect there",
+        "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "The plugin on the computer has no cache endpoint yet (added in 1.3.8) - update the plugin and restart DSH once",
+        "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "The cache endpoint needs a fresh unlock: refresh this page and enter the access code again",
+        "电脑上关掉了手机端缓存": "On-phone caching is turned off on the computer",
+        "读不到电脑上的缓存状态": "Cannot read the cache status on the computer",
+        "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Access code not changed: only 4-12 digits or letters are accepted (no spaces or symbols).",
+        "没有改动。": "No changes.",
+        "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Write rejected (the config was changed elsewhere). Click Reload and try again.",
+        "[remote-access] 保存失败": "[remote-access] save failed",
+        "本页无需套用": "Nothing to apply on this page",
+        "保存后，在远程页面打开时生效（本机界面不受影响）": "Applied to remote pages after saving (the local UI is untouched)",
+        "开 · 已接管": "On · taken over",
+        "生效策略": "Effective policy",
+        "内容寻址产物": "Content-addressed assets",
+        "immutable（一年内不重取）": "immutable (not re-fetched for a year)",
+        "其它静态资源": "Other static assets",
+        "过期核对": "Revalidation",
+        "长度 + 类型": "Length + type",
+        "首/尾各 64 KB 片段指纹": "First/last 64 KB fingerprints",
+        "no-store 大媒体": "no-store large media",
+        "尊重上游": "Respect upstream",
+        "整段 Range": "Full-range requests",
+        "原样透传 206": "Pass 206 through",
+        "正文落盘": "Body on disk",
+        "不落宿主盘（零字节）": "Never on the host disk (zero bytes)",
+        "本次会话": "This session",
+        "304（零字节）": "304 (zero bytes)",
+        "小资源缓冲": "Small-asset buffering",
+        "片段探针": "Chunk probes",
+        "接管 no-store": "no-store takeover",
+        "本轮流量账（按 URL 排字节）": "Traffic this round (bytes by URL)",
+        "送出 / 收到": "Sent / received",
+        "送出": "Sent",
+        "次数": "Count",
+        "读取中…": "Loading…",
+        "刷新": "Refresh",
+        "处理中…": "Working…",
+        "清零本轮统计": "Reset this round",
+        "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Usage: click Reset this round -> fully quit the app (swipe it off recents) -> open it again; what you see here is that round's real cost.",
+        "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "Live polling (audio spectra) and the session channel (the RPC that carries chat images) are outside the cache's reach; large numbers there are expected.",
+        "UI 设置": "UI settings",
+        "缓存": "Cache",
+        "保存": "Save",
+        "重新读取": "Reload",
+        "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(one per Windows user; the plugin never reads or writes the shared profile).",
+        "远程访问": "Remote access",
+      },
+      ja: {
+        "服务": "サービス",
+        "收起侧边栏": "サイドバーを折りたたむ",
+        "出厂值": "工場出荷値",
+        "详细": "詳細",
+        "手机通知": "スマホ通知",
+        "收起右侧边栏": "右サイドバーを折りたたむ",
+        "换行分割": "改行区切り",
+        "远程界面": "リモートUI",
+        "外观": "外観",
+        "字号大小": "文字サイズ",
+        "工作步骤展示": "作業ステップ表示",
+        "简洁": "コンパクト",
+        "显示代码工作视图": "コード作業ビューを表示",
+        "性能与用量": "パフォーマンスと使用量",
+        "保存中…": "保存中…",
+        "启用": "有効",
+        "关掉即停止监听，不需要卸载插件": "オフにすると待ち受けを停止します。プラグインの削除は不要です",
+        "端口": "ポート",
+        "0=随机": "0 = ランダム",
+        "固定下来才好存书签（默认 0 = 系统随机）": "固定するとブックマークに使えます（既定 0 = OS 割り当て）",
+        "允许的网段": "許可するネットワーク範囲",
+        "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "唯一のセキュリティ境界。listen=auto のときは待ち受けアドレスの選択にも使います",
+        "排除的网段": "除外するネットワーク範囲",
+        "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "許可リストの例外。アクセスコードを間違えたアドレスは自動でここに追加されます。削除すれば解除されます",
+        "并发上限": "同時接続上限",
+        "0=不限制": "0 = 無制限",
+        "日志级别": "ログレベル",
+        "静默": "サイレント",
+        "普通": "通常",
+        "访问控制": "アクセス制御",
+        "访问密码": "アクセスコード",
+        "4-12位数字或字母": "4〜12 文字の英数字",
+        "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "設定すればトークンをコピーせずに済みます。スマホで素のアドレスを開き一度入力するだけ。一度間違えるとそのアドレスはブロックされます",
+        "提问时通知手机": "質問時にスマホへ通知",
+        "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "モデルが質問（ask_user_question）し誰も答えないとき、App にステータスバー通知を出させます",
+        "一轮结束时通知手机": "ターン終了時にスマホへ通知",
+        "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "正常終了も異常終了も対象。異常時は分類付き（出力形式エラー / 残高不足 / ネットワーク不通 / レート制限…）",
+        "仅窗口不可见时通知": "ウィンドウ非表示時のみ通知",
+        "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "PC で DSH ウィンドウが見えているときは通知しません。オフにすると App が前面にない限り通知します",
+        "远程UI布局": "Remote UI layout",
+        "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+        "电脑": "Desktop",
+        "自动": "Auto",
+        "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+        "手机端回车=换行": "スマホの Enter = 改行",
+        "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "「送信」を押したときだけ送信します。Ctrl/Cmd+Enter は送信のまま、IME 変換中は常に許可します",
+        "浅色": "ライト",
+        "深色": "ダーク",
+        "跟随系统": "システムに従う",
+        "10-22，0=出厂值": "10〜22、0 = 工場出荷値",
+        "标准": "標準",
+        "完全展开": "完全展開",
+        "开启": "オン",
+        "关闭": "オフ",
+        "启用手机端资源缓存": "スマホ側のリソースキャッシュを有効化",
+        "新鲜期（分钟）": "新鮮期間（分）",
+        "1-1440，默认 10": "1〜1440、既定 10",
+        "过期核对用首/尾片段指纹": "期限切れ確認は先頭/末尾の断片指紋で行う",
+        "接管 no-store 的大媒体": "no-store の大容量メディアを引き継ぐ",
+        "整段 Range 视为整份": "Range 全体を完全なものとして扱う",
+        "当前页面没有 fetch": "このページには fetch がありません",
+        "收起态图标栏": "Collapsed sidebar rail",
+        "保留图标栏（默认）": "Keep the icon rail (default)",
+        "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+        "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
+        "分栏": "分割表示",
+        "退出全屏": "全画面を終了",
+        "左抽屉": "左ドロワー",
+        "右栏": "右パネル",
+        "打开侧边栏": "サイドバーを開く",
+        "打开右侧边栏": "右サイドバーを開く",
+        "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "PC 側のプラグインに通知 API がありません（1.3.1 以降）→ プラグインを更新し DSH を再起動してください",
+        "通知接口需要重新解锁：刷新本页、再输一次访问密码": "通知 API を使うには再ロック解除が必要です。本ページを更新し、アクセスコードをもう一度入力してください",
+        "电脑上关掉了「提问时通知手机」": "PC 側で「質問時にスマホへ通知」がオフです",
+        "电脑上的插件已支持提问通知 ✓": "PC 側のプラグインは質問通知に対応しています ✓",
+        "读不到电脑上的插件状态": "PC 側プラグインの状態を読めません",
+        "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "ローカルページはこのキャッシュプロキシを使いません。スマホでこの項目を開くと実際の適用内容が表示されます",
+        "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "PC 側のプラグインにキャッシュ API がありません（1.3.8 以降）→ プラグインを更新し DSH を再起動してください",
+        "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "キャッシュ API を使うには再ロック解除が必要です。本ページを更新し、アクセスコードをもう一度入力してください",
+        "电脑上关掉了手机端缓存": "PC 側でスマホ側キャッシュがオフです",
+        "读不到电脑上的缓存状态": "PC 側のキャッシュ状態を読めません",
+        "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "アクセスコードは変更していません。4〜12 文字の英数字のみ（空白・記号不可）です。",
+        "没有改动。": "変更はありません。",
+        "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "書き込みが拒否されました（設定が別の場所で変更されています）。「再読み込み」を押してから再試行してください。",
+        "[remote-access] 保存失败": "[remote-access] 保存に失敗しました",
+        "本页无需套用": "本ページに適用する項目はありません",
+        "保存后，在远程页面打开时生效（本机界面不受影响）": "保存後、リモートページを開いたときに反映されます（ローカル画面には影響しません）",
+        "开 · 已接管": "オン · 引き継ぎ済み",
+        "生效策略": "適用ポリシー",
+        "内容寻址产物": "内容アドレス型の成果物",
+        "immutable（一年内不重取）": "immutable（1 年間再取得しない）",
+        "其它静态资源": "その他の静的リソース",
+        "过期核对": "期限切れ確認",
+        "长度 + 类型": "長さ + 種類",
+        "首/尾各 64 KB 片段指纹": "先頭/末尾それぞれ 64 KB の断片指紋",
+        "no-store 大媒体": "no-store の大容量メディア",
+        "尊重上游": "上流に従う",
+        "整段 Range": "Range 全体",
+        "原样透传 206": "そのまま 206 を転送",
+        "正文落盘": "本文のディスク保存",
+        "不落宿主盘（零字节）": "ホストのディスクに保存しない（0 バイト）",
+        "本次会话": "今回のセッション",
+        "304（零字节）": "304（0 バイト）",
+        "小资源缓冲": "小さいリソースのバッファ",
+        "片段探针": "断片プローブ",
+        "接管 no-store": "no-store を引き継ぐ",
+        "本轮流量账（按 URL 排字节）": "今回のトラフィック（URL 別バイト数）",
+        "送出 / 收到": "送信 / 受信",
+        "送出": "送信",
+        "次数": "回数",
+        "读取中…": "読み込み中…",
+        "刷新": "更新",
+        "处理中…": "処理中…",
+        "清零本轮统计": "今回の統計をリセット",
+        "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "使い方：「今回の統計をリセット」→ App を完全終了（最近のタスクから消す）→ 再起動。戻ってきたときにその回の実コストが表示されます。",
+        "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "リアルタイムポーリング（音声スペクトルなど）とセッションチャネル（チャット画像の RPC）はキャッシュ対象外です。大きい数字が出るのは正常です。",
+        "UI 设置": "UI 設定",
+        "缓存": "キャッシュ",
+        "保存": "保存",
+        "重新读取": "再読み込み",
+        "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "（Windows ユーザーごとに 1 ファイル。プラグインは共有 profile を読み書きしません）。",
+        "远程访问": "リモートアクセス",
+      },
+      es: {
+        "服务": "Servicio",
+        "收起侧边栏": "Contraer barra lateral",
+        "出厂值": "Valor de fábrica",
+        "详细": "Detallado",
+        "手机通知": "Notificaciones del móvil",
+        "收起右侧边栏": "Contraer barra derecha",
+        "换行分割": "separado por saltos de línea",
+        "远程界面": "Interfaz remota",
+        "外观": "Apariencia",
+        "字号大小": "Tamaño de fuente",
+        "工作步骤展示": "Visualización de pasos",
+        "简洁": "Compacto",
+        "显示代码工作视图": "Mostrar vista de código",
+        "性能与用量": "Rendimiento y uso",
+        "保存中…": "Guardando…",
+        "启用": "Activado",
+        "关掉即停止监听，不需要卸载插件": "Al desactivarlo se detiene la escucha; no hace falta desinstalar",
+        "端口": "Puerto",
+        "0=随机": "0 = aleatorio",
+        "固定下来才好存书签（默认 0 = 系统随机）": "Fíjalo para tener una URL guardable (por defecto 0 = asignado por el SO)",
+        "允许的网段": "Rangos permitidos",
+        "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "La única frontera de seguridad; con listen=auto también elige la dirección local",
+        "排除的网段": "Rangos excluidos",
+        "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Excepciones a la lista; una dirección que falle el código se añade aquí; bórrala para desbloquear",
+        "并发上限": "Límite de conexiones",
+        "0=不限制": "0 = sin límite",
+        "日志级别": "Nivel de registro",
+        "静默": "Silencioso",
+        "普通": "Normal",
+        "访问控制": "Control de acceso",
+        "访问密码": "Código de acceso",
+        "4-12位数字或字母": "4-12 caracteres alfanuméricos",
+        "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "Con esto no hace falta copiar el token: abre la dirección simple en el móvil e introdúcelo una vez; un error bloquea la dirección",
+        "提问时通知手机": "Notificar al móvil al preguntar",
+        "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Cuando el modelo pregunta (ask_user_question) y nadie responde, la App muestra una notificación",
+        "一轮结束时通知手机": "Notificar al móvil al terminar",
+        "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Cuenta tanto el final normal como el anómalo; el anómalo lleva categoría (formato inválido / saldo insuficiente / red caída / limitado…)",
+        "仅窗口不可见时通知": "Solo si la ventana no está visible",
+        "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "No molesta si la ventana de DSH está visible; al desactivarlo avisa siempre que la App no esté al frente",
+        "远程UI布局": "Remote UI layout",
+        "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+        "电脑": "Desktop",
+        "自动": "Auto",
+        "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+        "手机端回车=换行": "Enter en el móvil = salto de línea",
+        "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "Solo se envía al pulsar «Enviar»; Ctrl/Cmd+Enter sigue enviando y la composición IME siempre pasa",
+        "浅色": "Claro",
+        "深色": "Oscuro",
+        "跟随系统": "Seguir al sistema",
+        "10-22，0=出厂值": "10-22, 0 = valor de fábrica",
+        "标准": "Estándar",
+        "完全展开": "Totalmente expandido",
+        "开启": "Activado",
+        "关闭": "Desactivado",
+        "启用手机端资源缓存": "Activar caché de recursos en el móvil",
+        "新鲜期（分钟）": "Vigencia (minutos)",
+        "1-1440，默认 10": "1-1440, por defecto 10",
+        "过期核对用首/尾片段指纹": "Verificar caducidad con huella del inicio/final",
+        "接管 no-store 的大媒体": "Gestionar medios grandes con no-store",
+        "整段 Range 视为整份": "Tratar el Range completo como entero",
+        "当前页面没有 fetch": "Esta página no tiene fetch",
+        "收起态图标栏": "Collapsed sidebar rail",
+        "保留图标栏（默认）": "Keep the icon rail (default)",
+        "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+        "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
+        "分栏": "Dividir",
+        "退出全屏": "Salir de pantalla completa",
+        "左抽屉": "Cajón izquierdo",
+        "右栏": "Panel derecho",
+        "打开侧边栏": "Abrir barra lateral",
+        "打开右侧边栏": "Abrir barra derecha",
+        "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "El plugin del PC aún no tiene API de notificaciones (desde 1.3.1) → actualiza y reinicia DSH",
+        "通知接口需要重新解锁：刷新本页、再输一次访问密码": "La API de notificaciones requiere desbloquear: recarga la página e introduce el código otra vez",
+        "电脑上关掉了「提问时通知手机」": "En el PC está desactivado «Notificar al móvil al preguntar»",
+        "电脑上的插件已支持提问通知 ✓": "El plugin del PC admite notificaciones de pregunta ✓",
+        "读不到电脑上的插件状态": "No se puede leer el estado del plugin del PC",
+        "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "La página local no usa este proxy de caché; al abrir este grupo en el móvil se verá lo que aplica allí",
+        "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "El plugin del PC aún no tiene API de caché (desde 1.3.8) → actualiza y reinicia DSH",
+        "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "La API de caché requiere desbloquear: recarga la página e introduce el código otra vez",
+        "电脑上关掉了手机端缓存": "En el PC está desactivada la caché del móvil",
+        "读不到电脑上的缓存状态": "No se puede leer el estado de caché del PC",
+        "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Código sin cambios: solo 4-12 caracteres alfanuméricos (sin espacios ni símbolos).",
+        "没有改动。": "Sin cambios.",
+        "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Escritura rechazada (la configuración cambió en otro sitio); pulsa «Recargar» e inténtalo de nuevo.",
+        "[remote-access] 保存失败": "[remote-access] Error al guardar",
+        "本页无需套用": "Nada que aplicar en esta página",
+        "保存后，在远程页面打开时生效（本机界面不受影响）": "Tras guardar, se aplica al abrir una página remota (la interfaz local no cambia)",
+        "开 · 已接管": "Activado · gestionado",
+        "生效策略": "Política aplicada",
+        "内容寻址产物": "Recursos direccionados por contenido",
+        "immutable（一年内不重取）": "immutable (no se recarga en un año)",
+        "其它静态资源": "Otros recursos estáticos",
+        "过期核对": "Verificación de caducidad",
+        "长度 + 类型": "Longitud + tipo",
+        "首/尾各 64 KB 片段指纹": "Huella de 64 KB al inicio y al final",
+        "no-store 大媒体": "Medios grandes no-store",
+        "尊重上游": "Respetar el origen",
+        "整段 Range": "Range completo",
+        "原样透传 206": "Retransmitir 206 tal cual",
+        "正文落盘": "Cuerpo en disco",
+        "不落宿主盘（零字节）": "Sin escribir en el host (0 bytes)",
+        "本次会话": "Esta sesión",
+        "304（零字节）": "304 (0 bytes)",
+        "小资源缓冲": "Búfer de recursos pequeños",
+        "片段探针": "Sonda de fragmento",
+        "接管 no-store": "Gestionar no-store",
+        "本轮流量账（按 URL 排字节）": "Tráfico de esta ronda (bytes por URL)",
+        "送出 / 收到": "Enviado / recibido",
+        "送出": "Enviado",
+        "次数": "Veces",
+        "读取中…": "Leyendo…",
+        "刷新": "Actualizar",
+        "处理中…": "Procesando…",
+        "清零本轮统计": "Reiniciar estadísticas",
+        "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Uso: pulsa «Reiniciar estadísticas» → cierra la App del todo (quítala de recientes) → vuelve a abrirla; al volver verás el coste real de esa ronda.",
+        "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "El sondeo en tiempo real (espectro de audio) y el canal de sesión (RPC de imágenes del chat) no entran en la caché; ver cifras grandes es normal.",
+        "UI 设置": "Ajustes de UI",
+        "缓存": "Caché",
+        "保存": "Guardar",
+        "重新读取": "Recargar",
+        "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(una por usuario de Windows; el plugin no lee ni escribe el perfil compartido).",
+        "远程访问": "Acceso remoto",
+      },
+      fr: {
+        "服务": "Service",
+        "收起侧边栏": "Réduire la barre latérale",
+        "出厂值": "Valeur d'usine",
+        "详细": "Détaillé",
+        "手机通知": "Notifications du téléphone",
+        "收起右侧边栏": "Réduire la barre de droite",
+        "换行分割": "séparé par des retours à la ligne",
+        "远程界面": "Interface distante",
+        "外观": "Apparence",
+        "字号大小": "Taille de police",
+        "工作步骤展示": "Affichage des étapes",
+        "简洁": "Compact",
+        "显示代码工作视图": "Afficher la vue code",
+        "性能与用量": "Performance et usage",
+        "保存中…": "Enregistrement…",
+        "启用": "Activé",
+        "关掉即停止监听，不需要卸载插件": "Le désactiver arrête l'écoute ; inutile de désinstaller",
+        "端口": "Port",
+        "0=随机": "0 = aléatoire",
+        "固定下来才好存书签（默认 0 = 系统随机）": "Fixez-le pour garder une URL marquable (par défaut 0 = attribué par l'OS)",
+        "允许的网段": "Plages autorisées",
+        "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "La seule frontière de sécurité ; avec listen=auto choisit aussi l'adresse locale",
+        "排除的网段": "Plages exclues",
+        "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Exceptions à la liste ; une adresse qui rate le code y est ajoutée ; supprimez-la pour débloquer",
+        "并发上限": "Limite de connexions",
+        "0=不限制": "0 = illimité",
+        "日志级别": "Niveau de journal",
+        "静默": "Silencieux",
+        "普通": "Normal",
+        "访问控制": "Contrôle d'accès",
+        "访问密码": "Code d'accès",
+        "4-12位数字或字母": "4 à 12 caractères alphanumériques",
+        "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "Avec ceci, plus besoin de copier le jeton : ouvrez l'adresse simple sur le téléphone et saisissez-le une fois ; une erreur bloque l'adresse",
+        "提问时通知手机": "Notifier le téléphone lors d'une question",
+        "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Quand le modèle pose une question (ask_user_question) sans réponse, l'App affiche une notification",
+        "一轮结束时通知手机": "Notifier le téléphone en fin de tour",
+        "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Fin normale ou anormal ; l'anormal est catégorisé (format invalide / solde insuffisant / réseau coupé / limité…)",
+        "仅窗口不可见时通知": "Uniquement si la fenêtre est masquée",
+        "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "Ne dérange pas si la fenêtre DSH est visible ; désactivé, prévient dès que l'App n'est pas au premier plan",
+        "远程UI布局": "Remote UI layout",
+        "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+        "电脑": "Desktop",
+        "自动": "Auto",
+        "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+        "手机端回车=换行": "Entrée sur mobile = nouvelle ligne",
+        "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "N'envoie qu'au clic sur « Envoyer » ; Ctrl/Cmd+Entrée envoie toujours, la composition IME passe",
+        "浅色": "Clair",
+        "深色": "Sombre",
+        "跟随系统": "Suivre le système",
+        "10-22，0=出厂值": "10-22, 0 = valeur d'usine",
+        "标准": "Standard",
+        "完全展开": "Entièrement déployé",
+        "开启": "Activé",
+        "关闭": "Désactivé",
+        "启用手机端资源缓存": "Activer le cache de ressources sur mobile",
+        "新鲜期（分钟）": "Fraîcheur (minutes)",
+        "1-1440，默认 10": "1-1440, par défaut 10",
+        "过期核对用首/尾片段指纹": "Vérifier l'expiration par empreinte début/fin",
+        "接管 no-store 的大媒体": "Prendre en charge les gros médias no-store",
+        "整段 Range 视为整份": "Traiter la plage entière comme complète",
+        "当前页面没有 fetch": "Cette page n'a pas de fetch",
+        "收起态图标栏": "Collapsed sidebar rail",
+        "保留图标栏（默认）": "Keep the icon rail (default)",
+        "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+        "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
+        "分栏": "Diviser",
+        "退出全屏": "Quitter le plein écran",
+        "左抽屉": "Tiroir gauche",
+        "右栏": "Panneau droit",
+        "打开侧边栏": "Ouvrir la barre latérale",
+        "打开右侧边栏": "Ouvrir la barre de droite",
+        "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "Le plugin PC n'a pas encore d'API de notifications (depuis 1.3.1) → mettez à jour et redémarrez DSH",
+        "通知接口需要重新解锁：刷新本页、再输一次访问密码": "L'API de notifications nécessite un déverrouillage : rechargez la page et ressaisissez le code",
+        "电脑上关掉了「提问时通知手机」": "Sur le PC, « Notifier le téléphone lors d'une question » est désactivé",
+        "电脑上的插件已支持提问通知 ✓": "Le plugin PC prend en charge les notifications de question ✓",
+        "读不到电脑上的插件状态": "Impossible de lire l'état du plugin PC",
+        "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "La page locale n'utilise pas ce proxy de cache ; ouvrir ce groupe sur le téléphone affiche ce qui s'applique",
+        "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "Le plugin PC n'a pas encore d'API de cache (depuis 1.3.8) → mettez à jour et redémarrez DSH",
+        "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "L'API de cache nécessite un déverrouillage : rechargez la page et ressaisissez le code",
+        "电脑上关掉了手机端缓存": "Sur le PC, le cache mobile est désactivé",
+        "读不到电脑上的缓存状态": "Impossible de lire l'état du cache PC",
+        "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Code inchangé : 4 à 12 caractères alphanumériques seulement (ni espaces ni symboles).",
+        "没有改动。": "Aucun changement.",
+        "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Écriture refusée (configuration modifiée ailleurs) ; cliquez sur « Recharger » puis réessayez.",
+        "[remote-access] 保存失败": "[remote-access] Échec de l'enregistrement",
+        "本页无需套用": "Rien à appliquer sur cette page",
+        "保存后，在远程页面打开时生效（本机界面不受影响）": "Après enregistrement, s'applique à l'ouverture d'une page distante (l'interface locale reste intacte)",
+        "开 · 已接管": "Activé · pris en charge",
+        "生效策略": "Politique appliquée",
+        "内容寻址产物": "Ressources adressées par contenu",
+        "immutable（一年内不重取）": "immutable (pas de rechargement pendant un an)",
+        "其它静态资源": "Autres ressources statiques",
+        "过期核对": "Vérification d'expiration",
+        "长度 + 类型": "Longueur + type",
+        "首/尾各 64 KB 片段指纹": "Empreinte 64 Ko début et fin",
+        "no-store 大媒体": "Gros médias no-store",
+        "尊重上游": "Respecter l'amont",
+        "整段 Range": "Plage entière",
+        "原样透传 206": "Relayer 206 tel quel",
+        "正文落盘": "Corps sur disque",
+        "不落宿主盘（零字节）": "Rien sur le disque hôte (0 octet)",
+        "本次会话": "Cette session",
+        "304（零字节）": "304 (0 octet)",
+        "小资源缓冲": "Tampon des petites ressources",
+        "片段探针": "Sonde de fragment",
+        "接管 no-store": "Prendre en charge no-store",
+        "本轮流量账（按 URL 排字节）": "Trafic de ce tour (octets par URL)",
+        "送出 / 收到": "Envoyé / reçu",
+        "送出": "Envoyé",
+        "次数": "Fois",
+        "读取中…": "Lecture…",
+        "刷新": "Actualiser",
+        "处理中…": "Traitement…",
+        "清零本轮统计": "Réinitialiser les statistiques",
+        "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Mode d'emploi : cliquez sur « Réinitialiser les statistiques » → fermez complètement l'App (retirez-la des récents) → rouvrez-la ; au retour vous verrez le coût réel de ce tour.",
+        "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "Le sondage temps réel (spectre audio) et le canal de session (RPC des images du chat) ne sont pas cachés ; de grands chiffres sont normaux.",
+        "UI 设置": "Réglages d'interface",
+        "缓存": "Cache",
+        "保存": "Enregistrer",
+        "重新读取": "Recharger",
+        "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(un par utilisateur Windows ; le plugin ne lit ni n'écrit le profil partagé).",
+        "远程访问": "Accès distant",
+      },
+      de: {
+        "服务": "Dienst",
+        "收起侧边栏": "Seitenleiste einklappen",
+        "出厂值": "Werksstandard",
+        "详细": "Ausführlich",
+        "手机通知": "Handy-Benachrichtigungen",
+        "收起右侧边栏": "Rechte Seitenleiste einklappen",
+        "换行分割": "durch Zeilenumbrüche getrennt",
+        "远程界面": "Remote-Oberfläche",
+        "外观": "Erscheinungsbild",
+        "字号大小": "Schriftgröße",
+        "工作步骤展示": "Arbeitsschritte anzeigen",
+        "简洁": "Kompakt",
+        "显示代码工作视图": "Code-Ansicht anzeigen",
+        "性能与用量": "Leistung & Nutzung",
+        "保存中…": "Speichern…",
+        "启用": "Aktiviert",
+        "关掉即停止监听，不需要卸载插件": "Deaktiviert stoppt das Lauschen; Deinstallieren ist nicht nötig",
+        "端口": "Port",
+        "0=随机": "0 = zufällig",
+        "固定下来才好存书签（默认 0 = 系统随机）": "Festlegen für eine merkbare URL (Standard 0 = vom System vergeben)",
+        "允许的网段": "Erlaubte Netzbereiche",
+        "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "Die einzige Sicherheitsgrenze; bei listen=auto wird auch die lokale Adresse gewählt",
+        "排除的网段": "Ausgeschlossene Netzbereiche",
+        "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Ausnahmen zur Liste; eine Adresse mit falschem Code landet hier; löschen hebt die Sperre auf",
+        "并发上限": "Verbindungslimit",
+        "0=不限制": "0 = unbegrenzt",
+        "日志级别": "Protokollstufe",
+        "静默": "Still",
+        "普通": "Normal",
+        "访问控制": "Zugriffskontrolle",
+        "访问密码": "Zugriffscode",
+        "4-12位数字或字母": "4-12 Zeichen (Buchstaben/Ziffern)",
+        "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "Damit entfällt das Kopieren des Tokens: einfache Adresse am Handy öffnen und einmal eingeben; ein Fehler sperrt die Adresse",
+        "提问时通知手机": "Handy bei Rückfrage benachrichtigen",
+        "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Wenn das Modell fragt (ask_user_question) und niemand antwortet, zeigt die App eine Benachrichtigung",
+        "一轮结束时通知手机": "Handy am Rundenende benachrichtigen",
+        "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Zählt normalen und fehlerhaften Abschluss; der Fehler wird kategorisiert (Formatfehler / Guthaben / Netz weg / gedrosselt …)",
+        "仅窗口不可见时通知": "Nur bei unsichtbarem Fenster",
+        "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "Stört nicht, wenn das DSH-Fenster sichtbar ist; deaktiviert meldet es, sobald die App nicht im Vordergrund ist",
+        "远程UI布局": "Remote UI layout",
+        "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+        "电脑": "Desktop",
+        "自动": "Auto",
+        "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+        "手机端回车=换行": "Enter am Handy = Zeilenumbruch",
+        "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "Sendet nur beim Klick auf „Senden\"; Strg/Cmd+Enter sendet weiterhin, IME-Komposition wird durchgelassen",
+        "浅色": "Hell",
+        "深色": "Dunkel",
+        "跟随系统": "System folgen",
+        "10-22，0=出厂值": "10-22, 0 = Werksstandard",
+        "标准": "Standard",
+        "完全展开": "Vollständig",
+        "开启": "Ein",
+        "关闭": "Aus",
+        "启用手机端资源缓存": "Ressourcen-Cache am Handy aktivieren",
+        "新鲜期（分钟）": "Frische (Minuten)",
+        "1-1440，默认 10": "1-1440, Standard 10",
+        "过期核对用首/尾片段指纹": "Ablaufprüfung per Anfang/Ende-Fingerabdruck",
+        "接管 no-store 的大媒体": "Große no-store-Medien übernehmen",
+        "整段 Range 视为整份": "Ganzen Range als vollständig behandeln",
+        "当前页面没有 fetch": "Diese Seite hat kein fetch",
+        "收起态图标栏": "Collapsed sidebar rail",
+        "保留图标栏（默认）": "Keep the icon rail (default)",
+        "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+        "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
+        "分栏": "Teilen",
+        "退出全屏": "Vollbild beenden",
+        "左抽屉": "Linke Schublade",
+        "右栏": "Rechte Leiste",
+        "打开侧边栏": "Seitenleiste öffnen",
+        "打开右侧边栏": "Rechte Seitenleiste öffnen",
+        "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "Das PC-Plugin hat noch keine Benachrichtigungs-API (ab 1.3.1) → aktualisieren und DSH neu starten",
+        "通知接口需要重新解锁：刷新本页、再输一次访问密码": "Die Benachrichtigungs-API braucht eine neue Freischaltung: Seite neu laden und Code erneut eingeben",
+        "电脑上关掉了「提问时通知手机」": "Am PC ist „Handy bei Rückfrage benachrichtigen\" aus",
+        "电脑上的插件已支持提问通知 ✓": "Das PC-Plugin unterstützt Rückfrage-Benachrichtigungen ✓",
+        "读不到电脑上的插件状态": "Status des PC-Plugins nicht lesbar",
+        "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "Die lokale Seite nutzt diesen Cache-Proxy nicht; am Handy geöffnet zeigt diese Gruppe, was dort gilt",
+        "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "Das PC-Plugin hat noch keine Cache-API (ab 1.3.8) → aktualisieren und DSH neu starten",
+        "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "Die Cache-API braucht eine neue Freischaltung: Seite neu laden und Code erneut eingeben",
+        "电脑上关掉了手机端缓存": "Am PC ist der Handy-Cache aus",
+        "读不到电脑上的缓存状态": "Cache-Status des PC nicht lesbar",
+        "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Code unverändert: nur 4-12 Buchstaben/Ziffern (keine Leer- oder Sonderzeichen).",
+        "没有改动。": "Keine Änderung.",
+        "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Schreiben abgelehnt (Konfiguration anderswo geändert); auf „Neu laden\" klicken und erneut versuchen.",
+        "[remote-access] 保存失败": "[remote-access] Speichern fehlgeschlagen",
+        "本页无需套用": "Auf dieser Seite nichts anzuwenden",
+        "保存后，在远程页面打开时生效（本机界面不受影响）": "Nach dem Speichern wirkt es beim Öffnen einer Remote-Seite (lokale Oberfläche unberührt)",
+        "开 · 已接管": "Ein · übernommen",
+        "生效策略": "Wirksame Richtlinie",
+        "内容寻址产物": "Inhaltsadressierte Assets",
+        "immutable（一年内不重取）": "immutable (ein Jahr kein Neuladen)",
+        "其它静态资源": "Sonstige statische Assets",
+        "过期核对": "Ablaufprüfung",
+        "长度 + 类型": "Länge + Typ",
+        "首/尾各 64 KB 片段指纹": "Je 64 KB Anfang/Ende-Fingerabdruck",
+        "no-store 大媒体": "Große no-store-Medien",
+        "尊重上游": "Upstream respektieren",
+        "整段 Range": "Ganzer Range",
+        "原样透传 206": "206 unverändert weiterreichen",
+        "正文落盘": "Inhalt auf Platte",
+        "不落宿主盘（零字节）": "Nichts auf Host-Platte (0 Byte)",
+        "本次会话": "Diese Sitzung",
+        "304（零字节）": "304 (0 Byte)",
+        "小资源缓冲": "Puffer für kleine Assets",
+        "片段探针": "Fragment-Probe",
+        "接管 no-store": "no-store übernehmen",
+        "本轮流量账（按 URL 排字节）": "Traffic dieser Runde (Bytes je URL)",
+        "送出 / 收到": "Gesendet / empfangen",
+        "送出": "Gesendet",
+        "次数": "Anzahl",
+        "读取中…": "Lädt…",
+        "刷新": "Aktualisieren",
+        "处理中…": "Verarbeitung…",
+        "清零本轮统计": "Statistik zurücksetzen",
+        "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Nutzung: „Statistik zurücksetzen\" → App komplett beenden (aus dem Verlauf wischen) → neu öffnen; dann steht hier der echte Verbrauch dieser Runde.",
+        "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "Echtzeit-Polling (Audiospektrum) und der Sitzungskanal (RPC der Chat-Bilder) werden nicht gecacht; große Zahlen sind normal.",
+        "UI 设置": "UI-Einstellungen",
+        "缓存": "Cache",
+        "保存": "Speichern",
+        "重新读取": "Neu laden",
+        "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(eine je Windows-Benutzer; das Plugin liest und schreibt das gemeinsame Profil nicht).",
+        "远程访问": "Fernzugriff",
+      },
+      ru: {
+        "服务": "Служба",
+        "收起侧边栏": "Свернуть боковую панель",
+        "出厂值": "Заводское значение",
+        "详细": "Подробно",
+        "手机通知": "Уведомления на телефон",
+        "收起右侧边栏": "Свернуть правую панель",
+        "换行分割": "разделитель — перевод строки",
+        "远程界面": "Удалённый интерфейс",
+        "外观": "Внешний вид",
+        "字号大小": "Размер шрифта",
+        "工作步骤展示": "Показ шагов работы",
+        "简洁": "Компактно",
+        "显示代码工作视图": "Показывать вид кода",
+        "性能与用量": "Производительность и расход",
+        "保存中…": "Сохранение…",
+        "启用": "Включено",
+        "关掉即停止监听，不需要卸载插件": "Отключает прослушивание; удалять плагин не нужно",
+        "端口": "Порт",
+        "0=随机": "0 = случайный",
+        "固定下来才好存书签（默认 0 = 系统随机）": "Закрепите, чтобы сохранить адрес в закладки (по умолчанию 0 — назначает ОС)",
+        "允许的网段": "Разрешённые диапазоны",
+        "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "Единственная граница безопасности; при listen=auto выбирает и локальный адрес",
+        "排除的网段": "Исключённые диапазоны",
+        "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Исключения из списка; адрес с неверным кодом попадает сюда; удалите — разблокируется",
+        "并发上限": "Лимит соединений",
+        "0=不限制": "0 = без ограничений",
+        "日志级别": "Уровень журнала",
+        "静默": "Тихий",
+        "普通": "Обычный",
+        "访问控制": "Контроль доступа",
+        "访问密码": "Код доступа",
+        "4-12位数字或字母": "4–12 символов (буквы и цифры)",
+        "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "С ним не нужно копировать токен: откройте простой адрес на телефоне и введите один раз; ошибка блокирует адрес",
+        "提问时通知手机": "Уведомлять телефон при вопросе",
+        "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Когда модель задаёт вопрос (ask_user_question) и никто не отвечает, App показывает уведомление",
+        "一轮结束时通知手机": "Уведомлять телефон по завершении хода",
+        "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Учитывается и нормальное, и аварийное завершение; аварийное — с категорией (формат / баланс / сеть / лимит …)",
+        "仅窗口不可见时通知": "Только когда окно скрыто",
+        "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "Не мешает, если окно DSH видно; если выключить — уведомляет всегда, когда App не на переднем плане",
+        "远程UI布局": "Remote UI layout",
+        "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+        "电脑": "Desktop",
+        "自动": "Auto",
+        "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+        "手机端回车=换行": "Enter на телефоне = перевод строки",
+        "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "Отправляет только по кнопке «Отправить»; Ctrl/Cmd+Enter тоже отправляет, ввод IME пропускается",
+        "浅色": "Светлая",
+        "深色": "Тёмная",
+        "跟随系统": "Как в системе",
+        "10-22，0=出厂值": "10–22, 0 — заводское",
+        "标准": "Стандартно",
+        "完全展开": "Полностью",
+        "开启": "Вкл",
+        "关闭": "Выкл",
+        "启用手机端资源缓存": "Включить кэш ресурсов на телефоне",
+        "新鲜期（分钟）": "Свежесть (минуты)",
+        "1-1440，默认 10": "1–1440, по умолчанию 10",
+        "过期核对用首/尾片段指纹": "Проверка по отпечатку начала/конца",
+        "接管 no-store 的大媒体": "Перехватывать крупные no-store медиа",
+        "整段 Range 视为整份": "Считать весь Range целым",
+        "当前页面没有 fetch": "На этой странице нет fetch",
+        "收起态图标栏": "Collapsed sidebar rail",
+        "保留图标栏（默认）": "Keep the icon rail (default)",
+        "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+        "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
+        "分栏": "Разделить",
+        "退出全屏": "Выйти из полного экрана",
+        "左抽屉": "Левая панель",
+        "右栏": "Правая панель",
+        "打开侧边栏": "Открыть боковую панель",
+        "打开右侧边栏": "Открыть правую панель",
+        "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "У плагина на ПК нет API уведомлений (с 1.3.1) → обновите плагин и перезапустите DSH",
+        "通知接口需要重新解锁：刷新本页、再输一次访问密码": "API уведомлений требует повторной разблокировки: обновите страницу и введите код снова",
+        "电脑上关掉了「提问时通知手机」": "На ПК отключено «Уведомлять телефон при вопросе»",
+        "电脑上的插件已支持提问通知 ✓": "Плагин на ПК поддерживает уведомления о вопросах ✓",
+        "读不到电脑上的插件状态": "Не удаётся прочитать состояние плагина на ПК",
+        "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "Локальная страница не использует этот прокси кэша; на телефоне здесь видно, что применяется",
+        "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "У плагина на ПК нет API кэша (с 1.3.8) → обновите плагин и перезапустите DSH",
+        "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "API кэша требует повторной разблокировки: обновите страницу и введите код снова",
+        "电脑上关掉了手机端缓存": "На ПК отключён кэш для телефона",
+        "读不到电脑上的缓存状态": "Не удаётся прочитать состояние кэша на ПК",
+        "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Код не изменён: только 4–12 букв или цифр (без пробелов и символов).",
+        "没有改动。": "Изменений нет.",
+        "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Запись отклонена (конфигурацию изменили в другом месте); нажмите «Перечитать» и повторите.",
+        "[remote-access] 保存失败": "[remote-access] Не удалось сохранить",
+        "本页无需套用": "На этой странице нечего применять",
+        "保存后，在远程页面打开时生效（本机界面不受影响）": "После сохранения применяется при открытии удалённой страницы (локальный интерфейс не меняется)",
+        "开 · 已接管": "Вкл · перехвачено",
+        "生效策略": "Действующая политика",
+        "内容寻址产物": "Ресурсы с адресацией по содержимому",
+        "immutable（一年内不重取）": "immutable (год без перезагрузки)",
+        "其它静态资源": "Прочие статические ресурсы",
+        "过期核对": "Проверка срока",
+        "长度 + 类型": "Длина + тип",
+        "首/尾各 64 KB 片段指纹": "Отпечаток по 64 КБ в начале и конце",
+        "no-store 大媒体": "Крупные no-store медиа",
+        "尊重上游": "Как у источника",
+        "整段 Range": "Весь Range",
+        "原样透传 206": "Передавать 206 как есть",
+        "正文落盘": "Тело на диск",
+        "不落宿主盘（零字节）": "Не пишется на диск хоста (0 байт)",
+        "本次会话": "Этот сеанс",
+        "304（零字节）": "304 (0 байт)",
+        "小资源缓冲": "Буфер мелких ресурсов",
+        "片段探针": "Проба фрагмента",
+        "接管 no-store": "Перехват no-store",
+        "本轮流量账（按 URL 排字节）": "Трафик этого раунда (байты по URL)",
+        "送出 / 收到": "Отправлено / получено",
+        "送出": "Отправлено",
+        "次数": "Раз",
+        "读取中…": "Чтение…",
+        "刷新": "Обновить",
+        "处理中…": "Обработка…",
+        "清零本轮统计": "Сбросить статистику",
+        "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Как пользоваться: нажмите «Сбросить статистику» → полностью закройте App (уберите из недавних) → откройте снова; тогда здесь будет реальный расход этого раунда.",
+        "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "Опрос в реальном времени (спектр аудио) и сеансовый канал (RPC картинок чата) не кэшируются; большие числа — норма.",
+        "UI 设置": "Настройки интерфейса",
+        "缓存": "Кэш",
+        "保存": "Сохранить",
+        "重新读取": "Перечитать",
+        "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(по одному на пользователя Windows; плагин не читает и не пишет общий профиль).",
+        "远程访问": "Удалённый доступ",
+      },
+      pt: {
+        "服务": "Serviço",
+        "收起侧边栏": "Recolher barra lateral",
+        "出厂值": "Padrão de fábrica",
+        "详细": "Detalhado",
+        "手机通知": "Notificações do celular",
+        "收起右侧边栏": "Recolher barra direita",
+        "换行分割": "separado por quebras de linha",
+        "远程界面": "Interface remota",
+        "外观": "Aparência",
+        "字号大小": "Tamanho da fonte",
+        "工作步骤展示": "Exibição de etapas",
+        "简洁": "Compacto",
+        "显示代码工作视图": "Mostrar visão de código",
+        "性能与用量": "Desempenho e uso",
+        "保存中…": "Salvando…",
+        "启用": "Ativado",
+        "关掉即停止监听，不需要卸载插件": "Desativar para a escuta; não é preciso desinstalar",
+        "端口": "Porta",
+        "0=随机": "0 = aleatório",
+        "固定下来才好存书签（默认 0 = 系统随机）": "Fixe para ter uma URL favoritável (padrão 0 = atribuído pelo SO)",
+        "允许的网段": "Faixas permitidas",
+        "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "A única fronteira de segurança; com listen=auto também escolhe o endereço local",
+        "排除的网段": "Faixas excluídas",
+        "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Exceções à lista; um endereço que erre o código entra aqui; apague para desbloquear",
+        "并发上限": "Limite de conexões",
+        "0=不限制": "0 = ilimitado",
+        "日志级别": "Nível de log",
+        "静默": "Silencioso",
+        "普通": "Normal",
+        "访问控制": "Controle de acesso",
+        "访问密码": "Código de acesso",
+        "4-12位数字或字母": "4 a 12 caracteres alfanuméricos",
+        "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "Com ele não precisa copiar o token: abra o endereço simples no celular e digite uma vez; um erro bloqueia o endereço",
+        "提问时通知手机": "Notificar o celular ao perguntar",
+        "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Quando o modelo pergunta (ask_user_question) e ninguém responde, o App mostra uma notificação",
+        "一轮结束时通知手机": "Notificar o celular ao fim da rodada",
+        "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Conta o fim normal e o anormal; o anormal vem categorizado (formato inválido / saldo / rede / limitado…)",
+        "仅窗口不可见时通知": "Só quando a janela não estiver visível",
+        "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "Não incomoda se a janela do DSH estiver visível; desativado avisa sempre que o App não estiver em primeiro plano",
+        "远程UI布局": "Remote UI layout",
+        "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+        "电脑": "Desktop",
+        "自动": "Auto",
+        "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+        "手机端回车=换行": "Enter no celular = nova linha",
+        "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "Só envia ao clicar em «Enviar»; Ctrl/Cmd+Enter continua enviando e a composição IME passa",
+        "浅色": "Claro",
+        "深色": "Escuro",
+        "跟随系统": "Seguir o sistema",
+        "10-22，0=出厂值": "10-22, 0 = padrão de fábrica",
+        "标准": "Padrão",
+        "完全展开": "Totalmente expandido",
+        "开启": "Ligado",
+        "关闭": "Desligado",
+        "启用手机端资源缓存": "Ativar cache de recursos no celular",
+        "新鲜期（分钟）": "Validade (minutos)",
+        "1-1440，默认 10": "1-1440, padrão 10",
+        "过期核对用首/尾片段指纹": "Verificar expiração por impressão do início/fim",
+        "接管 no-store 的大媒体": "Assumir mídias grandes com no-store",
+        "整段 Range 视为整份": "Tratar o Range inteiro como completo",
+        "当前页面没有 fetch": "Esta página não tem fetch",
+        "收起态图标栏": "Collapsed sidebar rail",
+        "保留图标栏（默认）": "Keep the icon rail (default)",
+        "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+        "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
+        "分栏": "Dividir",
+        "退出全屏": "Sair da tela cheia",
+        "左抽屉": "Gaveta esquerda",
+        "右栏": "Painel direito",
+        "打开侧边栏": "Abrir barra lateral",
+        "打开右侧边栏": "Abrir barra direita",
+        "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "O plugin do PC ainda não tem API de notificações (desde 1.3.1) → atualize e reinicie o DSH",
+        "通知接口需要重新解锁：刷新本页、再输一次访问密码": "A API de notificações exige desbloqueio: recarregue a página e digite o código de novo",
+        "电脑上关掉了「提问时通知手机」": "No PC, «Notificar o celular ao perguntar» está desativado",
+        "电脑上的插件已支持提问通知 ✓": "O plugin do PC suporta notificações de pergunta ✓",
+        "读不到电脑上的插件状态": "Não foi possível ler o estado do plugin do PC",
+        "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "A página local não usa este proxy de cache; aberto no celular, este grupo mostra o que se aplica lá",
+        "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "O plugin do PC ainda não tem API de cache (desde 1.3.8) → atualize e reinicie o DSH",
+        "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "A API de cache exige desbloqueio: recarregue a página e digite o código de novo",
+        "电脑上关掉了手机端缓存": "No PC, o cache do celular está desativado",
+        "读不到电脑上的缓存状态": "Não foi possível ler o estado do cache do PC",
+        "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Código inalterado: apenas 4 a 12 caracteres alfanuméricos (sem espaços ou símbolos).",
+        "没有改动。": "Sem alterações.",
+        "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Gravação recusada (a configuração mudou em outro lugar); clique em «Recarregar» e tente de novo.",
+        "[remote-access] 保存失败": "[remote-access] Falha ao salvar",
+        "本页无需套用": "Nada a aplicar nesta página",
+        "保存后，在远程页面打开时生效（本机界面不受影响）": "Após salvar, aplica-se ao abrir uma página remota (a interface local não muda)",
+        "开 · 已接管": "Ligado · assumido",
+        "生效策略": "Política aplicada",
+        "内容寻址产物": "Recursos endereçados por conteúdo",
+        "immutable（一年内不重取）": "immutable (não recarrega por um ano)",
+        "其它静态资源": "Outros recursos estáticos",
+        "过期核对": "Verificação de expiração",
+        "长度 + 类型": "Tamanho + tipo",
+        "首/尾各 64 KB 片段指纹": "Impressão de 64 KB no início e no fim",
+        "no-store 大媒体": "Mídias grandes no-store",
+        "尊重上游": "Respeitar a origem",
+        "整段 Range": "Range inteiro",
+        "原样透传 206": "Repassar 206 como está",
+        "正文落盘": "Corpo em disco",
+        "不落宿主盘（零字节）": "Nada no disco do host (0 bytes)",
+        "本次会话": "Esta sessão",
+        "304（零字节）": "304 (0 byte)",
+        "小资源缓冲": "Buffer de recursos pequenos",
+        "片段探针": "Sonda de fragmento",
+        "接管 no-store": "Assumir no-store",
+        "本轮流量账（按 URL 排字节）": "Tráfego desta rodada (bytes por URL)",
+        "送出 / 收到": "Enviado / recebido",
+        "送出": "Enviado",
+        "次数": "Vezes",
+        "读取中…": "Lendo…",
+        "刷新": "Atualizar",
+        "处理中…": "Processando…",
+        "清零本轮统计": "Zerar estatísticas",
+        "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Uso: toque em «Zerar estatísticas» → feche o App de vez (remova dos recentes) → abra de novo; ao voltar, aqui aparece o custo real daquela rodada.",
+        "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "O polling em tempo real (espectro de áudio) e o canal de sessão (RPC das imagens do chat) não entram no cache; números grandes são normais.",
+        "UI 设置": "Ajustes de UI",
+        "缓存": "Cache",
+        "保存": "Salvar",
+        "重新读取": "Recarregar",
+        "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(um por usuário do Windows; o plugin não lê nem grava o perfil compartilhado).",
+        "远程访问": "Acesso remoto",
+      },
     };
 
-    /** @param {string} source @returns {string} */
-    const t = (source) => (LANG === 'en' && Object.prototype.hasOwnProperty.call(EN, source) ? EN[source] : source);
+    /** 当前语言下的字典；zh 直接用键本身，所以没有自己的字典 */
+    const dictOf = (lang) => (lang === 'zh' ? null : DICTS[lang] ?? null);
+
+    /**
+     * 翻译一条设置页文案。`source` 是中文原文（也是字典的键）。
+     *
+     * 查不到就回落到中文原文，绝不会渲染成空白 —— 这样新增文案时不必同时补 8 份翻译。
+     * 语言由 `LANG` 决定，而 `LANG` 跟着 DSH 的界面语言走（见 bindLocale）。
+     * @param {string} source @returns {string}
+     */
+    const t = (source) => {
+      const dict = dictOf(LANG);
+      if (!dict) return source; // zh：键就是文案本身
+      return Object.prototype.hasOwnProperty.call(dict, source) ? dict[source] : source;
+    };
 
     // settings.section 的注册 id（与 bundle patch 的行 id 一致，便于排查）。
     const NS = 'remote-access-cidr';
@@ -169,13 +1042,17 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.5.0';
+    const CLIENT_VERSION = '1.6.0';
 
     // 表单字段（配置只存在本用户 JSON 里；Host 用 DEFAULTS 做同样的归一化）
-    const FIELDS = [
+    //
+    // 为什么是一个函数而不是常量：字段里的 label / section / hint 都是 t() 的结果，
+    // 而语言现在可以在运行期变化（见 bindLocale）。做成函数后，语言一变就重建一次，
+    // 下次渲染拿到的就是新语言；否则这一片永远是「模块加载时那种语言」。
+    function buildFields() {
+      return [
       // 分节（section）只是版式：让设置页读起来像一份配置清单，而不是一串控件。
       // 每一节标题下面是同类参数；`hint` 是字段下方那行小字（手机上比 placeholder 好读）。
-      { key: 'enabled', type: 'boolean', section: t('服务'), label: t('启用'), hint: t('关掉即停止监听，不需要卸载插件') },
       { key: 'port', type: 'number', section: t('服务'), label: t('端口'), placeholder: t('0=随机'), hint: t('固定下来才好存书签（默认 0 = 系统随机）') },
       { key: 'allowCidrs', type: 'list', section: t('服务'), label: t('允许的网段'), placeholder: t('换行分割'), hint: t('唯一的安全边界；listen=auto 时也用它挑本机要监听的地址') },
       { key: 'denyCidrs', type: 'list', section: t('服务'), label: t('排除的网段'), placeholder: t('换行分割'), hint: t('白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封') },
@@ -197,18 +1074,6 @@ window.__ModuleLoader__.load({
       { key: 'notifyOnChoice', type: 'boolean', section: t('手机通知'), label: t('提问时通知手机'), hint: t('模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知') },
       { key: 'notifyOnFinish', type: 'boolean', section: t('手机通知'), label: t('一轮结束时通知手机'), hint: t('正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）') },
       { key: 'notifyOnlyWhenWindowHidden', type: 'boolean', section: t('手机通知'), label: t('仅窗口不可见时通知'), hint: t('电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒') },
-      {
-        key: 'remoteLayout',
-        type: 'select',
-        section: t('远程界面'),
-        label: t('远程UI布局'),
-        options: [
-          { value: 'phone', label: t('手机（横竖屏自适应）') },
-          { value: 'desktop', label: t('电脑') },
-          { value: 'auto', label: t('自动') },
-        ],
-        hint: t('只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新'),
-      },
       // 手机端输入：回车当成换行，只有点「发送」才真的发出去。
       // 为什么单独给一个开关：有人用外接键盘、或就是习惯回车发送；默认按手机的习惯来。
       { key: 'phoneEnterNewline', type: 'boolean', section: t('远程界面'), label: t('手机端回车=换行'), hint: t('只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行') },
@@ -276,7 +1141,13 @@ window.__ModuleLoader__.load({
       // 媒体元素取大文件时会发 Range，而浏览器**永远不缓存 206** —— 于是每次进页面都重下整段。
       // 这一项把「从 0 取到结尾」那一种改写成可缓存的整份。默认关：个别播放器可能失去拖动定位。
       { key: 'cacheFullRange', type: 'boolean', group: 'cache', label: t('整段 Range 视为整份') },
-    ];
+      ];
+    }
+
+    /** 当前语言下的字段表。设置面板每次渲染都取一次，所以语言变了立刻就是新的。 */
+    let FIELDS = buildFields();
+    // 语言一变就重建字段表；之后面板重渲染（或下一次读 FIELDS）拿到的是新语言。
+    onLangChange(() => { FIELDS = buildFields(); });
 
     const DEFAULTS = {
       enabled: true,
@@ -288,6 +1159,9 @@ window.__ModuleLoader__.load({
       accessCode: '',
       remoteLayout: 'auto',
       phoneEnterNewline: true,
+      // phoneCollapsedRail 仍在配置里（老配置读得出来），但设置页已不再显示它 ——
+      // 手机档的收起态现在完全由官方布局决定，这一项不再驱动任何样式。
+      phoneCollapsedRail: 'show',
       // 通知这三个也要有出厂值：`decode` 读不到就退回这里，否则「宿主默认开着」会被显示成没开
       notifyOnChoice: true,
       notifyOnlyWhenWindowHidden: true,
@@ -447,7 +1321,18 @@ window.__ModuleLoader__.load({
     //   4. 没有 DOM 的环境（tools/test-client.mjs 的桩子）必须安静地什么都不做。
     const LAYOUT_PHONE_WIDTH = 720;
     const LAYOUT_STYLE_ID = 'dsh-remote-access/layout.css';
-    const SCRIM_ID = 'dsh-ra-scrim';
+
+/**
+ * 官方鲸鱼图标的路径数据（取自 @deepseek-ai/dsh-client-ui-primitives 的 FishLogo，
+ * viewBox 0 0 23.16 17.04，单条 path）。
+ *
+ * 为什么直接内嵌而不 require 那个包：它是构建期依赖，运行期已经被打进前端 bundle，
+ * 本插件（Host/Client 两个面都只有自己的 js）拿不到那个模块。
+ * 所以把官方的原始路径抄进来 —— 形状与官方完全一致，只是不再依赖它。
+ */
+const FISH_LOGO_PATH = 'M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z';
+const FISH_LOGO_VIEWBOX = '0 0 23.16 17.04';
+
     /**
      * 输入法刚结束后的这段窗口里，回车仍然可能是在「确认候选词」—— 这段时间内不插手。
      * 与官方自己的做法同一口径（它用 10ms），这里放宽一点：多吞一个换行没代价，多吃一个候选词确认很恼人。
@@ -459,95 +1344,35 @@ window.__ModuleLoader__.load({
      * 拿不到这个属性、也就永远匹配不上任何一条规则（这就是「不动本地」的实现方式）。
      */
     const PHONE_CSS = `
-/* 手机上「展开后的工作区抽屉」必须不透明。
-   透明来自壁纸引擎的「侧栏液态玻璃」——它自己的旋钮是 --we-sidebar-tint / --we-sidebar-alpha
-   （设置项：侧栏玻璃颜色权重 / 侧栏透明度），面板底色由
-   color-mix(… var(--we-sidebar-color) var(--we-sidebar-tint, 20%), transparent …) 算出来。
-   而手机上展开的抽屉整块盖在正文上，半透明会让两层文字糊在一起。
-   这里只在本页把这两个变量拉满：**只作用于手机档，本机一个像素都不动**，也不去覆盖元素表面
-   （之前那条 background !important 覆盖 DSH 玻璃表面，会让左侧栏整列不再绘制，已删）。 */
-html[data-ra-layout="phone"] {
-  --we-sidebar-tint: 100%;
-  --we-sidebar-alpha: 1;
-}
-html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { /*strong*/ display: none !important; }
-html[data-ra-layout="phone"] [data-ra-center],
-html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
+/* 手机档样式：布局一律交给 @deepseek-ai/dsh-client-ui-layout（0.2.2）。
+   < 768px 时官方自己就是「无轨道 + 模态抽屉 + 右栏全屏浮层」，列宽由它按内联 style 算。
+   这里只补官方没做的：安全区、设置页手机排版、输入区。
+   **不要**再写 grid-template-columns / grid-column / position:fixed 改侧栏 / 自建遮罩 —— 都踩过坑。 */
 
-/* 关键：手机布局下**关掉框架自己的列宽过渡**。
-   框架带着 .BynINW_frame[data-animating] 上的 transition: grid-template-columns …，而 grid-template-columns
-   是可动画的布局属性；我用 !important 改写轨道值（48px / 0px）时又挂着这条过渡，真机上出现过
-   「DOM 与计算值都对、画面却不重绘，直到手动拖一下宽度才刷新」的卡顿 —— 关掉它就没有这个组合了。
-   反正手机端的轨道值由我定，过渡本身也没有意义。 */
-html[data-ra-layout="phone"] [data-ra-frame] { transition: none !important; }
-
-/* 侧栏：收起时保持 56px 图标栏；展开时改成「抽屉」压在正文上 —— 而不是把正文挤成 110px 一条 */
-/* 三列显式钉住列号：抽屉模式把侧栏改成 position:fixed 后就脱离网格了，
-   自动排位会把「正文」顶到第 1 条轨道（0px）上，正文会直接消失。 */
-html[data-ra-layout="phone"] [data-ra-sidebar] { grid-column: 1 !important; /*strong*/ }
-html[data-ra-layout="phone"] [data-ra-center] { grid-column: 2 !important; /*strong*/ }
-html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; /*strong*/ }
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; /*strong*/ }
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
-  /*strong*/
-  position: absolute !important;
-  top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
-  /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 340px（约 88vw）但右边仍留出可见的正文。
-     这里刻意用普通 px 而不是 min(88vw, 340px)：真机上抽屉这一层只要带上「大模糊阴影 + min() 宽度 + 独立层叠」
-     的组合，整块视图就会停止呈现（DOM 全对、画面不更新，拖一下视图宽度才恢复）——
-     已用声明级开关逐条验证：单独去掉 box-shadow / 宽度里的 min() / z-index 任一条都能恢复。
-     所以这一层保持「便宜」：普通宽度 + 1px 描边，不要大模糊阴影。 */
-  width: 340px !important;
-  z-index: 70 !important;
-  border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3)) !important;
+/* 抽屉描边与安全区。开合、遮罩、焦点、Esc 全由官方管，这里只改观感。
+   宽度保持官方的 280px（列与内层都是这个值，单改一边会留空白）。 */
+html[data-ra-layout="phone"] [data-ra-frame][data-sidebar-drawer] [data-ra-sidebar] {
+  border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3));
   padding-left: env(safe-area-inset-left, 0px) !important;
-  /* 抽屉里滑到底不要带动后面的正文一起滚 */
   overscroll-behavior: contain;
 }
 
-/* 右栏：DSH 自己在 viewportWidth < 768 时就选了 autoFullscreen（无轨道 + 全屏浮层），
-   所以这里不去抢它的布局，只做收尾 —— 安全区、不横向溢出、以及把手机上没意义的控件藏掉。 */
-html[data-ra-layout="phone"] [data-ra-right] {
-  /* 抬到正文之上：底部统计、输入框、对话/轨迹页签各自都有层叠上下文，
-     不抬的话它们会画在右栏这个浮层上面（真机截图里就是「这一页冒出了输入框和底部 info」）。 */
-  position: relative !important; /*strong*/
-  z-index: 64 !important; /*strong*/
-}
+/* 右栏：官方在 < 768px 用 autoFullscreen。别写 width / max-width / inset ——
+   那组会参与全屏浮层的宽度计算，一叠 !important 就可能压成 0 宽。 */
 html[data-ra-layout="phone"] [data-sidebar-right-panel] {
-  /*strong*/
-  /* 这一组（max-width / overflow-x / 安全区内边距 / overscroll）会参与右栏全屏浮层的宽度计算：
-     框架自己的全屏做法是 inline width:0 + left/right 负值 + width:auto，我这些 !important 一叠上去
-     就可能把它压成 0 宽 —— 正文空白、只看得见输入框与底栏。保守档里先完全不动右栏。 */
-  max-width: 100vw !important;
   overflow-x: hidden !important;
   padding-left: env(safe-area-inset-left, 0px) !important;
   padding-right: env(safe-area-inset-right, 0px) !important;
   padding-bottom: env(safe-area-inset-bottom, 0px) !important;
   overscroll-behavior: contain;
 }
-/* 单独一条：只把「抬到正文之上」这件事放进增强模式，实底那条留在保守模式 */
-html[data-ra-layout="phone"] [data-sidebar-right-panel] { z-index: 65 !important; /*strong*/ }
+html[data-ra-layout="phone"] [data-ra-center],
+html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
 
-/* 这里曾经给这两个浮层加「不透明实底 + 强雾化」来治「太透」。
-   **已删除**：真机上复现到，这条 background（!important 覆盖 DSH 的玻璃表面）会让左侧栏整条不再绘制 ——
-   DOM 里它在（0,0 56x950），像素没有；只要摘掉这一条就恢复。排查协议：清本地标记 → 重载（弹窗出现）→
-   点掉弹窗 → 截图；摘别的规则都不解决，只有摘这条解决。
-   观感那件事现在不再由我插手：不碰壁纸引擎的任何外观开关 —— 原先我强行打开它的「侧栏液态玻璃」正是「左侧透明」的来源，
-   壁纸插件不在时就用 DSH 的默认表面 —— 宁可少一点好看，也不能让页面画不出来。 */
-
-/* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
-html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
-  grid-template-columns: 48px minmax(0px, 1fr) 0px !important;
-}
-/* 「分栏」在 390px 上没有意义，「退出全屏」更是不可能（宽度决定它必须全屏）。
-   由脚本按 aria-label 精确打上这个标记再隐藏，避免拿类名去猜。 */
+/* 列宽拖拽手柄在手机上没意义，还会和滑动手势打架 */
+html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { display: none !important; }
+/* 「分栏」「退出全屏」在 390px 上没有意义，由脚本按 aria-label 打标记再隐藏 */
 html[data-ra-layout="phone"] [data-ra-phone-hidden] { display: none !important; }
-
-#dsh-ra-scrim { display: none; }
-html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] { /*strong*/
-  display: block; position: absolute; inset: 0; z-index: 60;
-  background: rgba(0,0,0,0.42); -webkit-tap-highlight-color: transparent;
-}
 
 /* 设置面板：手机上是「上下两段」。左右两栏时右侧内容只剩一百来像素，中文会一个字一行 */
 html[data-ra-layout="phone"] [data-ra-settings-panel] {
@@ -594,34 +1419,50 @@ html[data-ra-layout="phone"] [data-ra-settings-content] input,
 html[data-ra-layout="phone"] [data-ra-settings-content] textarea,
 html[data-ra-layout="phone"] [data-ra-settings-content] select { font-size: 16px !important; }
 
-/* 输入区：工具条允许换行，别把模型名截成「DeepSeek-V4…」 */
+/* 正文左右留白：左右各 28px。
+   官方的滚动区是：padding: 16px calc(var(--dsh-composer-side-clearance) + 16px)
+   —— 左右各 = clearance + 16px。默认 clearance=16 就是两侧各 32px，手机上偏宽。
+   这里把 clearance 定成 12px，两侧各 28px，正文宽度 334px。
+   注意这个变量同时影响输入框宽度，所以改它时输入框也会跟着变 —— 这是预期的。 */
+html[data-ra-layout="phone"] [data-ra-center] [class*="_scroll"] {
+  --dsh-composer-side-clearance: 12px !important;
+}
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"] {
   padding-left: 10px !important; padding-right: 10px !important;
 }
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_row"] {
   flex-wrap: wrap !important; row-gap: 6px !important;
 }
+/* 与电脑版一致的分组：_tools（加号 + 权限）靠左，_trailing（积分 + 模型 + 发送）靠右。
+   官方本来就是 space-between，但 _trailing 是 flex:1 1 auto 且内部默认 flex-start，
+   内容会挤在这一段的左边 —— 看起来就像「四个都靠左」。
+   让 _trailing 内部 space-between，并把中间那些「弹性」元素推到右边。 */
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_trailing"] {
   flex: 1 1 auto !important; min-width: 0 !important;
+  justify-content: space-between !important;
+}
+/* 右组内部：模型选择器与发送按钮之间留空，让它们贴着右边 */
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_standardControls"] {
+  display: flex !important;
+  justify-content: flex-end !important;
+  margin-left: auto !important;
+}
+
+/* 输入框字号：手机上 14px 偏大（占宽、行高 24px 又显得松）。
+   官方自己的规则是 font-size: max(16px, var(--dsh-content-font-size, 14px))，
+   但那个 max() 在本页被 --dsh-content-font-size=14px 直接顶掉了，实际渲染就是 14px。
+   这里明确降到 15px，并把行高收紧，让一行能放更多字。 */
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"],
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [data-composer-input] {
+  font-size: 15px !important;
+}
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [data-composer-input] {
+  line-height: 21px !important;
 }
 
 @media (orientation: landscape) and (max-height: 520px) {
   /* 横屏手机里垂直方向更金贵：导航那条压薄一点 */
   html[data-ra-layout="phone"] [data-ra-settings-nav] { padding: 6px 12px 4px !important; }
-}
-
-/* 抽屉的实底：**不覆盖 DSH 的表面元素**（那条 background !important 覆盖表面会让左侧栏整列不再绘制，
-   已在 d92a572 删除并验证），改为在抽屉背后垫一层自己的底色 —— 伪元素 + z-index:-1，
-   正好夹在父层背景与内容之间。这样即使内层面板仍带着壁纸引擎调出来的半透明底色，合成结果也不透明。
-   只在手机档的抽屉上生效、且只在壁纸激活时（透明正是那时才发生）；本机与电脑档不注入。 */
-html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-sidebar]::before {
-  content: "" !important;
-  position: absolute !important;
-  inset: 0 !important;
-  z-index: -1 !important;
-  /* 用壁纸引擎自己的「可读性底色」：那是当前主题下真正不透明的表面色（实测 #151849）。
-     绝不能用 --dsw-alias-bg-base —— 它被壁纸插件改成了 transparent，垫了等于没垫（已实测）。 */
-  background: var(--we-readability-base, #151517) !important; /*strong*/
 }
 `;
 
@@ -657,6 +1498,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       let raScheduled = false;
       /** 「手机端回车=换行」的开头（配置里读；默认开） */
       let enterNewline = true;
+      /** 收起态侧栏形态：'show'（48px 图标栏，现状）| 'hide'（0 宽 + 左上角悬浮官方按钮） */
+      let railMode = 'show';
 
       const matches = (query) => {
         try {
@@ -830,16 +1673,48 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
        * 这是整个手机布局与 DSH 交互的**唯一**方式：手势也好、遮罩也好，都只是替用户去点它自己
        * 那个按钮，而不是我们去改它的 store / 布局状态。好处是行为永远与「用户自己点」一致，
        * 也不会因为猜错内部状态而让界面进入自相矛盾的形态。
+       *
+       * **两种语言都试**：官方的 aria-label 会跟着界面语言变，而我们的 `LANG` 是从
+       * `<html lang>` 推断的 —— 一旦两者哪怕短暂地对不上（模块加载早于 locale 同步就是这种情况），
+       * 只按当前语言去找就会**一个都点不到**。历史上这直接把抽屉卡在展开态：遮罩盖住整页，
+       * 手势与返回键全部失效。所以这里对同一个语义把所有已知说法都试一遍，
+       * 命中哪个用哪个 —— 点到的仍然是官方自己的按钮，行为语义不变。
        */
-      function clickLabel(label) {
-        const candidates = [...document.querySelectorAll('button')].filter(
-          (b) => (b.getAttribute('aria-label') ?? '') === label,
-        );
-        const btn = candidates.find(isClickable);
-        if (!btn) return false;
-        btn.click();
-        return true;
+      /**
+       * 官方布局服务（`ctx.layout`）—— **只当可选加速**，不是唯一路径。
+       *
+       * 坑：本插件的 client 声明的是 `inject: ['slots', 'remote']`，**没有 layout**。
+       * Cordis 里 `ctx.get('layout')` 只能取到已注入的服务，没声明就大概率是 undefined，
+       * 于是「手势里 if (!layout) return」会静默什么都不做 —— 真机上就是「滑了没反应」。
+       * 所以下面所有动作都优先点**官方按钮**（稳定 data 属性、不认语言、不依赖 inject），
+       * 拿得到服务时才用它兜底。
+       */
+      const layoutApi = () => {
+        try { return ctx.get?.('layout') ?? null; } catch { return null; }
+      };
+
+      /** 按稳定的 data 属性点官方按钮（不认语言、不依赖 inject） */
+      function clickStable(attr) {
+        const btn = document.querySelector(`[${attr}]`);
+        if (btn && isClickable(btn)) { btn.click(); return true; }
+        return false;
       }
+
+      /**
+       * 左抽屉是不是开着 —— 读**官方**属性。
+       *
+       * 两个入口都要认：`[data-ra-frame]` 是我们自己在 syncDom() 里打上的标记，
+       * 而 `[class*="_frame"]` 是官方原生的类名。只认前者时，一旦 syncDom 还没跑
+       * 或标记被清掉，抽屉明明开着也会被判成「没开」—— 真机现象就是
+       * 「在抽屉里左滑，抽屉没收起来，反而弹出了右侧面板」。
+       */
+      const drawerOpen = () => {
+        const frame = document.querySelector('[data-ra-frame]') || document.querySelector('[class*="_frame"]');
+        if (!frame) return false;
+        // 官方：< 768px 且侧栏未收起时，抽屉是模态展开的
+        // （frame 带 data-sidebar-drawer，收起时同时带 data-sidebar-collapsed）
+        return frame.hasAttribute('data-sidebar-drawer') && !frame.hasAttribute('data-sidebar-collapsed');
+      };
 
       /** 屏幕上那个正在显示的右栏面板（排除 dock 留在 DOM 里的隐藏副本） */
       const visibleRightPanel = () =>
@@ -848,23 +1723,15 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       /** 右侧栏是不是正以可见形态开着（手机上它是「无轨道 + 全屏浮层」） */
       const rightPanelOpen = () => visibleRightPanel() !== null;
 
-      /** 抽屉遮罩：点它等于点「收起侧边栏」，行为与用户自己收起完全一致（不自己改状态） */
-      function ensureScrim() {
-        let scrim = document.getElementById(SCRIM_ID);
-        if (scrim) return scrim;
-        scrim = document.createElement('div');
-        scrim.id = SCRIM_ID;
-        scrim.addEventListener('click', () => { clickLabel(t('收起侧边栏')); });
-        document.body.appendChild(scrim);
-        return scrim;
-      }
-
       /**
        * 手机上没意义的右栏控件：「分栏」在 390px 上分不出两栏，「退出全屏」更是不可能
        * （宽度决定它必须全屏，点了也只会留一个空轨道）。按 aria-label 精确隐藏，
        * 不碰别的按钮 —— 尤其是「收起右侧边栏」，那是手机上唯一该留的出口。
+       *
+       * 这里仍然按文案匹配，但**只用于隐藏**、不用于「找出口」。匹配不到只是少藏一个按钮，
+       * 不会像 1.5.0 那样把整个抽屉卡死，所以中英文都列上就够了。
        */
-      const PHONE_HIDDEN_LABELS = [t('分栏'), t('退出全屏'), 'Split', 'Exit fullscreen'];
+      const PHONE_HIDDEN_LABELS = [t('分栏'), t('退出全屏'), 'Split view', 'Split', 'Exit fullscreen'];
       function hideUselessRightControls() {
         const panel = document.querySelector('[data-sidebar-right-panel]');
         if (!panel) return;
@@ -874,24 +1741,53 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         }
       }
 
+      /**
+       * 把左上角那枚展开按钮的图标换成**官方鲸鱼**（Issue #6 的要求）。
+       *
+       * 官方给的是 `dsw-icon-panel-left-outline-regular`（一个线条面板图标），
+       * 这里把按钮内部的 <svg> 整个换成鲸鱼路径。
+       * **只换图标、不碰按钮**：按钮的 data-sidebar-opener / aria-label / onClick 全保留，
+       * 所以点它仍然是官方那条「展开侧栏」的路，行为一点不变。
+       *
+       * 幂等：已经换过（带 data-ra-fish 标记）就跳过，避免每次 syncDom 重建 DOM。
+       */
+      function applyFishIcon() {
+        const btn = document.querySelector('[data-sidebar-opener]');
+        if (!btn) return;
+        const existing = btn.querySelector('svg[data-ra-fish]');
+        if (existing) return; // 已经换过
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', FISH_LOGO_VIEWBOX);
+        svg.setAttribute('width', '18');
+        svg.setAttribute('height', '18');
+        svg.setAttribute('aria-hidden', 'true');
+        svg.setAttribute('data-ra-fish', '');
+        svg.style.display = 'block';
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', FISH_LOGO_PATH);
+        path.setAttribute('fill', 'currentColor');
+        svg.appendChild(path);
+        // 换掉原来的图标（官方那个是 <svg><use …></svg>）
+        const old = btn.querySelector('svg');
+        if (old) old.replaceWith(svg);
+        else btn.appendChild(svg);
+      }
+
       // 两个浮层的「谁后开」时间戳：手机上它俩都是覆盖整屏的，同时开着只会互相盖。
       // 后开的那个留下，先开的那个替用户收掉（收的方式仍然是点它自己的收起按钮）。
       let drawerOpenedAt = 0;
       let rightOpenedAt = 0;
       let mutualBusy = false;
 
-      /** 手机上两个浮层互斥：谁后开谁留下 */
+      /** 手机上两个浮层互斥：谁后开谁留下。收的方式点官方按钮，不认语言、不依赖 inject。 */
       function enforceOverlayExclusive(drawer) {
         if (mutualBusy) return;
         const rightOpen = rightPanelOpen();
         if (!drawer || !rightOpen) return;
-        const closeDrawer = drawerOpenedAt < rightOpenedAt;
+        const closeDrawerFirst = drawerOpenedAt < rightOpenedAt;
         mutualBusy = true;
-        const ok = closeDrawer ? clickLabel(t('收起侧边栏')) : clickLabel(t('收起右侧边栏'));
-        if (ok) {
-          const what = closeDrawer ? t('左抽屉') : t('右栏');
-          try { console.info((LANG === 'en' ? `[remote-access] Only one overlay at a time on the phone: closing the ${what} that opened first` : `[remote-access] 手机上两个浮层互斥：收掉先开的${what}`)); } catch { /* 忽略 */ }
-        }
+        if (closeDrawerFirst) closeDrawer();
+        else closeRightbar();
         window.setTimeout(() => { mutualBusy = false; }, 300);
       }
 
@@ -916,27 +1812,21 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         } catch { /* 忽略：这只是兜底，失败也不该影响布局 */ }
       }
 
-      /** 把「画成什么样」这件事交给 CSS：这里只负责打标记与开关 data-ra-drawer */
+      /**
+       * 把「画成什么样」这件事交给 CSS：这里只负责给官方元素打标记。
+       *
+       * **抽屉状态不再由我们维护**：官方自己用 frame 上的 data-sidebar-drawer /
+       * data-sidebar-collapsed 表达开合，遮罩也是它自己画的。我们原先那套
+       * 「data-ra-drawer + 自建 #dsh-ra-scrim」已全部删除 —— 自建遮罩会吃掉手势，
+       * 而且它只会去点左侧栏的收起按钮，右栏开着时向右滑就收不起来（真机 bug 之一）。
+       */
       function syncDom() {
         if (stopped) return;
         const phone = document.documentElement.getAttribute('data-ra-layout') === 'phone';
-        if (!phone) {
-          document.documentElement.removeAttribute('data-ra-drawer');
-          // 退出手机布局时把借来的玻璃属性还回去，别把本机的原生侧栏观感改了
-          try { /* 不再碰这个属性，见下方说明 */ } catch { /* 忽略 */ }
-          const scrimOff = document.getElementById(SCRIM_ID);
-          if (scrimOff) scrimOff.removeAttribute('data-open');
-          return;
-        }
-        // 「左侧栏覆盖」是壁纸引擎自己的开关：它做的就是给 body 挂这个属性，让原生侧栏跟着玻璃配方走
-        // （不那么透出壁纸）。手机端直接借用它 —— 只打在**远程页面**上，所以本机观感不受影响；
-        // 没装壁纸插件时这行什么也不做，上面 CSS 里那份实底兜底仍然生效。
-        // 手机上把壁纸引擎的「侧栏液态玻璃」总开关**摘掉**（只摘属性、不动任何元素样式）。
-        // 那个开关的语义是「开了才透明」（插件 settings-schema 原话：关闭后侧栏恢复原生外观，不透明/不模糊），
-        // 而展开后的工作区抽屉在手机上整块盖在正文上，透明会让两层文字糊在一起。
-        // 为什么不用 background 兜底：给 [data-ra-sidebar] 加 !important 实底正是「左侧栏整条不绘制」的原因（已删）。
-        // 本机不受影响 —— 这段只在远程页面跑；插件若在别处又设回来，syncDom 下一次会再摘掉。
-        try { document.body.removeAttribute('data-we-sidebar-glass'); } catch { /* 忽略 */ }
+        if (!phone) return;
+        // **不再摘壁纸引擎的 data-we-sidebar-glass**：那是 1.5.0 为了让自建抽屉不透明才做的，
+        // 会干扰壁纸引擎自身的状态机（真机上表现为整页被铺成主题色、壁纸消失）。
+        // 现在抽屉交给官方，观感交给壁纸引擎，这里一个属性都不碰。
         const frame = document.querySelector('[data-slot="root"] > *');
         if (!frame) return;
         frame.setAttribute('data-ra-frame', '');
@@ -949,13 +1839,13 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const column = columnOf(frame, slot);
           if (column) column.setAttribute(`data-ra-${attr}`, '');
         }
-        // 这两项一度被我停用（当时误判它们是「整页不绘制」的元凶）。真正的原因是那条 background 实底（已删除），
-        // 而且 tagSettings() 已经收紧（先清旧标记 + 只允许在 shell.overlay 内查找、不许爬进 frame），
-        // 所以恢复：设置页在手机上是上下两段可滚动；右栏那两个没意义的控件（分栏 / 退出全屏）在手机上藏掉。
+        // 设置页在手机上是上下两段可滚动；右栏那两个没意义的控件（分栏 / 退出全屏）在手机上藏掉。
         tagSettings();
         hideUselessRightControls();
-        // 侧栏展开（没有 data-sidebar-collapsed）→ 抽屉模式：正文占满宽度，侧栏浮在上面
-        const drawer = !frame.hasAttribute('data-sidebar-collapsed');
+        // 左上角图标换成官方鲸鱼（只换图标，按钮本身不动）
+        applyFishIcon();
+        // 抽屉开合只用于「两个整屏浮层互斥」的计时，状态本身读官方的属性
+        const drawer = drawerOpen();
         const drawerChanged = drawer !== wasDrawer;
         if (drawerChanged) {
           wasDrawer = drawer;
@@ -967,21 +1857,14 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           wasRightOpen = rightOpen;
           rightOpenedAt = rightOpen ? Date.now() : 0;
         }
-        if (drawer) document.documentElement.setAttribute('data-ra-drawer', '');
-        else document.documentElement.removeAttribute('data-ra-drawer');
-        const scrim = ensureScrim();
-        if (drawer) scrim.setAttribute('data-open', '');
-        else scrim.removeAttribute('data-open');
-        // 互斥只在增强模式有意义：那时侧栏是「脱离网格的定浮层」，会和右栏抢同一块屏；
-        // 保守模式下侧栏老老实实占着自己那一列，不该去替用户点关任何面板。
-        if (document.documentElement.hasAttribute('data-ra-strong')) enforceOverlayExclusive(drawer);
-        // 抽屉/右栏状态变化时也踢一次：这两个整屏浮层的出现/消失最容易留下旧帧
+        // 两个浮层互斥：手机上它们都盖满整屏，同时开着只会互相盖。走官方 layout 服务收掉先开的那个。
+        if (drawer && rightOpen) enforceOverlayExclusive(drawer);
+        // 抽屉/右栏状态变化时踢一次重绘：这两个整屏浮层的出现/消失最容易留下旧帧
         if (drawerChanged || rightChanged) nudgeRepaint();
       }
       let wasDrawer = false;
       let wasRightOpen = false;
 
-      /** DOM 变动很密（聊天流式输出），所以合并到 200ms 一次，且只在手机布局下干活 */
       function scheduleSync() {
         if (stopped || raScheduled) return;
         if (document.documentElement.getAttribute('data-ra-layout') !== 'phone') return;
@@ -1029,6 +1912,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         mode = ['auto', 'phone', 'desktop'].includes(next) ? next : 'auto';
         // 「手机端回车=换行」与布局一起读：这一项是输入体验的开关，默认开
         enterNewline = value.phoneEnterNewline !== false;
+        // 收起态侧栏形态：只认 'hide'，其余（含没写）一律 'show' = 1.5.0 现状
+        railMode = String(value.phoneCollapsedRail ?? 'show') === 'hide' ? 'hide' : 'show';
         applyLayout();
       }
 
@@ -1290,10 +2175,13 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
 
       function onTouchStart(e) {
         if (!phoneNow() || e.touches.length !== 1) { swipe = null; return; }
-        // 抽屉开着时，整层都是我们自己的侧栏列表（工作区/会话那一串）：不再问「这一划归谁」——
-        // 否则列表里任何一个横向略有溢出的容器都会把「滑回主页」整个吃掉（真机上就是这么发生的）。
-        const drawerOpen = document.documentElement.hasAttribute('data-ra-drawer');
-        if (!drawerOpen && horizontalOwner(e.target)) { swipe = null; return; }
+        // 右栏展开时它盖满整屏，**这时一律不判归属**。
+        // 理由：右栏里全是横向可滚的容器（代码块、表格、页签），按祖先链判归属时连它自己的
+        // 空白处都会命中 —— 真机现象就是「必须正好按在某个组件上才能滑，滑空白处完全没反应」。
+        // 右栏开着时用户想做的就是「向右滑收起它」，所以不设归属判断。
+        // 抽屉同理：整层都是侧栏列表，不再问「这一划归谁」。
+        const overlayOpen = rightPanelOpen() || drawerOpen();
+        if (!overlayOpen && horizontalOwner(e.target)) { swipe = null; return; }
         const point = e.touches[0];
         const width = window.innerWidth || 0;
         swipe = {
@@ -1321,6 +2209,15 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         if (e.cancelable) e.preventDefault(); // 已确认横向：别让浏览器同时翻页/前进后退
       }
 
+      /**
+       * 手势落点。**优先点官方按钮**（稳定 data 属性、不认语言、不依赖 inject），
+       * 拿得到 layout 服务时才用它兜底。
+       *
+       * 1.5.0 那套 `clickLabel('收起右侧边栏')` 有两个真机 bug，这次一并修掉：
+       *   · 右栏展开时在空白处向右滑收不起来 —— 英文界面下找不到中文 aria-label 的按钮，
+       *     静默失败；而且当时页面上还盖着自建遮罩，手势根本到不了这里。
+       *   · 正文里有横向滚动块时误触发 —— 由 `horizontalOwner()` 在 onTouchStart 挡掉。
+       */
       function onTouchEnd(e) {
         const started = swipe;
         swipe = null;
@@ -1331,18 +2228,69 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         const fromEdge = started.fromLeft || started.fromRight;
         const need = fromEdge ? MIN_SWIPE : MIN_SWIPE_MID;
         if (Math.abs(dx) < need) return;
-        const drawer = document.documentElement.hasAttribute('data-ra-drawer');
+        const drawer = drawerOpen();
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
-          // 向右滑：抽屉开着时先**收起抽屉**（这就是「回到主页」），其次收右栏，最后才是打开抽屉
-          if (drawer) { clickLabel(t('收起侧边栏')); return; }
-          if (rightOpen) { clickLabel(t('收起右侧边栏')); return; }
-          clickLabel(t('打开侧边栏'));
+          // 向右滑：抽屉开着 → 收抽屉（这就是「回到主页」）；否则右栏开着 → 收右栏；最后才是开抽屉
+          if (drawer) { closeDrawer(); return; }
+          if (rightOpen) { closeRightbar(); return; }
+          openDrawer();
           return;
         }
-        // 向左滑：收起抽屉优先，否则打开右栏
-        if (drawer) { clickLabel(t('收起侧边栏')); return; }
-        if (!rightOpen) clickLabel(t('打开右侧边栏'));
+        // 向左滑：抽屉开着 → 只收抽屉并**到此为止**。
+        // 这里必须无条件 return：早先写的是 closeDrawer() 之后还往下走，
+        // 而 closeDrawer() 找不到那枚按钮时会返回 false，于是继续执行到
+        // openRightbar() —— 真机现象就是「抽屉里左滑，反而弹出右侧面板」。
+        if (drawer) { closeDrawer(); return; }
+        if (!rightOpen) openRightbar();
+      }
+
+      /** 打开左抽屉：点官方那枚展开按钮 */
+      function openDrawer() {
+        if (clickStable('data-sidebar-opener')) return true;
+        if (clickStable('data-sidebar-toggle')) return true;
+        try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
+      }
+
+      /**
+       * 收起左抽屉。
+       *
+       * 优先点官方那枚 toggle；**点不到时直接动官方状态**。
+       * 为什么不能只靠点按钮：抽屉展开时整层盖在正文上，侧栏里那枚 toggle 有时会被
+       * 官方自己的遮罩/aria-hidden 挡住，`isClickable()` 判不过 → 按钮点不了 → 抽屉收不起来。
+       * 真机上就是「抽屉里左滑，抽屉没收起来，反而弹出右侧面板」。
+       * 所以按钮这条路失败后必须再用 `layout.toggleSidebar()` 兜一次 —— 它在抽屉展开时
+       * 的语义正是「收起」。
+       */
+      function closeDrawer() {
+        if (clickStable('data-sidebar-toggle')) return true;
+        try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
+      }
+
+      /**
+       * 打开右栏。官方的 `openRightbar(track, fullscreen)` 是**右栏占用方**上报用的，
+       * 不是「用户点了展开」的入口。手机上真正该做的是点它自己那枚展开按钮 ——
+       * 那是官方在 < 1024px 提供的唯一入口，内部会算好 track/fullscreen 再调 openRightbar。
+       * 这枚按钮有稳定属性 `data-sidebar-right-expand`，不认语言。
+       */
+      function openRightbar() {
+        return clickStable('data-sidebar-right-expand');
+      }
+
+      /**
+       * 收起右栏。**必须点官方那枚 toggle，不能直接调 layout.closeRightbar()。**
+       *
+       * 原因（看官方源码就知道）：`layout.closeRightbar()` 只是把 store 里的
+       * `rightbarShown` 置 false，那是「右栏占用方上报状态」的方向；真正把面板收起来
+       * 是 ui-sidebar-right 自己监听状态后做的。我们单方面改状态，面板不一定跟着收 ——
+       * 真机上表现为「右滑/返回键都没反应」。
+       * 那枚收起按钮带稳定属性 `data-sidebar-right-toggle`，不认语言。
+       */
+      function closeRightbar() {
+        const btn = document.querySelector('[data-sidebar-right-toggle]');
+        if (btn && isClickable(btn)) { btn.click(); return true; }
+        // 兜底：按钮找不到（面板结构变了）时才动服务，至少别让返回键完全失效
+        try { layoutApi()?.closeRightbar(); return true; } catch { return false; }
       }
 
       try {
@@ -1406,7 +2354,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
        */
       function onDocumentClick(event) {
         if (stopped || !phoneNow()) return;
-        if (!document.documentElement.hasAttribute('data-ra-drawer')) return;
+        if (!drawerOpen()) return;
         const target = event?.target;
         if (!target || typeof target.closest !== 'function') return;
         const row = target.closest('[data-row-key]');
@@ -1417,7 +2365,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         // 用户点个菜单不会连抽屉一起收掉、会话也切过去。
         if (target.closest('button')) return;
         guardComposerFocus();
-        clickLabel(t('收起侧边栏'));
+        closeDrawer();
       }
 
       try {
@@ -1482,7 +2430,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         let count = 0;
         if (topOfficialOverlay()) count += 1;
         if (rightPanelOpen()) count += 1;
-        if (document.documentElement.hasAttribute('data-ra-drawer')) count += 1;
+        if (drawerOpen()) count += 1;
         if (activeGlobalPanel()) count += 1;
         return count;
       }
@@ -1506,8 +2454,9 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             return false;
           }
         }
-        if (rightPanelOpen()) return clickLabel(t('收起右侧边栏'));
-        if (document.documentElement.hasAttribute('data-ra-drawer')) return clickLabel(t('收起侧边栏'));
+        // 右栏与抽屉都点官方自己的按钮：不认语言、不依赖 inject
+        if (rightPanelOpen()) return closeRightbar();
+        if (drawerOpen()) return closeDrawer();
         if (activeGlobalPanel()) return backToConversation();
         return false;
       }
@@ -1616,6 +2565,71 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         stopped = true;
         try { if (timer !== null) window.clearInterval(timer); } catch { /* 忽略 */ }
         try { document.removeEventListener('visibilitychange', onVisibility); } catch { /* 忽略 */ }
+      };
+    }
+
+    // ---------------------------------------------------------------- 自定义 CSS（只在远程页面生效）
+    //
+    // `$DSH_HOME/remote-access-custom.css`：给「只在手机上生效」的样式微调留一个入口，
+    // 用户自己改文件、刷新一次就生效，不用来提需求、也不用动这里。
+    //
+    // 三条约束：
+    //   1. 只注入远程页面 —— 本机（回环）页面根本不发这个请求，一个像素都不动；
+    //   2. 拿不到 / 文件不存在都安静跳过（绝大多数用户不会建这个文件）；
+    //   3. 内容只进 <style>，不做任何求值；端点回的是 JSON，不是 text/css。
+    const CUSTOM_CSS_ENDPOINT = '/__remote_access__/custom.css';
+    const CUSTOM_CSS_TAG_ID = 'dsh-remote-access/custom.css';
+
+    function startCustomCssController(ctx) {
+      const noop = () => {};
+      let remote = false;
+      try { remote = ctx?.remote?.$host?.isLoopback === false; } catch { remote = false; }
+      if (!remote) return noop;
+      // 没有 DOM 的环境（tools/test-client.mjs 的桩子、SSR）必须安静地什么都不做
+      if (typeof document === 'undefined' || !document.head) return noop;
+      if (typeof window.fetch !== 'function') return noop;
+
+      let stopped = false;
+      let loaded = false;
+
+      const apply = (css) => {
+        let tag = document.querySelector(`style[data-ra-custom-css="${CUSTOM_CSS_TAG_ID}"]`);
+        if (css === '') {
+          if (tag) tag.remove();
+          return;
+        }
+        if (!tag) {
+          tag = document.createElement('style');
+          tag.dataset.raCustomCss = CUSTOM_CSS_TAG_ID;
+          document.head.appendChild(tag);
+        }
+        tag.textContent = css;
+      };
+
+      const load = async () => {
+        if (stopped || loaded) return;
+        loaded = true;
+        try {
+          const res = await window.fetch(CUSTOM_CSS_ENDPOINT, { cache: 'no-store', headers: { accept: 'application/json' } });
+          if (stopped || !res.ok) return;
+          const data = await res.json().catch(() => null);
+          if (stopped || !data || data.ok !== true) return;
+          apply(typeof data.css === 'string' ? data.css : '');
+        } catch { /* 端点不存在（老宿主）或网络问题：安静跳过 */ }
+      };
+
+      load();
+
+      // 从别处回到这个页面时重读一次：典型路径是「在电脑上改完 css、再拿起手机看」，
+      // 与布局控制器同一个理由（那时页面通常没有被销毁，只是切到了后台）。
+      const onVisible = () => { if (document.visibilityState === 'visible') { loaded = false; load(); } };
+      document.addEventListener('visibilitychange', onVisible);
+
+      return () => {
+        if (stopped) return;
+        stopped = true;
+        try { document.removeEventListener('visibilitychange', onVisible); } catch { /* 忽略 */ }
+        try { apply(''); } catch { /* 忽略 */ }
       };
     }
 
@@ -1778,7 +2792,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
     }
 
     return {
-      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
+      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"。
+      // **刻意不声明 `locale`**：如果宿主那一侧没注册这个服务，声明了会让整个插件加载失败，
+      // 而语言只是一个附加能力。改为在 bindLocale 里用 try/catch 探测，
+      // 并始终挂一条 MutationObserver 盯 `<html lang>` 作为可靠兜底。
       inject: ['slots', 'remote'],
       apply(ctx) {
         // 所有配置读写都走本插件自己的端点（唯一数据源：本用户 JSON）。
@@ -1788,11 +2805,12 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         // 远程页面才有布局改造；本机页面这里直接是个空清理函数（「不动本地」的开关就在这一行）
         const stopLayout = startLayoutController(ctx, store);
         const stopUi = startUiSettingsController(ctx, store);
+        const stopCustomCss = startCustomCssController(ctx);
         // 反过来：只有本机页面才上报窗口可见性（安卓外壳靠它决定要不要弹通知）
         const stopPresence = startPresenceReporter(ctx);
         try {
           if (typeof ctx.effect === 'function') ctx.effect(() => stopLayout);
-          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); stopPresence(); });
+          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); stopPresence(); stopCustomCss(); });
         } catch { /* 忽略 */ }
 
         function Panel() {
@@ -1800,6 +2818,9 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
+          // 语言一变就重渲染：t() 本身是「读当前 LANG」，只要渲染被触发就会拿到新语言
+          const [, setLangTick] = React.useState(0);
+          React.useEffect(() => onLangChange(() => setLangTick((n) => n + 1)), []);
           // 「UI 设置」「缓存」是两层可折叠的下一级菜单，默认都收起
           const [groupsOpen, setGroupsOpen] = React.useState({});
           const toggleGroup = (id) => setGroupsOpen((open) => ({ ...open, [id]: open[id] !== true }));
@@ -2401,9 +3422,26 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           );
         }
 
-        ctx.slots.inject('settings.section', () =>
-          ctx.slots.register({ name: 'settings.section', id: NS, order: 100, label: t('远程访问') }, Panel),
-        );
+        // 语言：接上 DSH 的 locale 服务，切换语言时不需要刷新页面。
+        // **必须放在注册 section 之前**：label 是注册那一刻的字符串，先定语言才不会用错语言注册一次。
+        try { ctx.effect(() => bindLocale(ctx)); } catch { bindLocale(ctx); }
+
+        ctx.slots.inject('settings.section', () => {
+          // 官方把 label 读走之后不再回头读，改对象上的字段没有效果 ——
+          // 所以语言变化时**重挂一次**（dispose 旧的、register 新的），这是官方公开的接口，
+          // 不依赖任何内部字段。重挂失败就退化为「等下次刷新」，不会比原来更糟。
+          let dispose = null;
+          const register = () => {
+            try { if (typeof dispose === 'function') dispose(); } catch { /* 忽略 */ }
+            dispose = ctx.slots.register({ name: 'settings.section', id: NS, order: 100, label: t('远程访问') }, Panel);
+          };
+          register();
+          const offLang = onLangChange(() => { try { register(); } catch { /* 忽略 */ } });
+          return () => {
+            try { offLang(); } catch { /* 忽略 */ }
+            try { if (typeof dispose === 'function') dispose(); } catch { /* 忽略 */ }
+          };
+        });
       },
     };
   },

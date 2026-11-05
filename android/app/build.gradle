@@ -17,9 +17,14 @@ android {
   defaultConfig {
     applicationId 'dev.dsh.remote'
     minSdk 26
-    targetSdk 35
-    versionCode 16
-    versionName '1.4.1'
+    // 34 而不是 35：Android 15（API 35）对 targetSdk>=35 的应用**强制 edge-to-edge**，
+    // 内容会画到状态栏下面。本应用是纯 WebView 外壳、没做 WindowInsets 处理，
+    // 抬到 35 就会「页面顶部和状态栏叠在一起」（时间/电量压在标题上）。
+    // 34 仍然避开这个强制行为，且满足 Google Play 当前的 targetSdk 门槛。
+    targetSdk 34
+    // 17：设置/刷新两枚按钮改到对话框右侧上方（覆盖安装要求 versionCode 比已装的大）
+    versionCode 17
+    versionName '1.6.0'
   }
 
   if (keystoreFile.exists()) {
