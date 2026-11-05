@@ -650,11 +650,11 @@ html[data-ra-layout="phone"] [data-ra-settings-content] select { font-size: 16px
 /* 正文左右留白。
    官方的滚动区是：padding: 16px calc(var(--dsh-composer-side-clearance) + 16px)
    —— 左右各 = clearance + 16px。桌面宽屏上这个呼吸位合适，390px 的手机上就太宽了
-   （真机上内容只有 319px，两侧各空 32px）。
-   这里把 clearance 收到 4px，左右各 20px，正文能多出 24px。
+   （默认 clearance=16 → 两侧各空 32px，正文只有 319px）。
+   这里把 clearance 定成 8px，左右各 **24px**，正文宽度 342px。
    选择器限定在正文列内，避免误伤设置页等其它滚动区。 */
 html[data-ra-layout="phone"] [data-ra-center] [class*="_scroll"] {
-  --dsh-composer-side-clearance: 4px !important;
+  --dsh-composer-side-clearance: 8px !important;
 }
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"] {
   padding-left: 10px !important; padding-right: 10px !important;
