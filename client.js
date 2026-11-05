@@ -898,12 +898,19 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         return false;
       }
 
-      /** 左抽屉是不是开着 —— 读**官方**属性，不看我们自己的标记 */
+      /**
+       * 左抽屉是不是开着 —— 读**官方**属性。
+       *
+       * 两个入口都要认：`[data-ra-frame]` 是我们自己在 syncDom() 里打上的标记，
+       * 而 `[class*="_frame"]` 是官方原生的类名。只认前者时，一旦 syncDom 还没跑
+       * 或标记被清掉，抽屉明明开着也会被判成「没开」—— 真机现象就是
+       * 「在抽屉里左滑，抽屉没收起来，反而弹出了右侧面板」。
+       */
       const drawerOpen = () => {
-        const frame = document.querySelector('[data-ra-frame]');
+        const frame = document.querySelector('[data-ra-frame]') || document.querySelector('[class*="_frame"]');
+        if (!frame) return false;
         // 官方：< 768px 且侧栏未收起时，抽屉是模态展开的
         // （frame 带 data-sidebar-drawer，收起时同时带 data-sidebar-collapsed）
-        if (!frame) return false;
         return frame.hasAttribute('data-sidebar-drawer') && !frame.hasAttribute('data-sidebar-collapsed');
       };
 
