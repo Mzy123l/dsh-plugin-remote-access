@@ -22,6 +22,24 @@
 - id: directory-picker
   name: '@deepseek-ai/dsh-host-directory-picker-auto'
   disabled: true
+
+# 3) 文件预览分页调小：手机上打开大文件会**整页卡住**。
+#    官方的 @deepseek-ai/dsh-api-workspace-files 默认每页 5000 行 / 2MB
+#    （maxLines / maxBytes），桌面浏览器扛得住，手机 WebView 一次往 DOM 里塞
+#    5000 行会长时间阻塞主线程 —— 表现就是「打开大文件整个页面都卡」。
+#    这里把每页降到 1000 行 / 512KB：单次渲染量降到 1/5，滚动时多触发几次加载，
+#    但每次都是短任务，不再卡死。maxFileBytes 保持不变（32MB），它管的是
+#    「整个文件多大才允许预览」，与分页渲染无关。
+#    注意：这一行在官方 patch 里没有 config，所以这里的 config 是**整个替换**，
+#    四个字段必须写全，漏掉的会退回代码默认值（其实等价，但写全更清楚）。
+- id: workspace-files
+  name: '@deepseek-ai/dsh-api-workspace-files'
+  config:
+    maxBytes: 524288        # 512 KB —— 单页正文上限
+    maxLines: 1000          # 单页行数上限（官方默认 5000）
+    maxFileBytes: 33554432  # 32 MB —— 超过它就不给预览（与官方默认一致）
+    maxEntries: 2000        # 目录列表单层条目上限（与官方默认一致）
+
 - insert:
     - id: directory-picker-browse
       name: '@deepseek-ai/dsh-host-directory-picker-browse'
