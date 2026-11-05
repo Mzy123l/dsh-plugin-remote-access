@@ -647,19 +647,13 @@ html[data-ra-layout="phone"] [data-ra-settings-content] input,
 html[data-ra-layout="phone"] [data-ra-settings-content] textarea,
 html[data-ra-layout="phone"] [data-ra-settings-content] select { font-size: 16px !important; }
 
-/* 正文左右留白：**左右各 28px**。
+/* 正文左右留白：左右各 28px。
    官方的滚动区是：padding: 16px calc(var(--dsh-composer-side-clearance) + 16px)
-   —— 左右各 = clearance + 16px，默认 clearance=16 就是两侧各 32px，手机上偏宽。
-
-   注意这里**直接写内边距，而不是改 clearance 变量**：
-   `--dsh-composer-side-clearance` 被官方用在 9 个地方 —— 正文滚动区内边距、
-   输入框宽度（calc(100% - clearance*2 - dockInset*2)）、输入框卡片最大宽度、
-   输入区自身内边距……改它会把输入框一起改窄。
-   只写 padding 则**只影响正文留白**，输入框宽度保持原样。
-   正文宽度 = 390 - 28 - 28 = 334px。 */
+   —— 左右各 = clearance + 16px。默认 clearance=16 就是两侧各 32px，手机上偏宽。
+   这里把 clearance 定成 12px，两侧各 28px，正文宽度 334px。
+   注意这个变量同时影响输入框宽度，所以改它时输入框也会跟着变 —— 这是预期的。 */
 html[data-ra-layout="phone"] [data-ra-center] [class*="_scroll"] {
-  padding-left: 28px !important;
-  padding-right: 28px !important;
+  --dsh-composer-side-clearance: 12px !important;
 }
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"] {
   padding-left: 10px !important; padding-right: 10px !important;
