@@ -269,7 +269,6 @@ window.__ModuleLoader__.load({
       return [
       // 分节（section）只是版式：让设置页读起来像一份配置清单，而不是一串控件。
       // 每一节标题下面是同类参数；`hint` 是字段下方那行小字（手机上比 placeholder 好读）。
-      { key: 'enabled', type: 'boolean', section: t('服务'), label: t('启用'), hint: t('关掉即停止监听，不需要卸载插件') },
       { key: 'port', type: 'number', section: t('服务'), label: t('端口'), placeholder: t('0=随机'), hint: t('固定下来才好存书签（默认 0 = 系统随机）') },
       { key: 'allowCidrs', type: 'list', section: t('服务'), label: t('允许的网段'), placeholder: t('换行分割'), hint: t('唯一的安全边界；listen=auto 时也用它挑本机要监听的地址') },
       { key: 'denyCidrs', type: 'list', section: t('服务'), label: t('排除的网段'), placeholder: t('换行分割'), hint: t('白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封') },
@@ -291,31 +290,6 @@ window.__ModuleLoader__.load({
       { key: 'notifyOnChoice', type: 'boolean', section: t('手机通知'), label: t('提问时通知手机'), hint: t('模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知') },
       { key: 'notifyOnFinish', type: 'boolean', section: t('手机通知'), label: t('一轮结束时通知手机'), hint: t('正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）') },
       { key: 'notifyOnlyWhenWindowHidden', type: 'boolean', section: t('手机通知'), label: t('仅窗口不可见时通知'), hint: t('电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒') },
-      {
-        key: 'remoteLayout',
-        type: 'select',
-        section: t('远程界面'),
-        label: t('远程UI布局'),
-        options: [
-          { value: 'phone', label: t('手机（横竖屏自适应）') },
-          { value: 'desktop', label: t('电脑') },
-          { value: 'auto', label: t('自动') },
-        ],
-        hint: t('只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新'),
-      },
-      // 收起态的侧栏形态：是留一条 48px 图标栏（现状），还是整条收成 0 宽、只在左上角留一枚悬浮的官方展开按钮。
-      // 与 remoteLayout 是两个维度：同一个手机档下，有人要图标栏，有人要满宽正文。
-      {
-        key: 'phoneCollapsedRail',
-        type: 'select',
-        section: t('远程界面'),
-        label: t('收起态图标栏'),
-        options: [
-          { value: 'show', label: t('保留图标栏（默认）') },
-          { value: 'hide', label: t('整条收起，只留悬浮按钮') },
-        ],
-        hint: t('整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉'),
-      },
       // 手机端输入：回车当成换行，只有点「发送」才真的发出去。
       // 为什么单独给一个开关：有人用外接键盘、或就是习惯回车发送；默认按手机的习惯来。
       { key: 'phoneEnterNewline', type: 'boolean', section: t('远程界面'), label: t('手机端回车=换行'), hint: t('只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行') },
@@ -401,6 +375,8 @@ window.__ModuleLoader__.load({
       accessCode: '',
       remoteLayout: 'auto',
       phoneEnterNewline: true,
+      // phoneCollapsedRail 仍在配置里（老配置读得出来），但设置页已不再显示它 ——
+      // 手机档的收起态现在完全由官方布局决定，这一项不再驱动任何样式。
       phoneCollapsedRail: 'show',
       // 通知这三个也要有出厂值：`decode` 读不到就退回这里，否则「宿主默认开着」会被显示成没开
       notifyOnChoice: true,
