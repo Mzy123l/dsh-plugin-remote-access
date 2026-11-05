@@ -1457,10 +1457,17 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         try { layoutApi()?.closeRightbar(); return true; } catch { return false; }
       }
 
+      // **必须挂在捕获阶段（第三个参数 true）**。
+      // 挂在冒泡阶段时，DSH 里那些自己调 stopPropagation 的组件（输入框、消息流、
+      // 代码块、壁纸层）会把触摸事件吃掉，事件根本传不到 window ——
+      // 真机上的表现正是「有组件的地方滑不动，只有空白处偶尔能滑」。
+      // 捕获阶段先拿到事件，我们只做「记录起手点」，不阻止传播，
+      // 所以不影响组件自己的点击/滚动。
       try {
-        window.addEventListener('touchstart', onTouchStart, { passive: true });
-        window.addEventListener('touchmove', onTouchMove, { passive: false });
-        window.addEventListener('touchend', onTouchEnd, { passive: true });
+        window.addEventListener('touchstart', onTouchStart, { passive: true, capture: true });
+        window.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
+        window.addEventListener('touchend', onTouchEnd, { passive: true, capture: true });
+        window.addEventListener('touchcancel', () => { swipe = null; }, { passive: true, capture: true });
       } catch { /* 没有触摸 API 就算了 */ }
 
       // ---------------------------------------------------------------- 会话行：点一条就把抽屉收掉
@@ -1645,9 +1652,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           try { off(); } catch { /* 忽略 */ }
         }
         try {
-          window.removeEventListener('touchstart', onTouchStart);
-          window.removeEventListener('touchmove', onTouchMove);
-          window.removeEventListener('touchend', onTouchEnd);
+          window.removeEventListener('touchstart', onTouchStart, { capture: true });
+          window.removeEventListener('touchmove', onTouchMove, { capture: true });
+          window.removeEventListener('touchend', onTouchEnd, { capture: true });
         } catch { /* 忽略 */ }
         // 会话行那两下：监听要收回；万一停用时正卡在「按住焦点」的窗口里，输入框也要放开
         try {
