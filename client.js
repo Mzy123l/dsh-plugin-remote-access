@@ -1339,9 +1339,13 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       function onTouchStart(e) {
         if (!phoneNow() || e.touches.length !== 1) { swipe = null; return; }
-        // 抽屉开着时，整层都是侧栏列表（工作区/会话那一串）：不再问「这一划归谁」——
-        // 否则列表里任何一个横向略有溢出的容器都会把「滑回主页」整个吃掉（真机上就是这么发生的）。
-        if (!drawerOpen() && horizontalOwner(e.target)) { swipe = null; return; }
+        // 右栏展开时它盖满整屏，**这时一律不判归属**。
+        // 理由：右栏里全是横向可滚的容器（代码块、表格、页签），按祖先链判归属时连它自己的
+        // 空白处都会命中 —— 真机现象就是「必须正好按在某个组件上才能滑，滑空白处完全没反应」。
+        // 右栏开着时用户想做的就是「向右滑收起它」，所以不设归属判断。
+        // 抽屉同理：整层都是侧栏列表，不再问「这一划归谁」。
+        const overlayOpen = rightPanelOpen() || drawerOpen();
+        if (!overlayOpen && horizontalOwner(e.target)) { swipe = null; return; }
         const point = e.touches[0];
         const width = window.innerWidth || 0;
         swipe = {
