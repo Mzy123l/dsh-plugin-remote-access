@@ -879,18 +879,24 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        * 命中哪个用哪个 —— 点到的仍然是官方自己的按钮，行为语义不变。
        */
       /**
-       * 官方布局服务（`ctx.layout`）。手机上开合左抽屉 / 右栏**只走这里**。
+       * 官方布局服务（`ctx.layout`）—— **只当可选加速**，不是唯一路径。
        *
-       * 为什么不再按 aria-label 点按钮：那是 1.5.0 的做法，靠中文文案找按钮，
-       * 界面切成英文后「收起侧边栏」找不到 → 抽屉关不掉、遮罩一直盖着、手势与返回键全废。
-       * `ctx.layout.toggleSidebar()` / `closeRightbar()` 是官方给组件用的同一套动作，
-       * **不认语言**，也不会因为找不到那枚按钮而静默失败。
-       *
-       * 取不到（更老的 DSH）时返回 null，调用方退回 DOM 判据，不至于整个功能消失。
+       * 坑：本插件的 client 声明的是 `inject: ['slots', 'remote']`，**没有 layout**。
+       * Cordis 里 `ctx.get('layout')` 只能取到已注入的服务，没声明就大概率是 undefined，
+       * 于是「手势里 if (!layout) return」会静默什么都不做 —— 真机上就是「滑了没反应」。
+       * 所以下面所有动作都优先点**官方按钮**（稳定 data 属性、不认语言、不依赖 inject），
+       * 拿得到服务时才用它兜底。
        */
       const layoutApi = () => {
         try { return ctx.get?.('layout') ?? null; } catch { return null; }
       };
+
+      /** 按稳定的 data 属性点官方按钮（不认语言、不依赖 inject） */
+      function clickStable(attr) {
+        const btn = document.querySelector(`[${attr}]`);
+        if (btn && isClickable(btn)) { btn.click(); return true; }
+        return false;
+      }
 
       /** 左抽屉是不是开着 —— 读**官方**属性，不看我们自己的标记 */
       const drawerOpen = () => {
@@ -932,19 +938,15 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       let rightOpenedAt = 0;
       let mutualBusy = false;
 
-      /** 手机上两个浮层互斥：谁后开谁留下。收的方式走官方 layout 服务，不认语言。 */
+      /** 手机上两个浮层互斥：谁后开谁留下。收的方式点官方按钮，不认语言、不依赖 inject。 */
       function enforceOverlayExclusive(drawer) {
         if (mutualBusy) return;
         const rightOpen = rightPanelOpen();
         if (!drawer || !rightOpen) return;
-        const closeDrawer = drawerOpenedAt < rightOpenedAt;
-        const layout = layoutApi();
-        if (!layout) return;
+        const closeDrawerFirst = drawerOpenedAt < rightOpenedAt;
         mutualBusy = true;
-        try {
-          if (closeDrawer) layout.toggleSidebar();
-          else layout.closeRightbar();
-        } catch { /* 忽略 */ }
+        if (closeDrawerFirst) closeDrawer();
+        else closeRightbar();
         window.setTimeout(() => { mutualBusy = false; }, 300);
       }
 
@@ -1361,12 +1363,12 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       }
 
       /**
-       * 手势落点。**全部走官方 layout 服务，不再按 aria-label 点按钮。**
+       * 手势落点。**优先点官方按钮**（稳定 data 属性、不认语言、不依赖 inject），
+       * 拿得到 layout 服务时才用它兜底。
        *
        * 1.5.0 那套 `clickLabel('收起右侧边栏')` 有两个真机 bug，这次一并修掉：
        *   · 右栏展开时在空白处向右滑收不起来 —— 英文界面下找不到中文 aria-label 的按钮，
        *     静默失败；而且当时页面上还盖着自建遮罩，手势根本到不了这里。
-       *     现在直接 `layout.closeRightbar()`，不认语言、也不依赖任何按钮存在。
        *   · 正文里有横向滚动块时误触发 —— 由 `horizontalOwner()` 在 onTouchStart 挡掉。
        */
       function onTouchEnd(e) {
@@ -1379,20 +1381,31 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const fromEdge = started.fromLeft || started.fromRight;
         const need = fromEdge ? MIN_SWIPE : MIN_SWIPE_MID;
         if (Math.abs(dx) < need) return;
-        const layout = layoutApi();
-        if (!layout) return; // 拿不到官方布局服务：宁可不动，也不要乱点按钮
         const drawer = drawerOpen();
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
           // 向右滑：抽屉开着 → 收抽屉（这就是「回到主页」）；否则右栏开着 → 收右栏；最后才是开抽屉
-          if (drawer) { try { layout.toggleSidebar(); } catch { /* 忽略 */ } return; }
+          if (drawer) { closeDrawer(); return; }
           if (rightOpen) { closeRightbar(); return; }
-          try { layout.toggleSidebar(); } catch { /* 忽略 */ }
+          openDrawer();
           return;
         }
         // 向左滑：收起抽屉优先，否则打开右栏
-        if (drawer) { try { layout.toggleSidebar(); } catch { /* 忽略 */ } return; }
+        if (drawer) { closeDrawer(); return; }
         if (!rightOpen) openRightbar();
+      }
+
+      /** 打开左抽屉：点官方那枚展开按钮 */
+      function openDrawer() {
+        if (clickStable('data-sidebar-opener')) return true;
+        if (clickStable('data-sidebar-toggle')) return true;
+        try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
+      }
+
+      /** 收起左抽屉：点官方那枚收起按钮（抽屉开着时它就是 toggle） */
+      function closeDrawer() {
+        if (clickStable('data-sidebar-toggle')) return true;
+        try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
       }
 
       /**
@@ -1402,9 +1415,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        * 这枚按钮有稳定属性 `data-sidebar-right-expand`，不认语言。
        */
       function openRightbar() {
-        const btn = document.querySelector('[data-sidebar-right-expand]');
-        if (btn && isClickable(btn)) { btn.click(); return true; }
-        return false;
+        return clickStable('data-sidebar-right-expand');
       }
 
       /**
@@ -1495,7 +1506,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         // 用户点个菜单不会连抽屉一起收掉、会话也切过去。
         if (target.closest('button')) return;
         guardComposerFocus();
-        try { layoutApi()?.toggleSidebar(); } catch { /* 忽略 */ }
+        closeDrawer();
       }
 
       try {
@@ -1584,11 +1595,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
             return false;
           }
         }
-        // 右栏与抽屉都走官方自己的按钮/服务：不认语言
+        // 右栏与抽屉都点官方自己的按钮：不认语言、不依赖 inject
         if (rightPanelOpen()) return closeRightbar();
-        if (drawerOpen()) {
-          try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
-        }
+        if (drawerOpen()) return closeDrawer();
         if (activeGlobalPanel()) return backToConversation();
         return false;
       }
