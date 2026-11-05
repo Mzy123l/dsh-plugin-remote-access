@@ -70,6 +70,9 @@ const DEFAULTS = {
   accessCode: '',
   remoteLayout: 'auto',
   phoneEnterNewline: true,
+  // 手机布局收起态是否保留 48px 图标栏。'show' = 现状（默认），'hide' = 侧栏 0 宽 + 左上角悬浮官方展开按钮。
+  // 单独一个维度、不塞进 remoteLayout：同一个手机档下，有人要图标栏、有人要满宽正文。
+  phoneCollapsedRail: 'show',
 
   notifyOnChoice: true,
   notifyOnlyWhenWindowHidden: true,
@@ -155,6 +158,8 @@ function normalizeConfig(rawIn) {
     : 'auto';
   // 手机端「回车=换行」：与其它布尔开关同一口径，非 false 即开
   c.phoneEnterNewline = c.phoneEnterNewline !== false;
+  // 收起态图标栏：只认 'show' / 'hide'，写错值退回默认 'show'（= 保持 1.5.0 的现状，老用户行为不变）
+  c.phoneCollapsedRail = String(unwrap(c.phoneCollapsedRail)) === 'hide' ? 'hide' : 'show';
   // 手机端缓存：开关非 false 即开；新鲜期卡在 1–1440 分钟（写错值退回默认，不悄悄变成「永久」）
   c.cacheEnabled = c.cacheEnabled !== false;
   const cacheTtl = Number(unwrap(c.cacheTtlMinutes));
@@ -381,6 +386,15 @@ const NOTIFY_PATH = '/__remote_access__/notify';
 const PRESENCE_PATH = '/__remote_access__/presence';
 /** 手机端缓存策略的自检端点（设置页「缓存」子菜单里读它） */
 const CACHE_PATH = '/__remote_access__/cache';
+/**
+ * 自定义 CSS 的读取端点（手机页面用，先过访问门）。
+ *
+ * 为什么由客户端来取、而不是在 HTML 里内联：本插件不重写上游 HTML（只做反向代理 +
+ * 客户端注入样式），所以「远程页专属 CSS」也只能走客户端这条路。
+ * 端点返回值是 JSON（`{ ok, css }`），不是 text/css —— 客户端拿到后塞进自己的 <style>，
+ * 这样**本机页面根本不会请求它**，天然满足「本机一个像素都不动」。
+ */
+const CUSTOM_CSS_PATH = '/__remote_access__/custom.css';
 /**
  * 本插件配置的读写端点。同一套路径挂两处：
  *   · 上游 webServer（本机回环页面直接打）；
@@ -1045,6 +1059,10 @@ export function createChoiceCenter(now = () => Date.now()) {
  */
 function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, trafficStats, opts = {}) {
   let active = 0;
+  // 自定义 CSS 的文件路径：**每次读时再解析**，而不是启动时定死。
+  // 理由与配置文件同一口径 —— $DSH_HOME 可以由外部改变（多用户切换、引导流程），
+  // 定死会让「用户改了 css 却读不到」变成一个查不出来的问题。
+  const resolveCustomCssFile = () => opts.customCssFile || localCustomCssPath();
 
   const deny = (res, code, text) => {
     res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8' });
@@ -1245,6 +1263,37 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
   }
 
   /**
+   * 远程页专属的自定义 CSS（`$DSH_HOME/remote-access-custom.css`）。
+   *
+   * 只回给**已经过访问门**的远程页面，且 `no-store`：用户改完文件、手机上刷新一次就该生效，
+   * 不要被缓存压住（这正是「样式微调」最需要的手感）。
+   * 文件不存在不算错误：回 `{ ok: true, css: '' }`，客户端据此什么都不注入。
+   */
+  function handleCustomCss(req, res) {
+    if (req.method !== 'GET') {
+      deny(res, 405, '405 method not allowed\n');
+      return;
+    }
+    if (!gate.authorize(req)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      return;
+    }
+    const customCssFile = resolveCustomCssFile();
+    const result = readCustomCssFile(customCssFile);
+    if (!result.ok) note('debug', `自定义 CSS 读取失败（本次不注入）: ${result.reason}`);
+    const body = {
+      ok: true,
+      present: result.ok && result.css !== '',
+      css: result.ok ? result.css : '',
+      path: customCssFile,
+      error: result.ok ? '' : String(result.reason ?? 'read failed'),
+    };
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify(body));
+  }
+
+  /**
    * 安卓外壳的「待答选择」长轮询：走我们自己的鉴权，回答完就结束，不落到上游。
    *
    * 语义（对着外壳那一端写死的）：
@@ -1357,6 +1406,12 @@ function startProxy(addr, cfg, up, note, onListening, gate, choice, cacheStats, 
     // 手机端缓存策略的自检：设置页「缓存」子菜单展开时才来读它
     if (String(req.url).split('?')[0] === CACHE_PATH) {
       handleCache(req, res);
+      return;
+    }
+
+    // 远程页专属的自定义 CSS：只有远程页面会来取（本机页面根本不发这个请求）
+    if (String(req.url).split('?')[0] === CUSTOM_CSS_PATH) {
+      handleCustomCss(req, res);
       return;
     }
 
@@ -1941,6 +1996,41 @@ export function localConfigPath() {
   return path.join(dshHomeOf(), LOCAL_CONFIG_FILE_NAME);
 }
 
+/**
+ * 自定义 CSS 的文件名：与配置文件放在同一个目录（`$DSH_HOME/`）。
+ *
+ * 这是 Issue #6 提的「附加建议」：手机端那些「只在远程页生效」的样式微调，
+ * 用户自己能改，不用每次都来提需求、也不用去动 client.js。
+ * 只注入**远程页面**（本机回环页面一个像素都不动，沿用本插件的硬约束）。
+ */
+const CUSTOM_CSS_FILE_NAME = 'remote-access-custom.css';
+
+/** 本用户自定义 CSS 路径（固定 $DSH_HOME/remote-access-custom.css） */
+export function localCustomCssPath() {
+  return path.join(dshHomeOf(), CUSTOM_CSS_FILE_NAME);
+}
+
+/** 自定义 CSS 的体积上限：这是给「手机端微调」用的，不是给整站主题包的 */
+const CUSTOM_CSS_MAX_BYTES = 128 * 1024;
+
+/**
+ * 读自定义 CSS。文件不存在是**正常状态**（绝大多数用户不会建它），
+ * 所以返回 `{ ok: true, css: '' }` 而不是错误 —— 客户端据此判断「没东西要注入」。
+ */
+export function readCustomCssFile(file = localCustomCssPath()) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { ok: true, css: '', missing: true };
+    return { ok: false, css: '', reason: err?.message ?? String(err) };
+  }
+  if (Buffer.byteLength(text, 'utf8') > CUSTOM_CSS_MAX_BYTES) {
+    return { ok: false, css: '', reason: `超过 ${CUSTOM_CSS_MAX_BYTES} 字节上限` };
+  }
+  return { ok: true, css: text };
+}
+
 /** 只收已知字段（手改文件里多写的键直接忽略） */
 function pickLocalConfig(raw) {
   return pickConfig(raw);
@@ -2043,6 +2133,8 @@ export function apply(ctx) {
   // ---------------------------------------------------------------- 唯一配置源：本用户 JSON
   // 注意：这里**不看** DSH 传进来的 config —— 插件不读也不写 profile 的 cordis.patch.yml。
   const configFile = localConfigPath();
+  // 远程页专属自定义 CSS（与配置文件同目录；文件不存在是正常状态）
+  const customCssFile = localCustomCssPath();
   const bootNotes = [];
   let cfg;
   const read = readLocalConfigFile(configFile);

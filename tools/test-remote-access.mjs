@@ -1659,7 +1659,36 @@ check(
   (await call(cachePort, { method: 'POST', path: `/__remote_access__/cache?token=${cacheToken}` })).status === 405,
 );
 
-// 流量账：排查「退出重进还是大流量」靠它 —— 组合包那类响应是 DSH 自己发的 immutable，
+// 自定义 CSS 端点：只给远程页用（本机页面根本不发这个请求），同样要过访问门
+const cssPath = `/__remote_access__/custom.css`;
+const cssNoAuth = await call(cachePort, { path: cssPath });
+check('自定义 CSS 端点：没授权 401（不白给）', cssNoAuth.status === 401, `HTTP ${cssNoAuth.status}`);
+const cssMissing = JSON.parse((await call(cachePort, { path: `${cssPath}?token=${cacheToken}` })).body);
+check(
+  '自定义 CSS 端点：文件不存在时安静返回空（不算错误）',
+  cssMissing.ok === true && cssMissing.present === false && cssMissing.css === '',
+  JSON.stringify({ ok: cssMissing.ok, present: cssMissing.present }),
+);
+// 真建一个文件再读：内容原样返回、且 no-store（改完刷新就该生效）
+fs.writeFileSync(path.join(process.env.DSH_HOME, 'remote-access-custom.css'), 'body { --probe: 1; }', 'utf8');
+const cssFile = await call(cachePort, { path: `${cssPath}?token=${cacheToken}` });
+const cssBody = JSON.parse(cssFile.body);
+check(
+  '自定义 CSS 端点：原样返回文件内容',
+  cssBody.ok === true && cssBody.present === true && cssBody.css.includes('--probe: 1'),
+  JSON.stringify(cssBody.css).slice(0, 60),
+);
+check(
+  '自定义 CSS 端点：no-store（改完刷新即生效，不被缓存压住）',
+  String(cssFile.headers['cache-control']) === 'no-store',
+  String(cssFile.headers['cache-control']),
+);
+check(
+  '自定义 CSS 端点：只允许 GET',
+  (await call(cachePort, { method: 'POST', path: `${cssPath}?token=${cacheToken}` })).status === 405,
+);
+
+
 // 「我们加了什么头」的计数看不见它们，所以这里按 URL 记字节（谁在重传、重传了多少）。
 check(
   '流量账：按 URL 记字节（大图那笔就是 300 KB 量级）',

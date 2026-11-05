@@ -25,8 +25,93 @@ window.__ModuleLoader__.load({
      * Active UI language. DSH's own locale layer keeps `<html lang>` in sync
      * (zh -> "zh-CN", en -> "en"), so the plugin follows it instead of adding a
      * second language setting that could disagree with the app around it.
+     *
+     * **响应式**：早先这里是一个算一次就定死的常量，用户把 DSH 切成英文后插件这一节不会跟着变，
+     * 必须刷新页面才生效。现在改成「读当前值」的函数 + 一份订阅者名单：
+     * `bindLocale()` 在 apply 里订阅 locale 快照（拿不到就退回监听 locale/change 事件），
+     * 语言真的变了才重算 LANG 并通知订阅者（设置面板重渲染、挂载时注册的 section 标签原地改写）。
+     * 读不到 document 的环境（测试桩子）一律算 zh，与之前完全一致。
      */
-    const LANG = (typeof document !== 'undefined' && document.documentElement && /^en/i.test(document.documentElement.lang || '')) ? 'en' : 'zh';
+    function detectLang() {
+      try {
+        return /^en/i.test(document.documentElement.lang || '') ? 'en' : 'zh';
+      } catch {
+        return 'zh';
+      }
+    }
+
+    let LANG = detectLang();
+
+    /** 语言变化的订阅者：拿到新语言就重渲染（设置面板 / 已经挂上去的 section 标签） */
+    const langListeners = new Set();
+    function onLangChange(fn) {
+      langListeners.add(fn);
+      return () => langListeners.delete(fn);
+    }
+    function setLang(next) {
+      if (next === LANG) return;
+      LANG = next;
+      for (const fn of [...langListeners]) {
+        try { fn(LANG); } catch { /* 订阅方自己的问题 */ }
+      }
+    }
+
+    /**
+     * 把语言接到 DSH 的 locale 服务上。三条途径，按可靠性排序：
+     *   1. `ctx.get('locale')` 的 getSnapshot/subscribe —— 与官方组件同一口径（LocaleFace）；
+     *   2. `locale/change` 事件（只带 active id）；
+     *   3. **监听 `<html lang>` 属性变化**（MutationObserver）—— 这是最兜底、也最可靠的一条：
+     *      官方的 syncDocumentLanguage 一定会把结果写到这个属性上，而前两条都依赖
+     *      「能拿到 locale 服务 / 能收到事件」，插件没声明 inject 时根本拿不到。
+     *
+     * 为什么必须有第 3 条：`<html>` 在静态 HTML 里就带着 `lang="en"`（DSH 的 index.html 写死），
+     * 而模块加载发生在 locale 同步**之前** —— 于是 `detectLang()` 读到 en、`LANG` 定成 en，
+     * 之后官方把它改成 zh-CN 时如果我们没在听，这个错误就会一直留着。
+     * 后果不只是文案语言：`clickLabel('Collapse sidebar')` 会去点一个根本不存在的英文按钮，
+     * 于是抽屉关不掉、遮罩一直盖着、手势与返回键全部失效。**这是它最严重的一次表现。**
+     */
+    function bindLocale(ctx) {
+      let off = null;
+      const applyActive = (active) => {
+        if (active) setLang(/^en/i.test(active) ? 'en' : 'zh');
+        else setLang(detectLang());
+      };
+      try {
+        const locale = typeof ctx?.get === 'function' ? ctx.get('locale') : null;
+        if (locale && typeof locale.subscribe === 'function') {
+          const read = () => {
+            try {
+              const snap = typeof locale.getSnapshot === 'function' ? locale.getSnapshot() : null;
+              if (snap && typeof snap.active === 'string') return snap.active;
+            } catch { /* 退回 html lang */ }
+            return null;
+          };
+          off = locale.subscribe(() => applyActive(read()));
+        }
+      } catch { /* 忽略：没有 locale 服务 */ }
+      if (typeof off !== 'function') {
+        try {
+          off = ctx.on('locale/change', (snapshot) => {
+            applyActive(typeof snapshot === 'string' ? snapshot : snapshot?.active);
+          });
+        } catch { /* 忽略 */ }
+      }
+      // 兜底 1：先按当前 DOM 校正一次（模块加载与 apply 之间语言可能已经定了）
+      setLang(detectLang());
+      // 兜底 2：盯住 <html lang>。官方每次同步语言都会写这个属性，
+      // 所以哪怕上面两条都拿不到，这里也一定能跟上。没有 MutationObserver 的环境安静跳过。
+      let observer = null;
+      try {
+        if (typeof MutationObserver === 'function' && document?.documentElement) {
+          observer = new MutationObserver(() => setLang(detectLang()));
+          observer.observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+        }
+      } catch { /* 忽略 */ }
+      return () => {
+        try { if (typeof off === 'function') off(); } catch { /* 忽略 */ }
+        try { if (observer) observer.disconnect(); } catch { /* 忽略 */ }
+      };
+    }
 
     /**
      * English copy, keyed by the Chinese source string (gettext-style msgid),
@@ -95,6 +180,10 @@ window.__ModuleLoader__.load({
       "接管 no-store 的大媒体": "Take over large no-store media",
       "整段 Range 视为整份": "Treat a full-range request as the whole file",
       "当前页面没有 fetch": "This page has no fetch",
+      "收起态图标栏": "Collapsed sidebar rail",
+      "保留图标栏（默认）": "Keep the icon rail (default)",
+      "整条收起，只留悬浮按钮": "Collapse entirely, floating button only",
+      "整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉": "When collapsed the content takes the full width and only a floating official expand button stays in the top-left corner; tapping it opens the drawer as before",
       "分栏": "Split view",
       "退出全屏": "Exit fullscreen",
       "左抽屉": "Left drawer",
@@ -169,10 +258,15 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.5.0';
+    const CLIENT_VERSION = '1.6.0';
 
     // 表单字段（配置只存在本用户 JSON 里；Host 用 DEFAULTS 做同样的归一化）
-    const FIELDS = [
+    //
+    // 为什么是一个函数而不是常量：字段里的 label / section / hint 都是 t() 的结果，
+    // 而语言现在可以在运行期变化（见 bindLocale）。做成函数后，语言一变就重建一次，
+    // 下次渲染拿到的就是新语言；否则这一片永远是「模块加载时那种语言」。
+    function buildFields() {
+      return [
       // 分节（section）只是版式：让设置页读起来像一份配置清单，而不是一串控件。
       // 每一节标题下面是同类参数；`hint` 是字段下方那行小字（手机上比 placeholder 好读）。
       { key: 'enabled', type: 'boolean', section: t('服务'), label: t('启用'), hint: t('关掉即停止监听，不需要卸载插件') },
@@ -208,6 +302,19 @@ window.__ModuleLoader__.load({
           { value: 'auto', label: t('自动') },
         ],
         hint: t('只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新'),
+      },
+      // 收起态的侧栏形态：是留一条 48px 图标栏（现状），还是整条收成 0 宽、只在左上角留一枚悬浮的官方展开按钮。
+      // 与 remoteLayout 是两个维度：同一个手机档下，有人要图标栏，有人要满宽正文。
+      {
+        key: 'phoneCollapsedRail',
+        type: 'select',
+        section: t('远程界面'),
+        label: t('收起态图标栏'),
+        options: [
+          { value: 'show', label: t('保留图标栏（默认）') },
+          { value: 'hide', label: t('整条收起，只留悬浮按钮') },
+        ],
+        hint: t('整条收起时正文占满全宽，左上角留一枚悬浮的官方展开按钮；点它照旧打开抽屉'),
       },
       // 手机端输入：回车当成换行，只有点「发送」才真的发出去。
       // 为什么单独给一个开关：有人用外接键盘、或就是习惯回车发送；默认按手机的习惯来。
@@ -276,7 +383,13 @@ window.__ModuleLoader__.load({
       // 媒体元素取大文件时会发 Range，而浏览器**永远不缓存 206** —— 于是每次进页面都重下整段。
       // 这一项把「从 0 取到结尾」那一种改写成可缓存的整份。默认关：个别播放器可能失去拖动定位。
       { key: 'cacheFullRange', type: 'boolean', group: 'cache', label: t('整段 Range 视为整份') },
-    ];
+      ];
+    }
+
+    /** 当前语言下的字段表。设置面板每次渲染都取一次，所以语言变了立刻就是新的。 */
+    let FIELDS = buildFields();
+    // 语言一变就重建字段表；之后面板重渲染（或下一次读 FIELDS）拿到的是新语言。
+    onLangChange(() => { FIELDS = buildFields(); });
 
     const DEFAULTS = {
       enabled: true,
@@ -288,6 +401,7 @@ window.__ModuleLoader__.load({
       accessCode: '',
       remoteLayout: 'auto',
       phoneEnterNewline: true,
+      phoneCollapsedRail: 'show',
       // 通知这三个也要有出厂值：`decode` 读不到就退回这里，否则「宿主默认开着」会被显示成没开
       notifyOnChoice: true,
       notifyOnlyWhenWindowHidden: true,
@@ -539,6 +653,47 @@ html[data-ra-layout="phone"] [data-sidebar-right-panel] { z-index: 65 !important
 html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
   grid-template-columns: 48px minmax(0px, 1fr) 0px !important;
 }
+
+/* ---------------------------------------------------------------- 零宽收起态（phoneCollapsedRail=hide）
+   思路与上面完全一致，只是把 48px 那条轨道换成 0：**仍然由官方侧栏自己占第 1 列**，
+   不把它改成 position:fixed。这样正文不会被顶到 0px 轨道上（那正是官方那段 preset-sidebar
+   注释里记的坑），也不需要显式钉 grid-column —— 现有的三条 grid-column 规则已经钉好了。
+   data-ra-rail="hide" 由 syncDom 按配置打上，所以老配置（show）拿不到这些规则，行为不变。 */
+html[data-ra-layout="phone"][data-ra-rail="hide"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
+  grid-template-columns: 0px minmax(0px, 1fr) 0px !important;
+}
+/* 侧栏本身不参与布局、不可见、不拦截点击。
+   overflow 保持 visible：可见性统一交给 visibility（子元素默认继承 hidden），
+   这样**不需要裁剪**就什么都画不出来 —— 裁剪会把下面那枚固定的悬浮按钮一起切掉。
+   不用 display:none / position:fixed：那会让侧栏脱离网格，正文被顶到 0px 轨道上（正文直接消失）。 */
+html[data-ra-layout="phone"][data-ra-rail="hide"]:not([data-ra-drawer]) [data-ra-sidebar] { /*strong*/
+  visibility: hidden !important;
+  pointer-events: none !important;
+  min-width: 0 !important;
+  overflow: visible !important;
+  /* 自成层叠上下文，把旗下的悬浮按钮抬到正文之上；62 低于右栏 64/65，也低于抽屉 70 */
+  position: relative !important;
+  z-index: 62 !important;
+}
+/* 左上角那枚悬浮的官方展开按钮：**就是官方那个 button**（鲸鱼图标 + aria-label=打开侧边栏），
+   由 syncDom 打上 data-ra-rail-float 标记，这里只负责把它固定到左上角并解除继承来的隐藏。
+   官方在收起态本来就把 ._toggle 设成 position:fixed（只在 Windows 标题栏下），这里统一接管定位；
+   层叠随上面那个 62 的上下文：高于正文、低于抽屉（70）与官方弹窗。 */
+html[data-ra-layout="phone"][data-ra-rail="hide"]:not([data-ra-drawer]) [data-ra-rail-float] { /*strong*/
+  visibility: visible !important;
+  pointer-events: auto !important;
+  position: fixed !important;
+  left: calc(8px + env(safe-area-inset-left, 0px)) !important;
+  top: calc(8px + env(safe-area-inset-top, 0px)) !important;
+  right: auto !important;
+  bottom: auto !important;
+  margin: 0 !important;
+  /* 圆角与背景沿用官方样式变量，不自己另调一套观感 */
+  border-radius: var(--dsw-radius-md, 8px) !important;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,0.16)) !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
+  -webkit-tap-highlight-color: transparent;
+}
 /* 「分栏」在 390px 上没有意义，「退出全屏」更是不可能（宽度决定它必须全屏）。
    由脚本按 aria-label 精确打上这个标记再隐藏，避免拿类名去猜。 */
 html[data-ra-layout="phone"] [data-ra-phone-hidden] { display: none !important; }
@@ -657,6 +812,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       let raScheduled = false;
       /** 「手机端回车=换行」的开头（配置里读；默认开） */
       let enterNewline = true;
+      /** 收起态侧栏形态：'show'（48px 图标栏，现状）| 'hide'（0 宽 + 左上角悬浮官方按钮） */
+      let railMode = 'show';
 
       const matches = (query) => {
         try {
@@ -830,16 +987,43 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
        * 这是整个手机布局与 DSH 交互的**唯一**方式：手势也好、遮罩也好，都只是替用户去点它自己
        * 那个按钮，而不是我们去改它的 store / 布局状态。好处是行为永远与「用户自己点」一致，
        * 也不会因为猜错内部状态而让界面进入自相矛盾的形态。
+       *
+       * **两种语言都试**：官方的 aria-label 会跟着界面语言变，而我们的 `LANG` 是从
+       * `<html lang>` 推断的 —— 一旦两者哪怕短暂地对不上（模块加载早于 locale 同步就是这种情况），
+       * 只按当前语言去找就会**一个都点不到**。历史上这直接把抽屉卡在展开态：遮罩盖住整页，
+       * 手势与返回键全部失效。所以这里对同一个语义把所有已知说法都试一遍，
+       * 命中哪个用哪个 —— 点到的仍然是官方自己的按钮，行为语义不变。
        */
       function clickLabel(label) {
-        const candidates = [...document.querySelectorAll('button')].filter(
-          (b) => (b.getAttribute('aria-label') ?? '') === label,
-        );
-        const btn = candidates.find(isClickable);
-        if (!btn) return false;
-        btn.click();
-        return true;
+        const wanted = [label, ...(LABEL_ALIASES[label] ?? [])];
+        for (const want of wanted) {
+          const candidates = [...document.querySelectorAll('button')].filter(
+            (b) => (b.getAttribute('aria-label') ?? '') === want,
+          );
+          const btn = candidates.find(isClickable);
+          if (btn) {
+            btn.click();
+            return true;
+          }
+        }
+        return false;
       }
+
+      /**
+       * 同一个语义在不同界面语言下的官方 aria-label。
+       *
+       * 键是中文原文（也是 t() 的 msgid），值是「另一种语言下的说法」。
+       * 里面刻意**只放官方确实会用的那几句**，不猜别的写法 —— 猜错最多不命中，
+       * 不会误点一个语义不对的按钮（每个值都是那条官方文案的确切字符串）。
+       */
+      const LABEL_ALIASES = {
+        收起侧边栏: ['Collapse sidebar'],
+        打开侧边栏: ['Open sidebar'],
+        收起右侧边栏: ['Collapse right sidebar'],
+        打开右侧边栏: ['Open right sidebar'],
+        分栏: ['Split view'],
+        退出全屏: ['Exit fullscreen'],
+      };
 
       /** 屏幕上那个正在显示的右栏面板（排除 dock 留在 DOM 里的隐藏副本） */
       const visibleRightPanel = () =>
@@ -969,6 +1153,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         }
         if (drawer) document.documentElement.setAttribute('data-ra-drawer', '');
         else document.documentElement.removeAttribute('data-ra-drawer');
+        // 零宽收起态：标记 + 把官方那枚展开按钮打上悬浮标记（见 PHONE_CSS 里 data-ra-rail 那一段）
+        syncCollapsedRail(frame, drawer);
         const scrim = ensureScrim();
         if (drawer) scrim.setAttribute('data-open', '');
         else scrim.removeAttribute('data-open');
@@ -981,7 +1167,48 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       let wasDrawer = false;
       let wasRightOpen = false;
 
-      /** DOM 变动很密（聊天流式输出），所以合并到 200ms 一次，且只在手机布局下干活 */
+      /**
+       * 零宽收起态（phoneCollapsedRail=hide）：侧栏整条收成 0 宽，只在左上角留一枚**官方原生**的展开按钮。
+       *
+       * 为什么坚持点官方按钮、而不是自绘一个：行为永远与「用户自己点」一致，
+       * 也不会因为我们猜错内部状态而让界面进入自相矛盾的形态（与 clickLabel 同一条理由）。
+       * 那枚按钮在收起态本来就存在，aria-label 是官方的「打开侧边栏」（英文界面下是 Open sidebar），
+       * 这里只给它打个标记，由 CSS 接管定位；**绝不新建按钮**。
+       *
+       * 副作用只在本档发生：railMode 不为 'hide' 时把标记全部清掉，回到 1.5.0 的 48px 图标栏。
+       */
+      function syncCollapsedRail(frame, drawer) {
+        const html = document.documentElement;
+        const hide = drawer === false && railMode === 'hide';
+        if (hide) html.setAttribute('data-ra-rail', 'hide');
+        else html.removeAttribute('data-ra-rail');
+        const sidebar = document.querySelector('[data-ra-sidebar]');
+        const want = hide && sidebar ? findExpandToggle(sidebar) : null;
+        for (const btn of document.querySelectorAll('[data-ra-rail-float]')) {
+          if (btn !== want) btn.removeAttribute('data-ra-rail-float');
+        }
+        if (want && !want.hasAttribute('data-ra-rail-float')) want.setAttribute('data-ra-rail-float', '');
+      }
+
+      /**
+       * 在侧栏里找那枚官方的「打开侧边栏」按钮。
+       *
+       * 两种语言各认一个 aria-label（官方的 toggle 文案就这两个）；
+       * 兜底再用「切换按钮的图标结构」判一次 —— 但只在侧栏内找，所以不会误伤正文里的按钮。
+       */
+      function findExpandToggle(sidebar) {
+        const byLabel = [...sidebar.querySelectorAll('button')].find((b) => {
+          const label = (b.getAttribute('aria-label') ?? '').trim();
+          return label === t('打开侧边栏') || label === 'Open sidebar' || label === '打开侧边栏';
+        });
+        if (byLabel) return byLabel;
+        // 兜底：收起态的官方 toggle 里带一个 railMark（鲸鱼图标）或 panelIcon 面板图标
+        return [...sidebar.querySelectorAll('button')].find(
+          (b) => b.querySelector('[class*="_railMark"]') !== null || b.querySelector('[class*="_panelIcon"]') !== null,
+        ) ?? null;
+      }
+
+
       function scheduleSync() {
         if (stopped || raScheduled) return;
         if (document.documentElement.getAttribute('data-ra-layout') !== 'phone') return;
@@ -1003,7 +1230,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         const skip = layout === 'phone' ? raSkip() : [];
         const cut = layout === 'phone' ? raCut() : [];
         const suffix = `${skip.length ? `|${skip.join(',')}` : ''}${cut.length ? `|cut:${cut.join(',')}` : ''}`;
-        const signature = `${strong ? `${layout}:strong` : layout}${suffix}`;
+        const signature = `${strong ? `${layout}:strong` : layout}${suffix}|rail:${railMode}`;
         if (signature === applied) {
           syncDom();
           return;
@@ -1029,6 +1256,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         mode = ['auto', 'phone', 'desktop'].includes(next) ? next : 'auto';
         // 「手机端回车=换行」与布局一起读：这一项是输入体验的开关，默认开
         enterNewline = value.phoneEnterNewline !== false;
+        // 收起态侧栏形态：只认 'hide'，其余（含没写）一律 'show' = 1.5.0 现状
+        railMode = String(value.phoneCollapsedRail ?? 'show') === 'hide' ? 'hide' : 'show';
         applyLayout();
       }
 
@@ -1619,6 +1848,71 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       };
     }
 
+    // ---------------------------------------------------------------- 自定义 CSS（只在远程页面生效）
+    //
+    // `$DSH_HOME/remote-access-custom.css`：给「只在手机上生效」的样式微调留一个入口，
+    // 用户自己改文件、刷新一次就生效，不用来提需求、也不用动这里。
+    //
+    // 三条约束：
+    //   1. 只注入远程页面 —— 本机（回环）页面根本不发这个请求，一个像素都不动；
+    //   2. 拿不到 / 文件不存在都安静跳过（绝大多数用户不会建这个文件）；
+    //   3. 内容只进 <style>，不做任何求值；端点回的是 JSON，不是 text/css。
+    const CUSTOM_CSS_ENDPOINT = '/__remote_access__/custom.css';
+    const CUSTOM_CSS_TAG_ID = 'dsh-remote-access/custom.css';
+
+    function startCustomCssController(ctx) {
+      const noop = () => {};
+      let remote = false;
+      try { remote = ctx?.remote?.$host?.isLoopback === false; } catch { remote = false; }
+      if (!remote) return noop;
+      // 没有 DOM 的环境（tools/test-client.mjs 的桩子、SSR）必须安静地什么都不做
+      if (typeof document === 'undefined' || !document.head) return noop;
+      if (typeof window.fetch !== 'function') return noop;
+
+      let stopped = false;
+      let loaded = false;
+
+      const apply = (css) => {
+        let tag = document.querySelector(`style[data-ra-custom-css="${CUSTOM_CSS_TAG_ID}"]`);
+        if (css === '') {
+          if (tag) tag.remove();
+          return;
+        }
+        if (!tag) {
+          tag = document.createElement('style');
+          tag.dataset.raCustomCss = CUSTOM_CSS_TAG_ID;
+          document.head.appendChild(tag);
+        }
+        tag.textContent = css;
+      };
+
+      const load = async () => {
+        if (stopped || loaded) return;
+        loaded = true;
+        try {
+          const res = await window.fetch(CUSTOM_CSS_ENDPOINT, { cache: 'no-store', headers: { accept: 'application/json' } });
+          if (stopped || !res.ok) return;
+          const data = await res.json().catch(() => null);
+          if (stopped || !data || data.ok !== true) return;
+          apply(typeof data.css === 'string' ? data.css : '');
+        } catch { /* 端点不存在（老宿主）或网络问题：安静跳过 */ }
+      };
+
+      load();
+
+      // 从别处回到这个页面时重读一次：典型路径是「在电脑上改完 css、再拿起手机看」，
+      // 与布局控制器同一个理由（那时页面通常没有被销毁，只是切到了后台）。
+      const onVisible = () => { if (document.visibilityState === 'visible') { loaded = false; load(); } };
+      document.addEventListener('visibilitychange', onVisible);
+
+      return () => {
+        if (stopped) return;
+        stopped = true;
+        try { document.removeEventListener('visibilitychange', onVisible); } catch { /* 忽略 */ }
+        try { apply(''); } catch { /* 忽略 */ }
+      };
+    }
+
     // ---------------------------------------------------------------- UI 设置（只在远程页面生效）
     //
     // 官方的「通用设置」里有五项界面偏好，本插件把它们存进**本用户配置**（唯一配置源）。
@@ -1778,7 +2072,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
     }
 
     return {
-      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"
+      // 服务必须声明才能访问，否则属性访问会抛 "... without inject"。
+      // **刻意不声明 `locale`**：如果宿主那一侧没注册这个服务，声明了会让整个插件加载失败，
+      // 而语言只是一个附加能力。改为在 bindLocale 里用 try/catch 探测，
+      // 并始终挂一条 MutationObserver 盯 `<html lang>` 作为可靠兜底。
       inject: ['slots', 'remote'],
       apply(ctx) {
         // 所有配置读写都走本插件自己的端点（唯一数据源：本用户 JSON）。
@@ -1788,11 +2085,12 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         // 远程页面才有布局改造；本机页面这里直接是个空清理函数（「不动本地」的开关就在这一行）
         const stopLayout = startLayoutController(ctx, store);
         const stopUi = startUiSettingsController(ctx, store);
+        const stopCustomCss = startCustomCssController(ctx);
         // 反过来：只有本机页面才上报窗口可见性（安卓外壳靠它决定要不要弹通知）
         const stopPresence = startPresenceReporter(ctx);
         try {
           if (typeof ctx.effect === 'function') ctx.effect(() => stopLayout);
-          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); stopPresence(); });
+          if (typeof ctx.effect === 'function') ctx.effect(() => () => { stopLayout(); stopUi(); stopPresence(); stopCustomCss(); });
         } catch { /* 忽略 */ }
 
         function Panel() {
@@ -1800,6 +2098,9 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const [draft, setDraft] = React.useState(null);
           const [status, setStatus] = React.useState('');
           const [busy, setBusy] = React.useState(false);
+          // 语言一变就重渲染：t() 本身是「读当前 LANG」，只要渲染被触发就会拿到新语言
+          const [, setLangTick] = React.useState(0);
+          React.useEffect(() => onLangChange(() => setLangTick((n) => n + 1)), []);
           // 「UI 设置」「缓存」是两层可折叠的下一级菜单，默认都收起
           const [groupsOpen, setGroupsOpen] = React.useState({});
           const toggleGroup = (id) => setGroupsOpen((open) => ({ ...open, [id]: open[id] !== true }));
@@ -2401,9 +2702,26 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           );
         }
 
-        ctx.slots.inject('settings.section', () =>
-          ctx.slots.register({ name: 'settings.section', id: NS, order: 100, label: t('远程访问') }, Panel),
-        );
+        // 语言：接上 DSH 的 locale 服务，切换语言时不需要刷新页面。
+        // **必须放在注册 section 之前**：label 是注册那一刻的字符串，先定语言才不会用错语言注册一次。
+        try { ctx.effect(() => bindLocale(ctx)); } catch { bindLocale(ctx); }
+
+        ctx.slots.inject('settings.section', () => {
+          // 官方把 label 读走之后不再回头读，改对象上的字段没有效果 ——
+          // 所以语言变化时**重挂一次**（dispose 旧的、register 新的），这是官方公开的接口，
+          // 不依赖任何内部字段。重挂失败就退化为「等下次刷新」，不会比原来更糟。
+          let dispose = null;
+          const register = () => {
+            try { if (typeof dispose === 'function') dispose(); } catch { /* 忽略 */ }
+            dispose = ctx.slots.register({ name: 'settings.section', id: NS, order: 100, label: t('远程访问') }, Panel);
+          };
+          register();
+          const offLang = onLangChange(() => { try { register(); } catch { /* 忽略 */ } });
+          return () => {
+            try { offLang(); } catch { /* 忽略 */ }
+            try { if (typeof dispose === 'function') dispose(); } catch { /* 忽略 */ }
+          };
+        });
       },
     };
   },
