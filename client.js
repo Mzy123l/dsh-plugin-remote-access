@@ -573,136 +573,35 @@ window.__ModuleLoader__.load({
      * 拿不到这个属性、也就永远匹配不上任何一条规则（这就是「不动本地」的实现方式）。
      */
     const PHONE_CSS = `
-/* 手机上「展开后的工作区抽屉」必须不透明。
-   透明来自壁纸引擎的「侧栏液态玻璃」——它自己的旋钮是 --we-sidebar-tint / --we-sidebar-alpha
-   （设置项：侧栏玻璃颜色权重 / 侧栏透明度），面板底色由
-   color-mix(… var(--we-sidebar-color) var(--we-sidebar-tint, 20%), transparent …) 算出来。
-   而手机上展开的抽屉整块盖在正文上，半透明会让两层文字糊在一起。
-   这里只在本页把这两个变量拉满：**只作用于手机档，本机一个像素都不动**，也不去覆盖元素表面
-   （之前那条 background !important 覆盖 DSH 玻璃表面，会让左侧栏整列不再绘制，已删）。 */
-html[data-ra-layout="phone"] {
-  --we-sidebar-tint: 100%;
-  --we-sidebar-alpha: 1;
-}
-html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { /*strong*/ display: none !important; }
-html[data-ra-layout="phone"] [data-ra-center],
-html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
+/* 手机档样式：布局一律交给 @deepseek-ai/dsh-client-ui-layout（0.2.2）。
+   < 768px 时官方自己就是「无轨道 + 模态抽屉 + 右栏全屏浮层」，列宽由它按内联 style 算。
+   这里只补官方没做的：安全区、设置页手机排版、输入区。
+   **不要**再写 grid-template-columns / grid-column / position:fixed 改侧栏 / 自建遮罩 —— 都踩过坑。 */
 
-/* 关键：手机布局下**关掉框架自己的列宽过渡**。
-   框架带着 .BynINW_frame[data-animating] 上的 transition: grid-template-columns …，而 grid-template-columns
-   是可动画的布局属性；我用 !important 改写轨道值（48px / 0px）时又挂着这条过渡，真机上出现过
-   「DOM 与计算值都对、画面却不重绘，直到手动拖一下宽度才刷新」的卡顿 —— 关掉它就没有这个组合了。
-   反正手机端的轨道值由我定，过渡本身也没有意义。 */
-html[data-ra-layout="phone"] [data-ra-frame] { transition: none !important; }
-
-/* 侧栏：收起时保持 56px 图标栏；展开时改成「抽屉」压在正文上 —— 而不是把正文挤成 110px 一条 */
-/* 三列显式钉住列号：抽屉模式把侧栏改成 position:fixed 后就脱离网格了，
-   自动排位会把「正文」顶到第 1 条轨道（0px）上，正文会直接消失。 */
-html[data-ra-layout="phone"] [data-ra-sidebar] { grid-column: 1 !important; /*strong*/ }
-html[data-ra-layout="phone"] [data-ra-center] { grid-column: 2 !important; /*strong*/ }
-html[data-ra-layout="phone"] [data-ra-right] { grid-column: 3 !important; /*strong*/ }
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-frame] { grid-template-columns: 0px minmax(0px, 1fr) 0px !important; /*strong*/ }
-html[data-ra-layout="phone"][data-ra-drawer] [data-ra-sidebar] {
-  /*strong*/
-  position: absolute !important;
-  top: 0 !important; bottom: 0 !important; left: 0 !important; right: auto !important;
-  /* 工作区/会话名往往很长，320px 在 390px 屏上会挤成两行；给到 340px（约 88vw）但右边仍留出可见的正文。
-     这里刻意用普通 px 而不是 min(88vw, 340px)：真机上抽屉这一层只要带上「大模糊阴影 + min() 宽度 + 独立层叠」
-     的组合，整块视图就会停止呈现（DOM 全对、画面不更新，拖一下视图宽度才恢复）——
-     已用声明级开关逐条验证：单独去掉 box-shadow / 宽度里的 min() / z-index 任一条都能恢复。
-     所以这一层保持「便宜」：普通宽度 + 1px 描边，不要大模糊阴影。 */
-  width: 340px !important;
-  z-index: 70 !important;
-  border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3)) !important;
+/* 抽屉描边与安全区。开合、遮罩、焦点、Esc 全由官方管，这里只改观感。
+   宽度保持官方的 280px（列与内层都是这个值，单改一边会留空白）。 */
+html[data-ra-layout="phone"] [data-ra-frame][data-sidebar-drawer] [data-ra-sidebar] {
+  border-right: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.3));
   padding-left: env(safe-area-inset-left, 0px) !important;
-  /* 抽屉里滑到底不要带动后面的正文一起滚 */
   overscroll-behavior: contain;
 }
 
-/* 右栏：DSH 自己在 viewportWidth < 768 时就选了 autoFullscreen（无轨道 + 全屏浮层），
-   所以这里不去抢它的布局，只做收尾 —— 安全区、不横向溢出、以及把手机上没意义的控件藏掉。 */
-html[data-ra-layout="phone"] [data-ra-right] {
-  /* 抬到正文之上：底部统计、输入框、对话/轨迹页签各自都有层叠上下文，
-     不抬的话它们会画在右栏这个浮层上面（真机截图里就是「这一页冒出了输入框和底部 info」）。 */
-  position: relative !important; /*strong*/
-  z-index: 64 !important; /*strong*/
-}
+/* 右栏：官方在 < 768px 用 autoFullscreen。别写 width / max-width / inset ——
+   那组会参与全屏浮层的宽度计算，一叠 !important 就可能压成 0 宽。 */
 html[data-ra-layout="phone"] [data-sidebar-right-panel] {
-  /*strong*/
-  /* 这一组（max-width / overflow-x / 安全区内边距 / overscroll）会参与右栏全屏浮层的宽度计算：
-     框架自己的全屏做法是 inline width:0 + left/right 负值 + width:auto，我这些 !important 一叠上去
-     就可能把它压成 0 宽 —— 正文空白、只看得见输入框与底栏。保守档里先完全不动右栏。 */
-  max-width: 100vw !important;
   overflow-x: hidden !important;
   padding-left: env(safe-area-inset-left, 0px) !important;
   padding-right: env(safe-area-inset-right, 0px) !important;
   padding-bottom: env(safe-area-inset-bottom, 0px) !important;
   overscroll-behavior: contain;
 }
-/* 单独一条：只把「抬到正文之上」这件事放进增强模式，实底那条留在保守模式 */
-html[data-ra-layout="phone"] [data-sidebar-right-panel] { z-index: 65 !important; /*strong*/ }
+html[data-ra-layout="phone"] [data-ra-center],
+html[data-ra-layout="phone"] [data-ra-overlay] { padding-bottom: env(safe-area-inset-bottom, 0px); }
 
-/* 这里曾经给这两个浮层加「不透明实底 + 强雾化」来治「太透」。
-   **已删除**：真机上复现到，这条 background（!important 覆盖 DSH 的玻璃表面）会让左侧栏整条不再绘制 ——
-   DOM 里它在（0,0 56x950），像素没有；只要摘掉这一条就恢复。排查协议：清本地标记 → 重载（弹窗出现）→
-   点掉弹窗 → 截图；摘别的规则都不解决，只有摘这条解决。
-   观感那件事现在不再由我插手：不碰壁纸引擎的任何外观开关 —— 原先我强行打开它的「侧栏液态玻璃」正是「左侧透明」的来源，
-   壁纸插件不在时就用 DSH 的默认表面 —— 宁可少一点好看，也不能让页面画不出来。 */
-
-/* 收起的图标栏在手机上再窄一点（56 → 48）：省下的横向像素全给正文 */
-html[data-ra-layout="phone"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
-  grid-template-columns: 48px minmax(0px, 1fr) 0px !important;
-}
-
-/* ---------------------------------------------------------------- 零宽收起态（phoneCollapsedRail=hide）
-   思路与上面完全一致，只是把 48px 那条轨道换成 0：**仍然由官方侧栏自己占第 1 列**，
-   不把它改成 position:fixed。这样正文不会被顶到 0px 轨道上（那正是官方那段 preset-sidebar
-   注释里记的坑），也不需要显式钉 grid-column —— 现有的三条 grid-column 规则已经钉好了。
-   data-ra-rail="hide" 由 syncDom 按配置打上，所以老配置（show）拿不到这些规则，行为不变。 */
-html[data-ra-layout="phone"][data-ra-rail="hide"]:not([data-ra-drawer]) [data-ra-frame] { /*strong*/
-  grid-template-columns: 0px minmax(0px, 1fr) 0px !important;
-}
-/* 侧栏本身不参与布局、不可见、不拦截点击。
-   overflow 保持 visible：可见性统一交给 visibility（子元素默认继承 hidden），
-   这样**不需要裁剪**就什么都画不出来 —— 裁剪会把下面那枚固定的悬浮按钮一起切掉。
-   不用 display:none / position:fixed：那会让侧栏脱离网格，正文被顶到 0px 轨道上（正文直接消失）。 */
-html[data-ra-layout="phone"][data-ra-rail="hide"]:not([data-ra-drawer]) [data-ra-sidebar] { /*strong*/
-  visibility: hidden !important;
-  pointer-events: none !important;
-  min-width: 0 !important;
-  overflow: visible !important;
-  /* 自成层叠上下文，把旗下的悬浮按钮抬到正文之上；62 低于右栏 64/65，也低于抽屉 70 */
-  position: relative !important;
-  z-index: 62 !important;
-}
-/* 左上角那枚悬浮的官方展开按钮：**就是官方那个 button**（鲸鱼图标 + aria-label=打开侧边栏），
-   由 syncDom 打上 data-ra-rail-float 标记，这里只负责把它固定到左上角并解除继承来的隐藏。
-   官方在收起态本来就把 ._toggle 设成 position:fixed（只在 Windows 标题栏下），这里统一接管定位；
-   层叠随上面那个 62 的上下文：高于正文、低于抽屉（70）与官方弹窗。 */
-html[data-ra-layout="phone"][data-ra-rail="hide"]:not([data-ra-drawer]) [data-ra-rail-float] { /*strong*/
-  visibility: visible !important;
-  pointer-events: auto !important;
-  position: fixed !important;
-  left: calc(8px + env(safe-area-inset-left, 0px)) !important;
-  top: calc(8px + env(safe-area-inset-top, 0px)) !important;
-  right: auto !important;
-  bottom: auto !important;
-  margin: 0 !important;
-  /* 圆角与背景沿用官方样式变量，不自己另调一套观感 */
-  border-radius: var(--dsw-radius-md, 8px) !important;
-  background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,0.16)) !important;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
-  -webkit-tap-highlight-color: transparent;
-}
-/* 「分栏」在 390px 上没有意义，「退出全屏」更是不可能（宽度决定它必须全屏）。
-   由脚本按 aria-label 精确打上这个标记再隐藏，避免拿类名去猜。 */
+/* 列宽拖拽手柄在手机上没意义，还会和滑动手势打架 */
+html[data-ra-layout="phone"] [data-ra-frame] > [class*="_handle"] { display: none !important; }
+/* 「分栏」「退出全屏」在 390px 上没有意义，由脚本按 aria-label 打标记再隐藏 */
 html[data-ra-layout="phone"] [data-ra-phone-hidden] { display: none !important; }
-
-#dsh-ra-scrim { display: none; }
-html[data-ra-layout="phone"] #dsh-ra-scrim[data-open] { /*strong*/
-  display: block; position: absolute; inset: 0; z-index: 60;
-  background: rgba(0,0,0,0.42); -webkit-tap-highlight-color: transparent;
-}
 
 /* 设置面板：手机上是「上下两段」。左右两栏时右侧内容只剩一百来像素，中文会一个字一行 */
 html[data-ra-layout="phone"] [data-ra-settings-panel] {
@@ -749,7 +648,7 @@ html[data-ra-layout="phone"] [data-ra-settings-content] input,
 html[data-ra-layout="phone"] [data-ra-settings-content] textarea,
 html[data-ra-layout="phone"] [data-ra-settings-content] select { font-size: 16px !important; }
 
-/* 输入区：工具条允许换行，别把模型名截成「DeepSeek-V4…」 */
+/* 输入区（我们的）：工具条允许换行，别把模型名截成「DeepSeek-V4…」 */
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"] {
   padding-left: 10px !important; padding-right: 10px !important;
 }
@@ -763,20 +662,6 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 @media (orientation: landscape) and (max-height: 520px) {
   /* 横屏手机里垂直方向更金贵：导航那条压薄一点 */
   html[data-ra-layout="phone"] [data-ra-settings-nav] { padding: 6px 12px 4px !important; }
-}
-
-/* 抽屉的实底：**不覆盖 DSH 的表面元素**（那条 background !important 覆盖表面会让左侧栏整列不再绘制，
-   已在 d92a572 删除并验证），改为在抽屉背后垫一层自己的底色 —— 伪元素 + z-index:-1，
-   正好夹在父层背景与内容之间。这样即使内层面板仍带着壁纸引擎调出来的半透明底色，合成结果也不透明。
-   只在手机档的抽屉上生效、且只在壁纸激活时（透明正是那时才发生）；本机与电脑档不注入。 */
-html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-sidebar]::before {
-  content: "" !important;
-  position: absolute !important;
-  inset: 0 !important;
-  z-index: -1 !important;
-  /* 用壁纸引擎自己的「可读性底色」：那是当前主题下真正不透明的表面色（实测 #151849）。
-     绝不能用 --dsw-alias-bg-base —— 它被壁纸插件改成了 transparent，垫了等于没垫（已实测）。 */
-  background: var(--we-readability-base, #151517) !important; /*strong*/
 }
 `;
 
@@ -994,35 +879,27 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
        * 手势与返回键全部失效。所以这里对同一个语义把所有已知说法都试一遍，
        * 命中哪个用哪个 —— 点到的仍然是官方自己的按钮，行为语义不变。
        */
-      function clickLabel(label) {
-        const wanted = [label, ...(LABEL_ALIASES[label] ?? [])];
-        for (const want of wanted) {
-          const candidates = [...document.querySelectorAll('button')].filter(
-            (b) => (b.getAttribute('aria-label') ?? '') === want,
-          );
-          const btn = candidates.find(isClickable);
-          if (btn) {
-            btn.click();
-            return true;
-          }
-        }
-        return false;
-      }
-
       /**
-       * 同一个语义在不同界面语言下的官方 aria-label。
+       * 官方布局服务（`ctx.layout`）。手机上开合左抽屉 / 右栏**只走这里**。
        *
-       * 键是中文原文（也是 t() 的 msgid），值是「另一种语言下的说法」。
-       * 里面刻意**只放官方确实会用的那几句**，不猜别的写法 —— 猜错最多不命中，
-       * 不会误点一个语义不对的按钮（每个值都是那条官方文案的确切字符串）。
+       * 为什么不再按 aria-label 点按钮：那是 1.5.0 的做法，靠中文文案找按钮，
+       * 界面切成英文后「收起侧边栏」找不到 → 抽屉关不掉、遮罩一直盖着、手势与返回键全废。
+       * `ctx.layout.toggleSidebar()` / `closeRightbar()` 是官方给组件用的同一套动作，
+       * **不认语言**，也不会因为找不到那枚按钮而静默失败。
+       *
+       * 取不到（更老的 DSH）时返回 null，调用方退回 DOM 判据，不至于整个功能消失。
        */
-      const LABEL_ALIASES = {
-        收起侧边栏: ['Collapse sidebar'],
-        打开侧边栏: ['Open sidebar'],
-        收起右侧边栏: ['Collapse right sidebar'],
-        打开右侧边栏: ['Open right sidebar'],
-        分栏: ['Split view'],
-        退出全屏: ['Exit fullscreen'],
+      const layoutApi = () => {
+        try { return ctx.get?.('layout') ?? null; } catch { return null; }
+      };
+
+      /** 左抽屉是不是开着 —— 读**官方**属性，不看我们自己的标记 */
+      const drawerOpen = () => {
+        const frame = document.querySelector('[data-ra-frame]');
+        // 官方：< 768px 且侧栏未收起时，抽屉是模态展开的
+        // （frame 带 data-sidebar-drawer，收起时同时带 data-sidebar-collapsed）
+        if (!frame) return false;
+        return frame.hasAttribute('data-sidebar-drawer') && !frame.hasAttribute('data-sidebar-collapsed');
       };
 
       /** 屏幕上那个正在显示的右栏面板（排除 dock 留在 DOM 里的隐藏副本） */
@@ -1032,23 +909,15 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
       /** 右侧栏是不是正以可见形态开着（手机上它是「无轨道 + 全屏浮层」） */
       const rightPanelOpen = () => visibleRightPanel() !== null;
 
-      /** 抽屉遮罩：点它等于点「收起侧边栏」，行为与用户自己收起完全一致（不自己改状态） */
-      function ensureScrim() {
-        let scrim = document.getElementById(SCRIM_ID);
-        if (scrim) return scrim;
-        scrim = document.createElement('div');
-        scrim.id = SCRIM_ID;
-        scrim.addEventListener('click', () => { clickLabel(t('收起侧边栏')); });
-        document.body.appendChild(scrim);
-        return scrim;
-      }
-
       /**
        * 手机上没意义的右栏控件：「分栏」在 390px 上分不出两栏，「退出全屏」更是不可能
        * （宽度决定它必须全屏，点了也只会留一个空轨道）。按 aria-label 精确隐藏，
        * 不碰别的按钮 —— 尤其是「收起右侧边栏」，那是手机上唯一该留的出口。
+       *
+       * 这里仍然按文案匹配，但**只用于隐藏**、不用于「找出口」。匹配不到只是少藏一个按钮，
+       * 不会像 1.5.0 那样把整个抽屉卡死，所以中英文都列上就够了。
        */
-      const PHONE_HIDDEN_LABELS = [t('分栏'), t('退出全屏'), 'Split', 'Exit fullscreen'];
+      const PHONE_HIDDEN_LABELS = [t('分栏'), t('退出全屏'), 'Split view', 'Split', 'Exit fullscreen'];
       function hideUselessRightControls() {
         const panel = document.querySelector('[data-sidebar-right-panel]');
         if (!panel) return;

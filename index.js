@@ -2584,6 +2584,57 @@ export function apply(ctx) {
       }), 'remote-access: 窗口可见性回报');
       note('debug', `已注册 ${PRESENCE_PATH}：本机页面用它回报窗口可见性`);
 
+      // ---------------------------------------------------------------- 目录选择器：重挂失败的后端
+      //
+      // 现象（手机端点「添加工作区」）：弹窗能出来，但列表区写着
+      //   typert gateway: directoryPicker/list: active Service "directoryPickerController" is unavailable
+      //
+      // 根因（已用真机 + Host 运行时状态核实）：
+      //   · 本插件的 bundle patch 把 `directory-picker-auto` 关掉，改挂 browse 后端 + 它的浏览器表面
+      //     —— 手机上没法点宿主屏幕的系统对话框，这个方向本身是对的；
+      //   · 但 auto 在**停用之前**（启动早期）已经把自己那份 native 后端挂上了，native 与 browse
+      //     都继承同一个 seam 基类、构造函数里写死服务名 `directoryPicker`；
+      //   · 于是 browse 后端注册时撞名失败：
+      //       service "directoryPicker" has been registered at <NativeDirectoryPicker>
+      //     该条目停在 FAILED，**而且不会自己重试**；
+      //   · native 随后随 auto 一起退场，`directoryPicker` 就此**谁都没有**：
+      //     directoryPickerController 也就不激活，客户端调 directoryPicker/list 自然报「不可用」。
+      //
+      // 修法：等这一阵过去之后，检查 browse 后端是不是卡在失败态；是的话把它摘掉重挂一次。
+      // 只在「真的没有 directoryPicker」时才动手 —— 本机用系统对话框（native）的机器上什么都不做。
+      ctx.effect(() => {
+        let disposed = false;
+        const timer = setTimeout(() => {
+          if (disposed) return;
+          try {
+            const loader = ctx.get?.('loader');
+            if (!loader) return;
+            if (ctx.get?.('directoryPicker')) return; // 已经能用，不动
+            const entry = loader.resolve?.('directory-picker-browse');
+            const failed = entry?.fiber?.state === 3 || entry?.fiber?._error != null;
+            if (!failed) return;
+            try { loader.remove('directory-picker-browse'); } catch { /* 可能已经不在 */ }
+            void loader.create({ name: '@deepseek-ai/dsh-host-directory-picker-browse' })
+              .then((id) => {
+                if (disposed) {
+                  try { loader.remove(id); } catch { /* 忽略 */ }
+                  return;
+                }
+                note('info', '已重挂目录选择器的 browse 后端（手机端「选择工作区目录」之前不可用）');
+              })
+              .catch((err) => {
+                note('warn', `重挂 browse 后端失败，手机端「选择工作区目录」仍不可用: ${err?.message}`);
+              });
+          } catch (err) {
+            note('warn', `检查目录选择器后端时抛出异常（已兜住）: ${err?.message}`);
+          }
+        }, 2500);
+        return () => {
+          disposed = true;
+          try { clearTimeout(timer); } catch { /* 忽略 */ }
+        };
+      }, 'remote-access: 目录选择器 browse 后端重挂');
+
       // 本机页面的设置表单走这条：只读写本用户 JSON，不碰 DSH 的 settings / profile
       ctx.effect(() => webServer.register({
         kind: 'exact',

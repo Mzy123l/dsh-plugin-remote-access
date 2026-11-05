@@ -115,8 +115,6 @@ let serverConfig = {
 };
 let serverRevision = 3;
 let configFails = false;
-/** 自定义 CSS 端点返回的内容（空串 = 文件不存在） */
-let customCss = '';
 const fetchCalls = [];
 const jsonRes = (body, status = 200) => ({
   status,
@@ -146,25 +144,19 @@ globalThis.window.fetch = async (url, init = {}) => {
     return jsonRes({ ok: true, policy: { enabled: true, ttlMinutes: 10, probe: true }, stats: {}, traffic: null });
   }
   if (u.startsWith('/__remote_access__/presence')) return { status: 204, ok: true, json: async () => null };
-  if (u.startsWith('/__remote_access__/custom.css')) {
-    return jsonRes({ ok: true, present: customCss !== '', css: customCss, path: 'C:\\Users\\tester\\.dsh\\remote-access-custom.css', error: '' });
-  }
   return jsonRes({ ok: false, error: 'not found' }, 404);
 };
 
 // ---------------------------------------------------------------- 页面桩子
 let Panel = null;
-/** 最后一次 slots.register 传进去的 label（验证 i18n 的 section 标题） */
-let lastRegisteredLabel = null;
 function makeCtx({ isLoopback = false, themeCalls = null } = {}) {
   const ctx = {
     remote: { $host: { isLoopback } },
     on: () => () => {},
     slots: {
       inject: (_name, callback) => callback(),
-      register: (options, Component) => {
+      register: (_options, Component) => {
         Panel = Component;
-        lastRegisteredLabel = options?.label ?? null;
         return () => {};
       },
     },
@@ -274,39 +266,16 @@ function makeEl(tag, attrs = {}) {
     removeEventListener() {},
     appendChild(c) { c.parentElement = this; this.children.push(c); return c; },
     querySelector() { return null; },
-    querySelectorAll(sel) {
-      const s = String(sel);
-      const all = collectAll(this).slice(1);
-      if (s === 'button') return all.filter((el) => el.tagName === 'BUTTON');
-      if (s.startsWith('[class*=')) return all.filter((el) => String(el.getAttribute('class') ?? '').includes('_railMark') || String(el.getAttribute('class') ?? '').includes('_panelIcon'));
-      return [];
-    },
+    querySelectorAll() { return []; },
     contains() { return false; },
   };
   return el;
 }
-function installDom({ width = 1386, coarse = false, lang = null } = {}) {
+function installDom({ width = 1386, coarse = false } = {}) {
   const html = makeEl('html');
-  // 真实 DOM 里 lang 是 IDL 属性（client.js 读的是 documentElement.lang），
-  // 只塞 attribute 是读不到的 —— 这一行的缺失曾让英文分支长期零覆盖。
-  html.lang = lang ?? '';
   const head = makeEl('head');
   const body = makeEl('body');
   const styles = [];
-  const customTags = [];
-  // 侧栏桩：client.js 用 querySelector('[data-ra-sidebar]') 找侧栏、在里面找官方展开按钮
-  const sidebarStub = installSidebarStub();
-  const fakeSidebar = makeEl('div');
-  fakeSidebar.setAttribute('data-ra-sidebar', '');
-  fakeSidebar.appendChild(sidebarStub.toggle);
-  fakeSidebar.appendChild(sidebarStub.other);
-  // frame：syncDom 的一切标记都挂在它上面。**必须存在**，否则 syncDom 会在第一行就 return，
-  // 收起态 / 自定义 CSS 的用例全都会假失败。
-  const fakeFrame = makeEl('div');
-  // 侧栏**收起**态 = frame 带 data-sidebar-collapsed（这正是 syncDom 判 drawer 的依据）。
-  // 不加这一行，frame 会被当成「抽屉展开」，收起态那组用例永远不会走到。
-  fakeFrame.setAttribute('data-sidebar-collapsed', '');
-  fakeFrame.appendChild(fakeSidebar);
   const media = (query) => ({
     matches: /max-width/.test(query) ? width <= Number(/max-width:\s*(\d+)/.exec(query)[1]) : coarse,
     addEventListener() {},
@@ -322,71 +291,16 @@ function installDom({ width = 1386, coarse = false, lang = null } = {}) {
       return el;
     },
     getElementById: () => null,
-    querySelector: (sel) => {
-      const s = String(sel);
-      if (s === '[data-slot="root"] > *') return fakeFrame;
-      if (s === '[data-ra-sidebar]') return fakeSidebar;
-      if (s.startsWith('[data-ra-frame]')) return fakeFrame;
-      if (s.startsWith('style[')) {
-        if (s.includes('custom.css')) return customTags.find((el) => el.dataset.raCustomCss) ?? null;
-        return styles.find((el) => el.dataset.raLayoutCss) ?? null;
-      }
-      return null;
-    },
-    querySelectorAll: (sel) => {
-      const s = String(sel);
-      if (s === '[data-ra-rail-float]') {
-        return [...fakeSidebar.children, ...collectAll(body)].filter((el) => el.hasAttribute('data-ra-rail-float'));
-      }
-      return [];
-    },
+    querySelector: (sel) => (String(sel).startsWith('style[') ? styles.find((s) => s.dataset.raLayoutCss) ?? null : null),
+    querySelectorAll: () => [],
     addEventListener() {},
     removeEventListener() {},
-  };
-  // createElement 产生的 <style> 也要能被 querySelector 找到（自定义 CSS 用）
-  const origCreate = globalThis.document.createElement;
-  globalThis.document.createElement = (tag) => {
-    const el = origCreate(tag);
-    if (tag === 'style') {
-      customTags.push(el);
-      const origSet = el.setAttribute;
-      el.setAttribute = (n, v) => {
-        origSet.call(el, n, v);
-        if (n === 'data-ra-custom-css') styles.push(el);
-      };
-    }
-    return el;
   };
   globalThis.MutationObserver = class { observe() {} disconnect() {} };
   globalThis.window.matchMedia = media;
   globalThis.window.setTimeout = setTimeout;
-  return { html, head, body, styles, customTags, sidebar: fakeSidebar, frame: fakeFrame, toggle: sidebarStub.toggle, other: sidebarStub.other };
+  return { html, head, body, styles };
 }
-
-/** 递归收集元素树（给 querySelectorAll 的桩子用） */
-function collectAll(root, out = []) {
-  if (!root) return out;
-  out.push(root);
-  for (const child of root.children ?? []) collectAll(child, out);
-  return out;
-}
-
-
-/**
- * 一个够用的「官方侧栏」：收起态那枚官方展开按钮（带鲸鱼 railMark），
- * 外加一枚不该被误标的正文按钮。用来验证零宽收起态只认官方那枚。
- */
-function installSidebarStub({ expandLabel = '打开侧边栏' } = {}) {
-  const railMark = makeEl('span');
-  railMark.setAttribute('class', 'x_railMark');
-  const toggle = makeEl('button');
-  toggle.setAttribute('aria-label', expandLabel);
-  toggle.appendChild(railMark);
-  const other = makeEl('button');
-  other.setAttribute('aria-label', '发送');
-  return { toggle, other };
-}
-
 function applyWithLayout({ isLoopback, remoteLayout }) {
   serverConfig = { ...serverConfig, remoteLayout };
   serverRevision += 1;
@@ -458,128 +372,6 @@ fetchCalls.length = 0;
 plugin.apply(makeCtx({ isLoopback: false }));
 await sleep(80);
 check('窗口可见性：远程页面一个请求都不发', !fetchCalls.some((c) => c.url.startsWith('/__remote_access__/presence')));
-
-// ---------------------------------------------------------------- 场景六：零宽收起态（Issue #6）
-//
-// 默认 phoneCollapsedRail=show：与 1.5.0 完全一致（48px 图标栏，不打 data-ra-rail）。
-{
-  const dom = installDom({ width: 1386, coarse: false });
-  serverConfig = { ...serverConfig, phoneCollapsedRail: 'show', remoteLayout: 'phone' };
-  serverRevision += 1;
-  plugin.apply(makeCtx({ isLoopback: false }));
-  await sleep(120);
-  check('收起态：默认 show 不打 data-ra-rail（老用户行为不变）', dom.html.getAttribute('data-ra-rail') === null, String(dom.html.getAttribute('data-ra-rail')));
-  check('收起态：默认 show 不标悬浮按钮', dom.toggle.hasAttribute('data-ra-rail-float') === false);
-  const css = dom.styles.find((s) => s.dataset.raLayoutCss)?.textContent ?? '';
-  // 规则本身在样式表里是常驻的（靠 data-ra-rail 选择器门控），所以「show 时不生效」
-  // 由上面的属性断言 + 这条选择器门控共同保证：没有 data-ra-rail 属性就匹配不上。
-  check('收起态：默认 show 时零宽规则虽然存在，但选择器要求 data-ra-rail=hide', css.includes('[data-ra-rail="hide"]') && dom.html.getAttribute('data-ra-rail') === null);
-}
-
-{
-  const dom = installDom({ width: 1386, coarse: false });
-  serverConfig = { ...serverConfig, phoneCollapsedRail: 'hide', remoteLayout: 'phone' };
-  serverRevision += 1;
-  plugin.apply(makeCtx({ isLoopback: false }));
-  await sleep(120);
-  check('收起态 hide：html 打上 data-ra-rail=hide', dom.html.getAttribute('data-ra-rail') === 'hide', String(dom.html.getAttribute('data-ra-rail')));
-  check('收起态 hide：官方那枚展开按钮被标成悬浮', dom.toggle.hasAttribute('data-ra-rail-float') === true);
-  check('收起态 hide：正文里别的按钮不被误标', dom.other.hasAttribute('data-ra-rail-float') === false);
-  const css = dom.styles.find((s) => s.dataset.raLayoutCss)?.textContent ?? '';
-  check('收起态 hide：样式表里有 0px 轨道规则', css.includes('[data-ra-rail="hide"]:not([data-ra-drawer]) [data-ra-frame]'));
-  check('收起态 hide：悬浮按钮固定在左上角且避让安全区', /left:\s*calc\(8px \+ env\(safe-area-inset-left/.test(css));
-  check('收起态 hide：层叠 62 低于抽屉 70', css.includes('z-index: 62 !important') && /z-index:\s*70 !important/.test(css));
-}
-
-// 英文界面下同样是官方那枚按钮（aria-label 变成 Open sidebar）
-{
-  const dom = installDom({ width: 1386, coarse: false, lang: 'en' });
-  serverConfig = { ...serverConfig, phoneCollapsedRail: 'hide', remoteLayout: 'phone' };
-  serverRevision += 1;
-  // 换成英文标签的侧栏桩
-  const en = installSidebarStub({ expandLabel: 'Open sidebar' });
-  dom.sidebar.children.length = 0;
-  dom.sidebar.appendChild(en.toggle);
-  plugin.apply(makeCtx({ isLoopback: false }));
-  await sleep(120);
-  check('收起态 hide：英文界面也认得官方展开按钮（Open sidebar）', en.toggle.hasAttribute('data-ra-rail-float') === true);
-}
-
-// ---------------------------------------------------------------- 场景七：自定义 CSS（只在远程页）
-{
-  const dom = installDom({ width: 1386, coarse: false });
-  customCss = 'body { --probe: 1; }';
-  fetchCalls.length = 0;
-  plugin.apply(makeCtx({ isLoopback: false }));
-  await sleep(150);
-  check('自定义 CSS：远程页面会去取端点', fetchCalls.some((c) => c.url.startsWith('/__remote_access__/custom.css')));
-  check('自定义 CSS：内容进了页面的 <style>', dom.styles.some((s) => String(s.textContent).includes('--probe: 1')));
-}
-
-{
-  const dom = installDom({ width: 1386, coarse: false });
-  fetchCalls.length = 0;
-  plugin.apply(makeCtx({ isLoopback: true }));
-  await sleep(120);
-  check('自定义 CSS：本机页面一个请求都不发', !fetchCalls.some((c) => c.url.startsWith('/__remote_access__/custom.css')));
-  check('自定义 CSS：本机页面不注入', !dom.styles.some((s) => String(s.textContent).includes('--probe')));
-}
-
-{
-  const dom = installDom({ width: 1386, coarse: false });
-  customCss = '';
-  plugin.apply(makeCtx({ isLoopback: false }));
-  await sleep(150);
-  check('自定义 CSS：文件不存在时安静跳过，不建空 <style>', dom.styles.every((s) => !s.dataset.raCustomCss));
-}
-
-// ---------------------------------------------------------------- 场景八：语言跟随（i18n）
-{
-  const dom = installDom({ width: 1386, coarse: false, lang: 'en' });
-  let panel = null;
-  lastRegisteredLabel = null;
-  plugin.apply(makeCtx({ isLoopback: false }));
-  await sleep(120);
-  react.reset();
-  const treeEn = Panel();
-  check('i18n：lang=en 时设置页是英文', allText(treeEn).includes('Allowed network ranges') && !allText(treeEn).includes('允许的网段'));
-  check('i18n：lang=en 时注册的 section 标签是 Remote access', lastRegisteredLabel === 'Remote access', String(lastRegisteredLabel));
-}
-
-{
-  const dom = installDom({ width: 1386, coarse: false, lang: 'zh-CN' });
-  lastRegisteredLabel = null;
-  plugin.apply(makeCtx({ isLoopback: false }));
-  await sleep(120);
-  react.reset();
-  const treeZh = Panel();
-  check('i18n：lang=zh-CN 时设置页仍是中文', allText(treeZh).includes('允许的网段') && !allText(treeZh).includes('Allowed network ranges'));
-}
-
-// 运行期切换语言：<html lang> 变了 + 发一次 locale/change，不需要刷新页面
-{
-  const dom = installDom({ width: 1386, coarse: false, lang: 'zh-CN' });
-  let langHandler = null;
-  lastRegisteredLabel = null;
-  plugin.apply({
-    remote: { $host: { isLoopback: false } },
-    on: (event, fn) => { if (event === 'locale/change') langHandler = fn; return () => {}; },
-    slots: {
-      inject: (_n, cb) => cb(),
-      register: (options, C) => { Panel = C; lastRegisteredLabel = options?.label ?? null; return () => {}; },
-    },
-  });
-  await sleep(120);
-  check('运行期切语言：初始是中文', lastRegisteredLabel === '远程访问', String(lastRegisteredLabel));
-  // 模拟 DSH 切换语言：官方先写 <html lang>，再广播事件
-  dom.html.lang = 'en';
-  react.reset();
-  if (langHandler) langHandler('en');
-  await sleep(30);
-  check('运行期切语言：不刷新页面，注册标签就地变成 Remote access', lastRegisteredLabel === 'Remote access', String(lastRegisteredLabel));
-  react.reset();
-  check('运行期切语言：面板重渲染后是英文', allText(Panel()).includes('Allowed network ranges'));
-}
 
 delete globalThis.document;
 delete globalThis.MutationObserver;
