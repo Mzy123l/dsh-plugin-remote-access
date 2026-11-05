@@ -42,7 +42,8 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "README.en.md"
   ],
   "meta": {
     "title": "远程访问入口（限网段）",

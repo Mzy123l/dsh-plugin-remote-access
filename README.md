@@ -1,5 +1,7 @@
 # dsh-plugin-remote-access
 
+[English](README.en.md) · **中文**
+
 给 **DeepSeek Harness（DSH）桌面版**用的插件：把本机 DSH 的网页界面**只开放给你指定的网段**
 （默认 Tailscale 的 `100.64.0.0/10`），于是手机或另一台电脑也能用上它。
 

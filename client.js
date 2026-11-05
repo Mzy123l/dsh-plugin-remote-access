@@ -21,6 +21,142 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
+    /**
+     * Active UI language. DSH's own locale layer keeps `<html lang>` in sync
+     * (zh -> "zh-CN", en -> "en"), so the plugin follows it instead of adding a
+     * second language setting that could disagree with the app around it.
+     */
+    const LANG = (typeof document !== 'undefined' && document.documentElement && /^en/i.test(document.documentElement.lang || '')) ? 'en' : 'zh';
+
+    /**
+     * English copy, keyed by the Chinese source string (gettext-style msgid),
+     * so call sites stay untouched and a missing entry falls back to the source
+     * text instead of rendering an empty label.
+     */
+    const EN = {
+      "服务": "Service",
+      "收起侧边栏": "Collapse sidebar",
+      "出厂值": "Factory default",
+      "详细": "Detailed",
+      "手机通知": "Phone notifications",
+      "收起右侧边栏": "Collapse right sidebar",
+      "换行分割": "newline-separated",
+      "远程界面": "Remote UI",
+      "外观": "Appearance",
+      "字号大小": "Font size",
+      "工作步骤展示": "Work step display",
+      "简洁": "Compact",
+      "显示代码工作视图": "Show code work view",
+      "性能与用量": "Performance & usage",
+      "保存中…": "Saving…",
+      "启用": "Enabled",
+      "关掉即停止监听，不需要卸载插件": "Turning this off stops the listener; no need to uninstall the plugin",
+      "端口": "Port",
+      "0=随机": "0 = random",
+      "固定下来才好存书签（默认 0 = 系统随机）": "Pin it to keep a bookmarkable URL (default 0 = OS-assigned)",
+      "允许的网段": "Allowed network ranges",
+      "唯一的安全边界；listen=auto 时也用它挑本机要监听的地址": "The only security boundary; with listen=auto it also picks which local address to bind",
+      "排除的网段": "Excluded network ranges",
+      "白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封": "Exceptions to the allowlist; an address that fails the access code is added here automatically - delete it to unblock",
+      "并发上限": "Connection limit",
+      "0=不限制": "0 = unlimited",
+      "日志级别": "Log level",
+      "静默": "Silent",
+      "普通": "Normal",
+      "访问控制": "Access control",
+      "访问密码": "Access code",
+      "4-12位数字或字母": "4-12 digits or letters",
+      "设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址": "Set it and you never copy a token: open the bare address on the phone and enter it once. One wrong entry blocks that address.",
+      "提问时通知手机": "Notify the phone when the model asks",
+      "模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知": "Have the app raise a status-bar notification when the model asks a question (ask_user_question) and nobody answers",
+      "一轮结束时通知手机": "Notify the phone when a turn ends",
+      "正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）": "Covers normal completion and failures; failures carry a category (malformed model output / out of balance or quota / network unreachable / rate limited...)",
+      "仅窗口不可见时通知": "Only when the window is hidden",
+      "电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒": "No interruption while the DSH window is visible; turn this off and the app reminds you whenever it is not in the foreground",
+      "远程UI布局": "Remote UI layout",
+      "手机（横竖屏自适应）": "Phone (adapts to orientation)",
+      "电脑": "Desktop",
+      "自动": "Auto",
+      "只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新": "Affects remote pages only; the local UI is untouched. Takes effect on the phone immediately, no refresh needed",
+      "手机端回车=换行": "Enter inserts a newline on the phone",
+      "只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行": "Only the Send button sends; Ctrl/Cmd+Enter still sends, and IME composition always passes through",
+      "浅色": "Light",
+      "深色": "Dark",
+      "跟随系统": "Follow system",
+      "10-22，0=出厂值": "10-22, 0 = factory default",
+      "标准": "Standard",
+      "完全展开": "Fully expanded",
+      "开启": "On",
+      "关闭": "Off",
+      "启用手机端资源缓存": "Enable on-phone asset caching",
+      "新鲜期（分钟）": "Freshness (minutes)",
+      "1-1440，默认 10": "1-1440, default 10",
+      "过期核对用首/尾片段指纹": "Revalidate with first/last chunk fingerprints",
+      "接管 no-store 的大媒体": "Take over large no-store media",
+      "整段 Range 视为整份": "Treat a full-range request as the whole file",
+      "当前页面没有 fetch": "This page has no fetch",
+      "分栏": "Split view",
+      "退出全屏": "Exit fullscreen",
+      "左抽屉": "Left drawer",
+      "右栏": "Right sidebar",
+      "打开侧边栏": "Open sidebar",
+      "打开右侧边栏": "Open right sidebar",
+      "电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH": "The plugin on the computer has no notification endpoint yet (added in 1.3.1) - update the plugin and restart DSH once",
+      "通知接口需要重新解锁：刷新本页、再输一次访问密码": "The notification endpoint needs a fresh unlock: refresh this page and enter the access code again",
+      "电脑上关掉了「提问时通知手机」": "Notify the phone when the model asks is turned off on the computer",
+      "电脑上的插件已支持提问通知 ✓": "The plugin on the computer supports question notifications ✓",
+      "读不到电脑上的插件状态": "Cannot read the plugin status on the computer",
+      "本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径": "This local page does not go through the cache proxy; open this section on the phone to see the policy actually in effect there",
+      "电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH": "The plugin on the computer has no cache endpoint yet (added in 1.3.8) - update the plugin and restart DSH once",
+      "缓存接口需要重新解锁：刷新本页、再输一次访问密码": "The cache endpoint needs a fresh unlock: refresh this page and enter the access code again",
+      "电脑上关掉了手机端缓存": "On-phone caching is turned off on the computer",
+      "读不到电脑上的缓存状态": "Cannot read the cache status on the computer",
+      "访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。": "Access code not changed: only 4-12 digits or letters are accepted (no spaces or symbols).",
+      "没有改动。": "No changes.",
+      "写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。": "Write rejected (the config was changed elsewhere). Click Reload and try again.",
+      "[remote-access] 保存失败": "[remote-access] save failed",
+      "本页无需套用": "Nothing to apply on this page",
+      "保存后，在远程页面打开时生效（本机界面不受影响）": "Applied to remote pages after saving (the local UI is untouched)",
+      "开 · 已接管": "On · taken over",
+      "生效策略": "Effective policy",
+      "内容寻址产物": "Content-addressed assets",
+      "immutable（一年内不重取）": "immutable (not re-fetched for a year)",
+      "其它静态资源": "Other static assets",
+      "过期核对": "Revalidation",
+      "长度 + 类型": "Length + type",
+      "首/尾各 64 KB 片段指纹": "First/last 64 KB fingerprints",
+      "no-store 大媒体": "no-store large media",
+      "尊重上游": "Respect upstream",
+      "整段 Range": "Full-range requests",
+      "原样透传 206": "Pass 206 through",
+      "正文落盘": "Body on disk",
+      "不落宿主盘（零字节）": "Never on the host disk (zero bytes)",
+      "本次会话": "This session",
+      "304（零字节）": "304 (zero bytes)",
+      "小资源缓冲": "Small-asset buffering",
+      "片段探针": "Chunk probes",
+      "接管 no-store": "no-store takeover",
+      "本轮流量账（按 URL 排字节）": "Traffic this round (bytes by URL)",
+      "送出 / 收到": "Sent / received",
+      "送出": "Sent",
+      "次数": "Count",
+      "读取中…": "Loading…",
+      "刷新": "Refresh",
+      "处理中…": "Working…",
+      "清零本轮统计": "Reset this round",
+      "用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。": "Usage: click Reset this round -> fully quit the app (swipe it off recents) -> open it again; what you see here is that round's real cost.",
+      "实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。": "Live polling (audio spectra) and the session channel (the RPC that carries chat images) are outside the cache's reach; large numbers there are expected.",
+      "UI 设置": "UI settings",
+      "缓存": "Cache",
+      "保存": "Save",
+      "重新读取": "Reload",
+      "（每个 Windows 用户各一份；插件不读也不写共享 profile）。": "(one per Windows user; the plugin never reads or writes the shared profile).",
+      "远程访问": "Remote access",
+    };
+
+    /** @param {string} source @returns {string} */
+    const t = (source) => (LANG === 'en' && Object.prototype.hasOwnProperty.call(EN, source) ? EN[source] : source);
+
     // settings.section 的注册 id（与 bundle patch 的行 id 一致，便于排查）。
     const NS = 'remote-access-cidr';
 
@@ -39,43 +175,43 @@ window.__ModuleLoader__.load({
     const FIELDS = [
       // 分节（section）只是版式：让设置页读起来像一份配置清单，而不是一串控件。
       // 每一节标题下面是同类参数；`hint` 是字段下方那行小字（手机上比 placeholder 好读）。
-      { key: 'enabled', type: 'boolean', section: '服务', label: '启用', hint: '关掉即停止监听，不需要卸载插件' },
-      { key: 'port', type: 'number', section: '服务', label: '端口', placeholder: '0=随机', hint: '固定下来才好存书签（默认 0 = 系统随机）' },
-      { key: 'allowCidrs', type: 'list', section: '服务', label: '允许的网段', placeholder: '换行分割', hint: '唯一的安全边界；listen=auto 时也用它挑本机要监听的地址' },
-      { key: 'denyCidrs', type: 'list', section: '服务', label: '排除的网段', placeholder: '换行分割', hint: '白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封' },
-      { key: 'maxConnections', type: 'number', section: '服务', label: '并发上限', placeholder: '0=不限制' },
+      { key: 'enabled', type: 'boolean', section: t('服务'), label: t('启用'), hint: t('关掉即停止监听，不需要卸载插件') },
+      { key: 'port', type: 'number', section: t('服务'), label: t('端口'), placeholder: t('0=随机'), hint: t('固定下来才好存书签（默认 0 = 系统随机）') },
+      { key: 'allowCidrs', type: 'list', section: t('服务'), label: t('允许的网段'), placeholder: t('换行分割'), hint: t('唯一的安全边界；listen=auto 时也用它挑本机要监听的地址') },
+      { key: 'denyCidrs', type: 'list', section: t('服务'), label: t('排除的网段'), placeholder: t('换行分割'), hint: t('白名单里的例外；输错访问密码的地址会自动加到这里，删掉即解封') },
+      { key: 'maxConnections', type: 'number', section: t('服务'), label: t('并发上限'), placeholder: t('0=不限制') },
       {
         key: 'logLevel',
         type: 'select',
-        section: '服务',
-        label: '日志级别',
+        section: t('服务'),
+        label: t('日志级别'),
         options: [
-          { value: 'silent', label: '静默' },
-          { value: 'info', label: '普通' },
-          { value: 'debug', label: '详细' },
+          { value: 'silent', label: t('静默') },
+          { value: 'info', label: t('普通') },
+          { value: 'debug', label: t('详细') },
         ],
       },
-      { key: 'accessCode', type: 'password', section: '访问控制', label: '访问密码', placeholder: '4-12位数字或字母', hint: '设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址' },
+      { key: 'accessCode', type: 'password', section: t('访问控制'), label: t('访问密码'), placeholder: t('4-12位数字或字母'), hint: t('设了它就不用复制 token：手机开裸地址输一次即可；输错一次即拉黑该地址') },
       // 安卓外壳的状态栏通知：宿主只负责回答「有没有选择在等 / 电脑窗口可见吗」，
       // 弹不弹、弹什么由 App 自己决定（它才知道自己在不在前台）
-      { key: 'notifyOnChoice', type: 'boolean', section: '手机通知', label: '提问时通知手机', hint: '模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知' },
-      { key: 'notifyOnFinish', type: 'boolean', section: '手机通知', label: '一轮结束时通知手机', hint: '正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）' },
-      { key: 'notifyOnlyWhenWindowHidden', type: 'boolean', section: '手机通知', label: '仅窗口不可见时通知', hint: '电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒' },
+      { key: 'notifyOnChoice', type: 'boolean', section: t('手机通知'), label: t('提问时通知手机'), hint: t('模型提问（ask_user_question）且没人回答时，让 App 弹状态栏通知') },
+      { key: 'notifyOnFinish', type: 'boolean', section: t('手机通知'), label: t('一轮结束时通知手机'), hint: t('正常跑完与异常结束都算；异常会带上分类（模型输出格式错 / 余额额度不足 / 网络连不上 / 被限流…）') },
+      { key: 'notifyOnlyWhenWindowHidden', type: 'boolean', section: t('手机通知'), label: t('仅窗口不可见时通知'), hint: t('电脑上 DSH 窗口可见时不打扰；关掉则只要 App 不在前台就提醒') },
       {
         key: 'remoteLayout',
         type: 'select',
-        section: '远程界面',
-        label: '远程UI布局',
+        section: t('远程界面'),
+        label: t('远程UI布局'),
         options: [
-          { value: 'phone', label: '手机（横竖屏自适应）' },
-          { value: 'desktop', label: '电脑' },
-          { value: 'auto', label: '自动' },
+          { value: 'phone', label: t('手机（横竖屏自适应）') },
+          { value: 'desktop', label: t('电脑') },
+          { value: 'auto', label: t('自动') },
         ],
-        hint: '只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新',
+        hint: t('只作用于远程页面，本机界面不受影响；改完手机端立刻生效，不用刷新'),
       },
       // 手机端输入：回车当成换行，只有点「发送」才真的发出去。
       // 为什么单独给一个开关：有人用外接键盘、或就是习惯回车发送；默认按手机的习惯来。
-      { key: 'phoneEnterNewline', type: 'boolean', section: '远程界面', label: '手机端回车=换行', hint: '只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行' },
+      { key: 'phoneEnterNewline', type: 'boolean', section: t('远程界面'), label: t('手机端回车=换行'), hint: t('只有点「发送」才发送；Ctrl/Cmd+Enter 仍是发送，输入法合成中一律放行') },
       // 「UI 设置」一组（group: 'ui'）：官方「通用设置」里的五项界面偏好，只作用于远程页面。
       // 为什么要有这一份副本：官方设置页在远程页面上是内存态（读写都到不了宿主），手机端改了刷新就还原；
       // 这里存的是同一批值，由 startUiSettingsController 在每次打开远程页面时重新套到页面上。
@@ -84,62 +220,62 @@ window.__ModuleLoader__.load({
         key: 'remoteTheme',
         type: 'select',
         group: 'ui',
-        label: '外观',
+        label: t('外观'),
         options: [
-          { value: 'default', label: '出厂值' },
+          { value: 'default', label: t('出厂值') },
           // 顺序照官方那行来（THEME_PREFERENCES = light / dark / system），我们不要自作主张换个先后
-          { value: 'light', label: '浅色' },
-          { value: 'dark', label: '深色' },
-          { value: 'system', label: '跟随系统' },
+          { value: 'light', label: t('浅色') },
+          { value: 'dark', label: t('深色') },
+          { value: 'system', label: t('跟随系统') },
         ],
       },
-      { key: 'remoteFontSize', type: 'number', group: 'ui', label: '字号大小', placeholder: '10-22，0=出厂值' },
+      { key: 'remoteFontSize', type: 'number', group: 'ui', label: t('字号大小'), placeholder: t('10-22，0=出厂值') },
       {
         key: 'remoteTranscriptView',
         type: 'select',
         group: 'ui',
-        label: '工作步骤展示',
+        label: t('工作步骤展示'),
         options: [
-          { value: 'default', label: '出厂值' },
-          { value: 'compact', label: '简洁' },
-          { value: 'standard', label: '标准' },
-          { value: 'detailed', label: '详细' },
-          { value: 'verbose', label: '完全展开' },
+          { value: 'default', label: t('出厂值') },
+          { value: 'compact', label: t('简洁') },
+          { value: 'standard', label: t('标准') },
+          { value: 'detailed', label: t('详细') },
+          { value: 'verbose', label: t('完全展开') },
         ],
       },
       {
         key: 'remoteDeveloperTools',
         type: 'select',
         group: 'ui',
-        label: '显示代码工作视图',
+        label: t('显示代码工作视图'),
         options: [
-          { value: 'default', label: '出厂值' },
-          { value: 'on', label: '开启' },
-          { value: 'off', label: '关闭' },
+          { value: 'default', label: t('出厂值') },
+          { value: 'on', label: t('开启') },
+          { value: 'off', label: t('关闭') },
         ],
       },
       {
         key: 'remotePerformanceUsage',
         type: 'select',
         group: 'ui',
-        label: '性能与用量',
+        label: t('性能与用量'),
         options: [
-          { value: 'default', label: '出厂值' },
-          { value: 'compact', label: '简洁' },
-          { value: 'detailed', label: '详细' },
+          { value: 'default', label: t('出厂值') },
+          { value: 'compact', label: t('简洁') },
+          { value: 'detailed', label: t('详细') },
         ],
       },
       // 「缓存」一组（group: 'cache'）：手机端资源缓存的口径。缓存本体在手机的 WebView 里，
       // 宿主只负责把响应头喂对（详见 index.js 的「手机端缓存策略」与 README 同名一节）。
-      { key: 'cacheEnabled', type: 'boolean', group: 'cache', label: '启用手机端资源缓存' },
-      { key: 'cacheTtlMinutes', type: 'number', group: 'cache', label: '新鲜期（分钟）', placeholder: '1-1440，默认 10' },
-      { key: 'cacheProbe', type: 'boolean', group: 'cache', label: '过期核对用首/尾片段指纹' },
+      { key: 'cacheEnabled', type: 'boolean', group: 'cache', label: t('启用手机端资源缓存') },
+      { key: 'cacheTtlMinutes', type: 'number', group: 'cache', label: t('新鲜期（分钟）'), placeholder: t('1-1440，默认 10') },
+      { key: 'cacheProbe', type: 'boolean', group: 'cache', label: t('过期核对用首/尾片段指纹') },
       // 默认关：这是**逆着上游意愿**的一步（壁纸那类实时抓帧自己写了 no-store），
       // 开着最多会看到「新鲜期」这么久之前的旧帧/旧音轨，所以必须由用户显式打开。
-      { key: 'cacheOverrideNoStore', type: 'boolean', group: 'cache', label: '接管 no-store 的大媒体' },
+      { key: 'cacheOverrideNoStore', type: 'boolean', group: 'cache', label: t('接管 no-store 的大媒体') },
       // 媒体元素取大文件时会发 Range，而浏览器**永远不缓存 206** —— 于是每次进页面都重下整段。
       // 这一项把「从 0 取到结尾」那一种改写成可缓存的整份。默认关：个别播放器可能失去拖动定位。
-      { key: 'cacheFullRange', type: 'boolean', group: 'cache', label: '整段 Range 视为整份' },
+      { key: 'cacheFullRange', type: 'boolean', group: 'cache', label: t('整段 Range 视为整份') },
     ];
 
     const DEFAULTS = {
@@ -246,7 +382,7 @@ window.__ModuleLoader__.load({
       };
       async function load() {
         if (typeof window.fetch !== 'function') {
-          snapshot = { ...snapshot, status: 'error', writable: false, error: '当前页面没有 fetch' };
+          snapshot = { ...snapshot, status: 'error', writable: false, error: t('当前页面没有 fetch') };
           emit();
           return;
         }
@@ -718,7 +854,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         if (scrim) return scrim;
         scrim = document.createElement('div');
         scrim.id = SCRIM_ID;
-        scrim.addEventListener('click', () => { clickLabel('收起侧边栏'); });
+        scrim.addEventListener('click', () => { clickLabel(t('收起侧边栏')); });
         document.body.appendChild(scrim);
         return scrim;
       }
@@ -728,7 +864,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
        * （宽度决定它必须全屏，点了也只会留一个空轨道）。按 aria-label 精确隐藏，
        * 不碰别的按钮 —— 尤其是「收起右侧边栏」，那是手机上唯一该留的出口。
        */
-      const PHONE_HIDDEN_LABELS = ['分栏', '退出全屏', 'Split', 'Exit fullscreen'];
+      const PHONE_HIDDEN_LABELS = [t('分栏'), t('退出全屏'), 'Split', 'Exit fullscreen'];
       function hideUselessRightControls() {
         const panel = document.querySelector('[data-sidebar-right-panel]');
         if (!panel) return;
@@ -751,10 +887,10 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         if (!drawer || !rightOpen) return;
         const closeDrawer = drawerOpenedAt < rightOpenedAt;
         mutualBusy = true;
-        const ok = closeDrawer ? clickLabel('收起侧边栏') : clickLabel('收起右侧边栏');
+        const ok = closeDrawer ? clickLabel(t('收起侧边栏')) : clickLabel(t('收起右侧边栏'));
         if (ok) {
-          const what = closeDrawer ? '左抽屉' : '右栏';
-          try { console.info(`[remote-access] 手机上两个浮层互斥：收掉先开的${what}`); } catch { /* 忽略 */ }
+          const what = closeDrawer ? t('左抽屉') : t('右栏');
+          try { console.info((LANG === 'en' ? `[remote-access] Only one overlay at a time on the phone: closing the ${what} that opened first` : `[remote-access] 手机上两个浮层互斥：收掉先开的${what}`)); } catch { /* 忽略 */ }
         }
         window.setTimeout(() => { mutualBusy = false; }, 300);
       }
@@ -1199,14 +1335,14 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
           // 向右滑：抽屉开着时先**收起抽屉**（这就是「回到主页」），其次收右栏，最后才是打开抽屉
-          if (drawer) { clickLabel('收起侧边栏'); return; }
-          if (rightOpen) { clickLabel('收起右侧边栏'); return; }
-          clickLabel('打开侧边栏');
+          if (drawer) { clickLabel(t('收起侧边栏')); return; }
+          if (rightOpen) { clickLabel(t('收起右侧边栏')); return; }
+          clickLabel(t('打开侧边栏'));
           return;
         }
         // 向左滑：收起抽屉优先，否则打开右栏
-        if (drawer) { clickLabel('收起侧边栏'); return; }
-        if (!rightOpen) clickLabel('打开右侧边栏');
+        if (drawer) { clickLabel(t('收起侧边栏')); return; }
+        if (!rightOpen) clickLabel(t('打开右侧边栏'));
       }
 
       try {
@@ -1281,7 +1417,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         // 用户点个菜单不会连抽屉一起收掉、会话也切过去。
         if (target.closest('button')) return;
         guardComposerFocus();
-        clickLabel('收起侧边栏');
+        clickLabel(t('收起侧边栏'));
       }
 
       try {
@@ -1370,8 +1506,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             return false;
           }
         }
-        if (rightPanelOpen()) return clickLabel('收起右侧边栏');
-        if (document.documentElement.hasAttribute('data-ra-drawer')) return clickLabel('收起侧边栏');
+        if (rightPanelOpen()) return clickLabel(t('收起右侧边栏'));
+        if (document.documentElement.hasAttribute('data-ra-drawer')) return clickLabel(t('收起侧边栏'));
         if (activeGlobalPanel()) return backToConversation();
         return false;
       }
@@ -1615,9 +1751,9 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
         try { projectThemeLocal(ctx, config.remoteTheme); } catch { /* 忽略 */ }
         try { projectFontSizeLocal(ctx, config.remoteFontSize); } catch { /* 忽略 */ }
         publishUiStatus({
-          applied: ['外观', '字号大小'],
+          applied: [t('外观'), t('字号大小')],
           pending: [],
-          skipped: ['工作步骤展示', '显示代码工作视图', '性能与用量'],
+          skipped: [t('工作步骤展示'), t('显示代码工作视图'), t('性能与用量')],
           localOnly: true,
         });
       }
@@ -1691,22 +1827,22 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                 const res = await window.fetch('/__remote_access__/notify?wait=0', { cache: 'no-store' });
                 if (!alive) return;
                 if (res.status === 404) {
-                  setLinkNote('电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH');
+                  setLinkNote(t('电脑上的插件还没有通知接口（1.3.1 起才有）→ 更新插件并重启一次 DSH'));
                   return;
                 }
                 if (res.status === 401 || res.status === 403) {
-                  setLinkNote('通知接口需要重新解锁：刷新本页、再输一次访问密码');
+                  setLinkNote(t('通知接口需要重新解锁：刷新本页、再输一次访问密码'));
                   return;
                 }
                 const data = await res.json().catch(() => null);
                 if (!alive) return;
                 if (!res.ok || data === null) {
-                  setLinkNote(`通知接口返回 HTTP ${res.status}`);
+                  setLinkNote((LANG === 'en' ? `Notification endpoint returned HTTP ${res.status}` : `通知接口返回 HTTP ${res.status}`));
                   return;
                 }
                 const host = data.enabled === false
-                  ? '电脑上关掉了「提问时通知手机」'
-                  : '电脑上的插件已支持提问通知 ✓';
+                  ? t('电脑上关掉了「提问时通知手机」')
+                  : t('电脑上的插件已支持提问通知 ✓');
                 // 外壳自报的那份通知环境（它每次轮询都会带一份上来）。
                 // 「通知发了却不弹横幅」这种问题发生在手机那一端，宿主看不见 —— 这行字就是答案。
                 // 这里**不打勾**：「通道=高」只是必要条件，厂商那层（小米的「后台弹出界面」等）
@@ -1717,18 +1853,18 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                   const bannerOk = phone.notifications && phone.importance >= 4;
                   const finishOk = phone.notifications && (phone.importanceFinish ?? 0) >= 4;
                   const parts = [
-                    `通知${phone.notifications ? '已开' : '没开'}`,
-                    `提问通道=${phone.importance}${bannerOk ? '' : '（弹不出来）'}`,
+                    (LANG === 'en' ? `Notifications ${phone.notifications ? 'on' : 'off'}` : `通知${phone.notifications ? '已开' : '没开'}`),
+                    (LANG === 'en' ? `Question channel=${phone.importance}${bannerOk ? '' : ' (banner suppressed)'}` : `提问通道=${phone.importance}${bannerOk ? '' : '（弹不出来）'}`),
                   ];
                   // 「任务结束」是单独一条通道，重要性也分开报（老 APK 不带这个字段，就只说提问那条）
                   if (phone.importanceFinish !== undefined) {
-                    parts.push(`结束通道=${phone.importanceFinish}${finishOk ? '' : '（弹不出来）'}`);
+                    parts.push((LANG === 'en' ? `Finish channel=${phone.importanceFinish}${finishOk ? '' : ' (banner suppressed)'}` : `结束通道=${phone.importanceFinish}${finishOk ? '' : '（弹不出来）'}`));
                   }
-                  phoneNote = ` · 手机端 App ${phone.app}：${parts.join('、')}`;
+                  phoneNote = (LANG === 'en' ? ` · Phone app ${phone.app}: ${parts.join(', ')}` : ` · 手机端 App ${phone.app}：${parts.join('、')}`);
                 }
                 setLinkNote(host + phoneNote);
               } catch {
-                if (alive) setLinkNote('读不到电脑上的插件状态');
+                if (alive) setLinkNote(t('读不到电脑上的插件状态'));
               }
             })();
             return () => { alive = false; };
@@ -1752,7 +1888,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const [cacheBusy, setCacheBusy] = React.useState(false);
           const readCacheInfo = async (reset, alive) => {
             if (isLocal) {
-              setCacheNote('本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径');
+              setCacheNote(t('本机页面不走这个缓存代理：手机上打开这一组时，这里会显示那边实际生效的口径'));
               return;
             }
             if (typeof window.fetch !== 'function') return;
@@ -1761,34 +1897,34 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
               const res = await window.fetch(`/__remote_access__/cache${reset ? '?reset=1' : ''}`, { cache: 'no-store' });
               if (alive && !alive()) return;
               if (res.status === 404) {
-                setCacheNote('电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH');
+                setCacheNote(t('电脑上的插件还没有缓存接口（1.3.8 起才有）→ 更新插件并重启一次 DSH'));
                 return;
               }
               if (res.status === 401 || res.status === 403) {
-                setCacheNote('缓存接口需要重新解锁：刷新本页、再输一次访问密码');
+                setCacheNote(t('缓存接口需要重新解锁：刷新本页、再输一次访问密码'));
                 return;
               }
               const data = await res.json().catch(() => null);
               if (alive && !alive()) return;
               if (!res.ok || data === null) {
-                setCacheNote(`缓存接口返回 HTTP ${res.status}`);
+                setCacheNote((LANG === 'en' ? `Cache endpoint returned HTTP ${res.status}` : `缓存接口返回 HTTP ${res.status}`));
                 return;
               }
               const policy = data.policy ?? {};
               const stats = data.stats ?? {};
               const head = policy.enabled === false
-                ? '电脑上关掉了手机端缓存'
-                : `内容寻址 immutable · 无校验器 ${policy.ttlMinutes} 分钟 · ` +
-                  `探针${policy.probe === false ? '关' : '开'}`;
+                ? t('电脑上关掉了手机端缓存')
+                : (LANG === 'en' ? `Content-addressed immutable · no validator ${policy.ttlMinutes} min · ` : `内容寻址 immutable · 无校验器 ${policy.ttlMinutes} 分钟 · `) +
+                  (LANG === 'en' ? `Probe ${policy.probe === false ? 'off' : 'on'}` : `探针${policy.probe === false ? '关' : '开'}`);
               const traffic = data.traffic ?? null;
               const trafficText = traffic
-                ? ` · 本轮送出 ${humanBytes(traffic.totalOut)}（其中无缓存口径 ${humanBytes(traffic.uncachedOut)}）` +
+                ? (LANG === 'en' ? ` · Sent this round ${humanBytes(traffic.totalOut)} (of which no-cache ${humanBytes(traffic.uncachedOut)})` : ` · 本轮送出 ${humanBytes(traffic.totalOut)}（其中无缓存口径 ${humanBytes(traffic.uncachedOut)}）`) +
                   `、WebSocket ${humanBytes(traffic.wsOut)}`
                 : '';
-              setCacheNote(`${head} · 本次 304 ${stats.notModified ?? 0} 次 / 小资源 ${stats.inline ?? 0} / 探针 ${stats.probe ?? 0}${trafficText}`);
+              setCacheNote((LANG === 'en' ? `${head} · 304 this run ${stats.notModified ?? 0} / small assets ${stats.inline ?? 0} / probes ${stats.probe ?? 0}${trafficText}` : `${head} · 本次 304 ${stats.notModified ?? 0} 次 / 小资源 ${stats.inline ?? 0} / 探针 ${stats.probe ?? 0}${trafficText}`));
               setCacheInfo({ policy, stats, traffic, at: Date.now() });
             } catch {
-              if (!alive || alive()) setCacheNote('读不到电脑上的缓存状态');
+              if (!alive || alive()) setCacheNote(t('读不到电脑上的缓存状态'));
             } finally {
               if (reset) setCacheBusy(false);
             }
@@ -1826,11 +1962,11 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             // 现在不合规就地拦下、说清规则，绝不写盘。
             const code = String(current.accessCode ?? '').trim();
             if (code && !ACCESS_CODE_RE.test(code)) {
-              setStatus('访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。');
+              setStatus(t('访问密码没改：只接受 4–12 位数字或字母（不能有空格和符号）。'));
               return;
             }
             setBusy(true);
-            setStatus('保存中…');
+            setStatus(t('保存中…'));
             try {
               const base = source ?? {};
               // 两侧都过一遍「decode → encode」再比：Host 的配置里可能压根没有某个键
@@ -1844,17 +1980,17 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
               }
               const count = Object.keys(changed).length;
               if (count === 0) {
-                setStatus('没有改动。');
+                setStatus(t('没有改动。'));
                 return;
               }
               const ops = Object.entries(changed).map(([key, value]) => ({ op: 'set', path: [key], value }));
               const accepted = await store.mutate(ops, snap.revision);
-              if (accepted !== true) throw new Error('写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。');
+              if (accepted !== true) throw new Error(t('写入被拒绝（配置在别处被改过），请点「重新读取」后再试一次。'));
               setDraft(null);
-              setStatus(`已保存 ${count} 项。`);
+              setStatus((LANG === 'en' ? `Saved ${count} item(s).` : `已保存 ${count} 项。`));
             } catch (err) {
-              try { console.error('[remote-access] 保存失败', err); } catch { /* 忽略 */ }
-              setStatus(`保存失败：${err?.message ?? err}`);
+              try { console.error(t('[remote-access] 保存失败'), err); } catch { /* 忽略 */ }
+              setStatus((LANG === 'en' ? `Save failed: ${err?.message ?? err}` : `保存失败：${err?.message ?? err}`));
             } finally {
               setBusy(false);
             }
@@ -1937,16 +2073,16 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           const uiState = uiStatusNow();
           const uiHint = uiState
             ? uiState.pending.length > 0
-              ? `暂时没接上官方入口：${uiState.pending.join('、')}`
+              ? (LANG === 'en' ? `Official entry point not ready yet: ${uiState.pending.join(', ')}` : `暂时没接上官方入口：${uiState.pending.join('、')}`)
               : uiState.localOnly
-                ? `已只在本页应用：${uiState.applied.join('、') || '无'}` +
+                ? (LANG === 'en' ? `Applied to this page only: ${uiState.applied.join(', ') || 'none'}` : `已只在本页应用：${uiState.applied.join('、') || '无'}`) +
                   (uiState.skipped.length > 0
-                    ? `；${uiState.skipped.join('、')} 在 DSH 0.2.1 起跟随电脑设置（官方只提供写宿主入口，本插件不替你改电脑）`
+                    ? (LANG === 'en' ? `; ${uiState.skipped.join(', ')} follow the desktop settings from DSH 0.2.1 (only a host-writing entry point is public, and this plugin will not change your desktop)` : `；${uiState.skipped.join('、')} 在 DSH 0.2.1 起跟随电脑设置（官方只提供写宿主入口，本插件不替你改电脑）`)
                     : '')
                 : uiState.applied.length > 0
-                  ? `已套用到本页：${uiState.applied.join('、')}`
-                  : '本页无需套用'
-            : '保存后，在远程页面打开时生效（本机界面不受影响）';
+                  ? (LANG === 'en' ? `Applied to this page: ${uiState.applied.join(', ')}` : `已套用到本页：${uiState.applied.join('、')}`)
+                  : t('本页无需套用')
+            : t('保存后，在远程页面打开时生效（本机界面不受影响）');
 
           const renderField = (field) => {
             const value = displayValue(field, current[field.key]);
@@ -2059,7 +2195,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                 'aria-expanded': groupsOpen[id] === true ? 'true' : 'false',
                 onClick: () => toggleGroup(id),
               },
-              `${groupsOpen[id] === true ? '▾' : '▸'} ${title}${changed > 0 ? `（已改 ${changed} 项）` : ''}`,
+              `${groupsOpen[id] === true ? '▾' : '▸'} ${title}${changed > 0 ? (LANG === 'en' ? ` (${changed} changed)` : `（已改 ${changed} 项）`) : ''}`,
             ),
             h('div', { style: groupHintStyle }, hint),
             groupsOpen[id] === true ? h('div', { style: rowStyle }, fields.flatMap(renderField)) : null,
@@ -2088,7 +2224,7 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
           };
           const statLabelStyle = { opacity: 0.62 };
           const statValueStyle = { fontVariantNumeric: 'tabular-nums', wordBreak: 'break-word' };
-          const flagText = (on, off) => (on ? '开 · 已接管' : `关 · ${off}`);
+          const flagText = (on, off) => (on ? t('开 · 已接管') : (LANG === 'en' ? `Off · ${off}` : `关 · ${off}`));
           const statRow = (label, value) =>
             h(
               'div',
@@ -2105,40 +2241,40 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             h(
               'div',
               { style: blockStyle },
-              h('div', { style: blockTitleStyle }, '生效策略'),
-              statRow('内容寻址产物', 'immutable（一年内不重取）'),
-              statRow('其它静态资源', cachePolicy ? `${cachePolicy.ttlMinutes} 分钟（过期先出旧的，后台核对一次）` : '—'),
-              statRow('过期核对', cachePolicy ? (cachePolicy.probe === false ? '长度 + 类型' : '首/尾各 64 KB 片段指纹') : '—'),
-              statRow('no-store 大媒体', cachePolicy ? flagText(cachePolicy.overrideNoStore, '尊重上游') : '—'),
-              statRow('整段 Range', cachePolicy ? flagText(cachePolicy.overrideRange, '原样透传 206') : '—'),
-              statRow('正文落盘', cachePolicy && cachePolicy.storesOnHost === false ? '不落宿主盘（零字节）' : '—'),
+              h('div', { style: blockTitleStyle }, t('生效策略')),
+              statRow(t('内容寻址产物'), t('immutable（一年内不重取）')),
+              statRow(t('其它静态资源'), cachePolicy ? (LANG === 'en' ? `${cachePolicy.ttlMinutes} min (stale first, one background check)` : `${cachePolicy.ttlMinutes} 分钟（过期先出旧的，后台核对一次）`) : '—'),
+              statRow(t('过期核对'), cachePolicy ? (cachePolicy.probe === false ? t('长度 + 类型') : t('首/尾各 64 KB 片段指纹')) : '—'),
+              statRow(t('no-store 大媒体'), cachePolicy ? flagText(cachePolicy.overrideNoStore, t('尊重上游')) : '—'),
+              statRow(t('整段 Range'), cachePolicy ? flagText(cachePolicy.overrideRange, t('原样透传 206')) : '—'),
+              statRow(t('正文落盘'), cachePolicy && cachePolicy.storesOnHost === false ? t('不落宿主盘（零字节）') : '—'),
             ),
             // ---- 本次会话计数
             h(
               'div',
               { style: blockStyle },
-              h('div', { style: blockTitleStyle }, '本次会话'),
-              statRow('304（零字节）', cacheCounters ? `${cacheCounters.notModified} 次` : '—'),
-              statRow('小资源缓冲', cacheCounters ? `${cacheCounters.inline} 次` : '—'),
-              statRow('片段探针', cacheCounters ? `${cacheCounters.probe} 次（失败 ${cacheCounters.probeFail}）` : '—'),
-              statRow('接管 no-store', cacheCounters ? `${cacheCounters.override ?? 0} 次` : '—'),
+              h('div', { style: blockTitleStyle }, t('本次会话')),
+              statRow(t('304（零字节）'), cacheCounters ? (LANG === 'en' ? `${cacheCounters.notModified}` : `${cacheCounters.notModified} 次`) : '—'),
+              statRow(t('小资源缓冲'), cacheCounters ? (LANG === 'en' ? `${cacheCounters.inline}` : `${cacheCounters.inline} 次`) : '—'),
+              statRow(t('片段探针'), cacheCounters ? (LANG === 'en' ? `${cacheCounters.probe} (failed ${cacheCounters.probeFail})` : `${cacheCounters.probe} 次（失败 ${cacheCounters.probeFail}）`) : '—'),
+              statRow(t('接管 no-store'), cacheCounters ? (LANG === 'en' ? `${cacheCounters.override ?? 0}` : `${cacheCounters.override ?? 0} 次`) : '—'),
             ),
             // ---- 本轮流量账
             h(
               'div',
               { style: blockStyle },
-              h('div', { style: blockTitleStyle }, '本轮流量账（按 URL 排字节）'),
+              h('div', { style: blockTitleStyle }, t('本轮流量账（按 URL 排字节）')),
               ...(cacheTraffic
                 ? [
                     h(
                       'div',
                       { key: 'traffic-total', style: { ...statRowStyle, marginBottom: 6 } },
-                      h('span', { style: statLabelStyle }, '送出 / 收到'),
+                      h('span', { style: statLabelStyle }, t('送出 / 收到')),
                       h(
                         'span',
                         { style: statValueStyle },
                         `${humanBytes(cacheTraffic.totalOut)} / ${humanBytes(cacheTraffic.totalIn)}` +
-                          `　其中无缓存口径 ${humanBytes(cacheTraffic.uncachedOut)}` +
+                          (LANG === 'en' ? `  of which no-cache ${humanBytes(cacheTraffic.uncachedOut)}` : `　其中无缓存口径 ${humanBytes(cacheTraffic.uncachedOut)}`) +
                           `　WebSocket ${humanBytes(cacheTraffic.wsOut)} / ${humanBytes(cacheTraffic.wsIn)}`,
                       ),
                     ),
@@ -2155,8 +2291,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                           marginBottom: 3,
                         },
                       },
-                      h('span', { style: { textAlign: 'right' } }, '送出'),
-                      h('span', { style: { textAlign: 'right' } }, '次数'),
+                      h('span', { style: { textAlign: 'right' } }, t('送出')),
+                      h('span', { style: { textAlign: 'right' } }, t('次数')),
                       h('span', null, 'URL'),
                     ),
                     ...cacheTraffic.top.slice(0, 6).map((row) => {
@@ -2173,14 +2309,14 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                             'span',
                             { style: { wordBreak: 'break-all', opacity: 0.9 } },
                             row.key,
-                            uncached > 0 ? `　（${uncached} 次无缓存口径 → 下次仍会重传）` : null,
+                            uncached > 0 ? (LANG === 'en' ? `  (${uncached} no-cache -> re-sent next time)` : `　（${uncached} 次无缓存口径 → 下次仍会重传）`) : null,
                           ),
                         ),
                         row.reason
                           ? h(
                               'div',
                               { style: { fontSize: 11, opacity: 0.55, paddingLeft: phone ? 0 : 116 } },
-                              `原因：${row.reason}`,
+                              (LANG === 'en' ? `Reason: ${row.reason}` : `原因：${row.reason}`),
                             )
                           : null,
                       );
@@ -2194,12 +2330,12 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                     h(
                       'button',
                       { type: 'button', style: buttonStyle, disabled: cacheBusy || busy, onClick: () => readCacheInfo(false, null) },
-                      cacheBusy ? '读取中…' : '刷新',
+                      cacheBusy ? t('读取中…') : t('刷新'),
                     ),
                     h(
                       'button',
                       { type: 'button', style: buttonStyle, disabled: cacheBusy || busy, onClick: () => readCacheInfo(true, null) },
-                      cacheBusy ? '处理中…' : '清零本轮统计',
+                      cacheBusy ? t('处理中…') : t('清零本轮统计'),
                     ),
                   )
                 : null,
@@ -2207,8 +2343,8 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                 ? h(
                     'div',
                     { style: { marginTop: 6, fontSize: 11, opacity: 0.55, lineHeight: 1.7 } },
-                    '用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。' +
-                      '实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。',
+                    t('用法：点「清零本轮统计」→ 完全退出 App（从最近任务划掉）→ 重新打开，回来后这里显示的就是那一轮的真实花费。') +
+                      t('实时轮询（如音频频谱）与会话通道（聊天图片走的 RPC）不在缓存射程内，它们出现大数字属正常。'),
                   )
                 : null,
             ),
@@ -2221,11 +2357,11 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
             'div',
             { style: { padding: phone ? '4px 2px' : '2px 0' } },
             h('div', { style: rowStyle }, mainRows),
-            renderGroup('ui', 'UI 设置', uiHint, uiFields, uiChanged),
+            renderGroup('ui', t('UI 设置'), uiHint, uiFields, uiChanged),
             renderGroup(
               'cache',
-              '缓存',
-              cacheNote || `默认：内容寻址的产物钉一年、其余 ${DEFAULTS.cacheTtlMinutes} 分钟；正文一律不落宿主盘`,
+              t('缓存'),
+              cacheNote || (LANG === 'en' ? `Default: content-addressed assets pinned for a year, everything else ${DEFAULTS.cacheTtlMinutes} min; no body is ever written to the host disk` : `默认：内容寻址的产物钉一年、其余 ${DEFAULTS.cacheTtlMinutes} 分钟；正文一律不落宿主盘`),
               cacheFields,
               cacheChanged,
               cacheExtra,
@@ -2237,36 +2373,36 @@ html[data-ra-layout="phone"][data-ra-drawer] body[data-we-wallpaper] [data-ra-si
                   ? { marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }
                   : { marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' },
               },
-              h('button', { type: 'button', style: buttonStyle, onClick: onSave, disabled: busy }, busy ? '保存中…' : '保存'),
-              h('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: onReload }, '重新读取'),
+              h('button', { type: 'button', style: buttonStyle, onClick: onSave, disabled: busy }, busy ? t('保存中…') : t('保存')),
+              h('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: onReload }, t('重新读取')),
               status ? h('span', { style: { opacity: 0.9 } }, status) : null,
             ),
             // 自检那行：本页代码的版本 + 电脑那端通知接口的状态（排「怎么没通知」时先看它）
             h(
               'div',
               { style: { marginTop: 10, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
-              `本页客户端 ${CLIENT_VERSION}${linkNote ? ` · ${linkNote}` : ''}`,
+              (LANG === 'en' ? `This page's client ${CLIENT_VERSION}${linkNote ? ` · ${linkNote}` : ''}` : `本页客户端 ${CLIENT_VERSION}${linkNote ? ` · ${linkNote}` : ''}`),
             ),
             // 配置读写失败时直接把原因写出来（本页只认这一个文件，读不到就什么都改不了）
             snap.status === 'error'
               ? h(
                   'div',
                   { style: { marginTop: 10, fontSize: 12, color: 'inherit', opacity: 0.9, lineHeight: 1.6 } },
-                  `读不到本用户配置：${snap.error || '未知错误'}（点「重新读取」重试）`,
+                  (LANG === 'en' ? `Cannot read this user's config: ${snap.error || 'unknown error'} (click Reload to retry)` : `读不到本用户配置：${snap.error || '未知错误'}（点「重新读取」重试）`),
                 )
               : null,
             // 配置来源那一行：只有本用户 JSON，没有共享 profile
             h(
               'div',
               { style: { marginTop: 6, fontSize: 12, opacity: 0.7, lineHeight: 1.6 } },
-              `配置只存在：${snap.path || '$DSH_HOME/remote-access-config.json'}` +
-                '（每个 Windows 用户各一份；插件不读也不写共享 profile）。',
+              (LANG === 'en' ? `Config lives only at: ${snap.path || '$DSH_HOME/remote-access-config.json'}` : `配置只存在：${snap.path || '$DSH_HOME/remote-access-config.json'}`) +
+                t('（每个 Windows 用户各一份；插件不读也不写共享 profile）。'),
             ),
           );
         }
 
         ctx.slots.inject('settings.section', () =>
-          ctx.slots.register({ name: 'settings.section', id: NS, order: 100, label: '远程访问' }, Panel),
+          ctx.slots.register({ name: 'settings.section', id: NS, order: 100, label: t('远程访问') }, Panel),
         );
       },
     };
