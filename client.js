@@ -647,7 +647,17 @@ html[data-ra-layout="phone"] [data-ra-settings-content] input,
 html[data-ra-layout="phone"] [data-ra-settings-content] textarea,
 html[data-ra-layout="phone"] [data-ra-settings-content] select { font-size: 16px !important; }
 
-/* 输入区（我们的）：工具条允许换行，别把模型名截成「DeepSeek-V4…」 */
+/* 正文内容宽度。
+   官方把聊天气泡的宽度限制在 clamp(680px, …, 920px)：
+     --dsh-chat-content-width: clamp(680px, calc(var(--dsh-conversation-column-width,0px) * .64), 920px)
+   那是给桌面宽窗口用的。手机上视口只有 390px，680px 的下限比屏幕还宽 ——
+   于是内容按 680px 布局、右边被裁掉一大块（真机上就是「主页文本区右侧空白过大」）。
+   这里把它按视口算，并留出左右各 12px 的呼吸位。
+   选择器限定在正文列内（[data-ra-center]），避免误伤其它同名类。 */
+html[data-ra-layout="phone"] [data-ra-center] [class*="_body"] {
+  --dsh-chat-content-width: calc(100vw - 24px) !important;
+  --dsh-composer-card-max-width: calc(100vw - 24px) !important;
+}
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"] {
   padding-left: 10px !important; padding-right: 10px !important;
 }
@@ -656,6 +666,18 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_r
 }
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_trailing"] {
   flex: 1 1 auto !important; min-width: 0 !important;
+}
+
+/* 输入框字号：手机上 14px 偏大（占宽、行高 24px 又显得松）。
+   官方自己的规则是 font-size: max(16px, var(--dsh-content-font-size, 14px))，
+   但那个 max() 在本页被 --dsh-content-font-size=14px 直接顶掉了，实际渲染就是 14px。
+   这里明确降到 15px，并把行高收紧，让一行能放更多字。 */
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"],
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [data-composer-input] {
+  font-size: 15px !important;
+}
+html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [data-composer-input] {
+  line-height: 21px !important;
 }
 
 @media (orientation: landscape) and (max-height: 520px) {
