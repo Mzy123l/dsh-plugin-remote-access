@@ -647,17 +647,13 @@ html[data-ra-layout="phone"] [data-ra-settings-content] input,
 html[data-ra-layout="phone"] [data-ra-settings-content] textarea,
 html[data-ra-layout="phone"] [data-ra-settings-content] select { font-size: 16px !important; }
 
-/* 正文内容宽度。
-   官方把聊天气泡的宽度限制在 clamp(680px, …, 920px)：
-     --dsh-chat-content-width: clamp(680px, calc(var(--dsh-conversation-column-width,0px) * .64), 920px)
-   那是给桌面宽窗口用的。手机上视口只有 390px，680px 的下限比屏幕还宽 ——
-   于是内容按 680px 布局、右边被裁掉一大块（真机上就是「主页文本区右侧空白过大」）。
-   这里把它按视口算，并留出左右各 12px 的呼吸位。
-   选择器限定在正文列内（[data-ra-center]），避免误伤其它同名类。 */
-html[data-ra-layout="phone"] [data-ra-center] [class*="_body"] {
-  --dsh-chat-content-width: calc(100vw - 24px) !important;
-  --dsh-composer-card-max-width: calc(100vw - 24px) !important;
-}
+/* 正文内容宽度：**交给官方，不要覆盖**。
+   官方自己就有一条自适应的规则：
+     --dsh-chat-content-width: min(calc(100% - 32px), 920px)
+   它按容器百分比算，手机上天然就是「视口 - 32px」，本来是对的。
+   我一度用 calc(100vw - 24px) !important 去盖它 —— 那反而更糟：
+   100vw 在 WebView 里含滚动条宽度、且不受容器约束，右侧空白变得更大。
+   所以这里一条都不写。 */
 html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_card"] {
   padding-left: 10px !important; padding-right: 10px !important;
 }
