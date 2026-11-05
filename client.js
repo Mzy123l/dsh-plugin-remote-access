@@ -1269,20 +1269,17 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       //   向左滑 → 开右栏；  右栏开着时向右滑 → 收右栏
       //   向右滑 → 开左抽屉；抽屉开着时向左滑 → 收左抽屉
       //
-      // **阈值宁可松一点**：之前 56/72px + 1.8 倍角度比，真机上要划好几次才中一次，
-      // 因为手指滑动天然带纵向位移，1.8 倍几乎达不到。现在改成：
-      //   · 位移门槛降到 40px（贴边）/ 50px（正文中间）；
-      //   · 角度比降到 1.2 / 1.4；
-      //   · 额外给一条「快划」通道：位移 ≥ 24px 且速度够快也算 —— 这是系统侧滑的常见判据。
-      // 只有确认是横向之后才 preventDefault，纵向手势完全放给浏览器。
-      const EDGE_ZONE = 32;
-      const MIN_SWIPE = 40;
-      const MIN_SWIPE_MID = 50;
-      const RATIO_EDGE = 1.2;
-      const RATIO_MID = 1.4;
-      /** 快划通道：位移过了这个值、且速度够快，就当成明确意图 */
-      const FLICK_MIN = 24;
-      const FLICK_VELOCITY = 0.35; // px/ms
+      // 起手位置只影响「门槛」：贴边起手（≤28px）算明确意图，56px 就够了；
+      // 从正文中间起手要更严格（72px + 更陡的横向比例），免得把正文里的横向滚动/选择手势吃掉。
+      // 三条自制规则都是为了不跟正文打架：
+      //   1. 只有「明显横向」才接管（|dx| > |dy| * 1.25，贴边起手只需 10px 位移即可判定）；
+      //   2. 只有判定为横向之后才 preventDefault —— 纵向手势完全放给浏览器；
+      //   3. 正文中间起手时横向比例放到 1.8 倍，宁可少触发也不误伤。
+      const EDGE_ZONE = 28;
+      const MIN_SWIPE = 56;
+      const MIN_SWIPE_MID = 72;
+      const RATIO_EDGE = 1.25;
+      const RATIO_MID = 1.8;
       let swipe = null;
       const phoneNow = () => document.documentElement.getAttribute('data-ra-layout') === 'phone';
 
@@ -1299,37 +1296,33 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        *   · 当前有非折叠的文本选区（用户在拖选择柄）。
        * 判断失败一律当作「没命中」，也就是保持旧行为，不至于把滑动开关整个弄丢。
        */
-      /**
-       * 起手点是不是落在「自己就要吃横向手势」的东西里 —— 是的话我们根本不接管这一划。
-       *
-       * 只认**真正会横向滚动**的容器（表格、代码块、轮播这类）和明确的拖拽目标。
-       * 早先那条「scrollWidth - clientWidth > 24」太宽：聊天页里几乎每个容器都有几像素
-       * 横向溢出，于是整页都被判成「归属方」，手势一次都触发不了（真机上就是「滑空白处没反应」）。
-       * 现在要求：**横向溢出至少 48px** 且 overflow-x 确实是 auto/scroll/overlay 才算。
-       */
       function horizontalOwner(target) {
         try {
           for (let el = target, depth = 0; el && depth < 14; el = el.parentElement, depth += 1) {
             if (typeof Element === 'undefined' || !(el instanceof Element)) break;
             const tag = el.tagName;
-            // 明确会吃掉横向拖动的交互元素
-            if (tag === 'CANVAS' || tag === 'VIDEO') return true;
+            if (tag === 'CANVAS' || tag === 'VIDEO' || tag === 'IMG') return true;
             if (tag === 'SELECT' || tag === 'TEXTAREA') return true;
             if (tag === 'INPUT' && el.type === 'range') return true;
             if (el.isContentEditable) return true;
             if (el.hasAttribute('draggable') && el.getAttribute('draggable') !== 'false') return true;
-            // 壁纸引擎真正挂在元素上的交互标记才算（页面级那批挂在 body 上，是 CSS 锚点，跳过）
+            // 壁纸引擎的 data-we-* / data-wallpaper-* 有两类，判据必须分开：
+            //   · **页面级那批全挂在 <body> 上**（data-we-glass-page / -wallpaper / -parallax /
+            //     -adapter / -glass-chat …，插件一启用就恒在）—— 它们只是 CSS 门控锚点，
+            //     不是「会吃掉横向手势的元素」；
+            //   · 真正挂在元素上的交互标记（例如壁纸选择器的 data-we-id）才算归属方。
+            // 以前不分这两类：body 命中 → **首页**这种 DOM 浅的地方（起手点往上几层就到 body）
+            // 整页划不动，而聊天页嵌套更深、14 层内走不到 body，反而正常 —— 真机上就是
+            // 「新会话首页左右滑不出面板」。所以根节点一律跳过。
             const isRoot = el === document.body || el === document.documentElement;
             const attrs = typeof el.getAttributeNames === 'function' ? el.getAttributeNames() : [];
             if (!isRoot && attrs.some((n) => n.startsWith('data-we') || n.startsWith('data-wallpaper'))) return true;
-            // 真正的横向滚动容器：溢出要够大，且 overflow-x 明确是可滚的
-            if (el.scrollWidth - el.clientWidth > 48) {
+            if (el.scrollWidth - el.clientWidth > 24) {
               const overflowX = getComputedStyle(el).overflowX;
               if (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'overlay') return true;
             }
-            // 明确要求独占横向手势的（画布、轮播）
             const touchAction = getComputedStyle(el).touchAction;
-            if (touchAction === 'none' || touchAction === 'pan-x') return true;
+            if (touchAction && (touchAction.includes('pan-x') || touchAction === 'none')) return true;
           }
           const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
           if (sel && !sel.isCollapsed && String(sel).length > 0) return true;
@@ -1347,7 +1340,6 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         swipe = {
           x: point.clientX,
           y: point.clientY,
-          at: Date.now(),
           fromLeft: point.clientX <= EDGE_ZONE,
           fromRight: point.clientX >= width - EDGE_ZONE,
           horizontal: false,
@@ -1361,15 +1353,10 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const dy = point.clientY - swipe.y;
         const fromEdge = swipe.fromLeft || swipe.fromRight;
         if (!swipe.horizontal) {
-          const need = fromEdge ? 8 : 12;
+          const need = fromEdge ? 10 : 16;
           if (Math.abs(dx) < need) return;
           const ratio = fromEdge ? RATIO_EDGE : RATIO_MID;
-          if (Math.abs(dx) <= Math.abs(dy) * ratio) {
-            // 判成纵向：**不丢弃这次触摸**，只标记，让 onTouchEnd 还能走「快划」通道。
-            // 早先这里直接 swipe = null，结果手指稍斜一点就永远触发不了（真机上要划很多次）。
-            swipe.vertical = true;
-            return;
-          }
+          if (Math.abs(dx) <= Math.abs(dy) * ratio) { swipe = null; return; } // 纵向/斜向：交还给页面
           swipe.horizontal = true;
         }
         if (e.cancelable) e.preventDefault(); // 已确认横向：别让浏览器同时翻页/前进后退
@@ -1387,23 +1374,13 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       function onTouchEnd(e) {
         const started = swipe;
         swipe = null;
-        if (!started) return;
+        if (!started || !started.horizontal) return;
         const point = e.changedTouches?.[0];
         if (!point) return;
         const dx = point.clientX - started.x;
-        const dy = point.clientY - started.y;
         const fromEdge = started.fromLeft || started.fromRight;
-        // 两条通道满足其一即可：
-        //   1. 位移够了（贴边 40 / 正文 50）—— 常规滑；
-        //   2. 快划：位移 ≥ 24 且速度够快 —— 手指快速一甩，这是系统侧滑的常见判据。
         const need = fromEdge ? MIN_SWIPE : MIN_SWIPE_MID;
-        const elapsed = Math.max(1, Date.now() - started.at);
-        const velocity = Math.abs(dx) / elapsed;
-        const farEnough = Math.abs(dx) >= need;
-        const flicked = Math.abs(dx) >= FLICK_MIN && velocity >= FLICK_VELOCITY;
-        if (!farEnough && !flicked) return;
-        // 快划通道下再确认一次方向：横向分量必须明显大于纵向，避免把斜着划当左右滑
-        if (!started.horizontal && Math.abs(dx) <= Math.abs(dy) * 1.0) return;
+        if (Math.abs(dx) < need) return;
         const drawer = drawerOpen();
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
@@ -1413,7 +1390,10 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           openDrawer();
           return;
         }
-        // 向左滑：收起抽屉优先，否则打开右栏
+        // 向左滑：抽屉开着 → 只收抽屉并**到此为止**。
+        // 这里必须无条件 return：早先写的是 closeDrawer() 之后还往下走，
+        // 而 closeDrawer() 找不到那枚按钮时会返回 false，于是继续执行到
+        // openRightbar() —— 真机现象就是「抽屉里左滑，反而弹出右侧面板」。
         if (drawer) { closeDrawer(); return; }
         if (!rightOpen) openRightbar();
       }
@@ -1425,7 +1405,16 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
       }
 
-      /** 收起左抽屉：点官方那枚收起按钮（抽屉开着时它就是 toggle） */
+      /**
+       * 收起左抽屉。
+       *
+       * 优先点官方那枚 toggle；**点不到时直接动官方状态**。
+       * 为什么不能只靠点按钮：抽屉展开时整层盖在正文上，侧栏里那枚 toggle 有时会被
+       * 官方自己的遮罩/aria-hidden 挡住，`isClickable()` 判不过 → 按钮点不了 → 抽屉收不起来。
+       * 真机上就是「抽屉里左滑，抽屉没收起来，反而弹出右侧面板」。
+       * 所以按钮这条路失败后必须再用 `layout.toggleSidebar()` 兜一次 —— 它在抽屉展开时
+       * 的语义正是「收起」。
+       */
       function closeDrawer() {
         if (clickStable('data-sidebar-toggle')) return true;
         try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
@@ -1457,17 +1446,10 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         try { layoutApi()?.closeRightbar(); return true; } catch { return false; }
       }
 
-      // **必须挂在捕获阶段（第三个参数 true）**。
-      // 挂在冒泡阶段时，DSH 里那些自己调 stopPropagation 的组件（输入框、消息流、
-      // 代码块、壁纸层）会把触摸事件吃掉，事件根本传不到 window ——
-      // 真机上的表现正是「有组件的地方滑不动，只有空白处偶尔能滑」。
-      // 捕获阶段先拿到事件，我们只做「记录起手点」，不阻止传播，
-      // 所以不影响组件自己的点击/滚动。
       try {
-        window.addEventListener('touchstart', onTouchStart, { passive: true, capture: true });
-        window.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
-        window.addEventListener('touchend', onTouchEnd, { passive: true, capture: true });
-        window.addEventListener('touchcancel', () => { swipe = null; }, { passive: true, capture: true });
+        window.addEventListener('touchstart', onTouchStart, { passive: true });
+        window.addEventListener('touchmove', onTouchMove, { passive: false });
+        window.addEventListener('touchend', onTouchEnd, { passive: true });
       } catch { /* 没有触摸 API 就算了 */ }
 
       // ---------------------------------------------------------------- 会话行：点一条就把抽屉收掉
@@ -1652,9 +1634,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           try { off(); } catch { /* 忽略 */ }
         }
         try {
-          window.removeEventListener('touchstart', onTouchStart, { capture: true });
-          window.removeEventListener('touchmove', onTouchMove, { capture: true });
-          window.removeEventListener('touchend', onTouchEnd, { capture: true });
+          window.removeEventListener('touchstart', onTouchStart);
+          window.removeEventListener('touchmove', onTouchMove);
+          window.removeEventListener('touchend', onTouchEnd);
         } catch { /* 忽略 */ }
         // 会话行那两下：监听要收回；万一停用时正卡在「按住焦点」的窗口里，输入框也要放开
         try {
