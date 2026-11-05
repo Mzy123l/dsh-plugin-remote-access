@@ -561,7 +561,6 @@ window.__ModuleLoader__.load({
     //   4. 没有 DOM 的环境（tools/test-client.mjs 的桩子）必须安静地什么都不做。
     const LAYOUT_PHONE_WIDTH = 720;
     const LAYOUT_STYLE_ID = 'dsh-remote-access/layout.css';
-    const SCRIM_ID = 'dsh-ra-scrim';
     /**
      * 输入法刚结束后的这段窗口里，回车仍然可能是在「确认候选词」—— 这段时间内不插手。
      * 与官方自己的做法同一口径（它用 10ms），这里放宽一点：多吞一个换行没代价，多吃一个候选词确认很恼人。
@@ -933,18 +932,19 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
       let rightOpenedAt = 0;
       let mutualBusy = false;
 
-      /** 手机上两个浮层互斥：谁后开谁留下 */
+      /** 手机上两个浮层互斥：谁后开谁留下。收的方式走官方 layout 服务，不认语言。 */
       function enforceOverlayExclusive(drawer) {
         if (mutualBusy) return;
         const rightOpen = rightPanelOpen();
         if (!drawer || !rightOpen) return;
         const closeDrawer = drawerOpenedAt < rightOpenedAt;
+        const layout = layoutApi();
+        if (!layout) return;
         mutualBusy = true;
-        const ok = closeDrawer ? clickLabel(t('收起侧边栏')) : clickLabel(t('收起右侧边栏'));
-        if (ok) {
-          const what = closeDrawer ? t('左抽屉') : t('右栏');
-          try { console.info((LANG === 'en' ? `[remote-access] Only one overlay at a time on the phone: closing the ${what} that opened first` : `[remote-access] 手机上两个浮层互斥：收掉先开的${what}`)); } catch { /* 忽略 */ }
-        }
+        try {
+          if (closeDrawer) layout.toggleSidebar();
+          else layout.closeRightbar();
+        } catch { /* 忽略 */ }
         window.setTimeout(() => { mutualBusy = false; }, 300);
       }
 
@@ -969,27 +969,21 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         } catch { /* 忽略：这只是兜底，失败也不该影响布局 */ }
       }
 
-      /** 把「画成什么样」这件事交给 CSS：这里只负责打标记与开关 data-ra-drawer */
+      /**
+       * 把「画成什么样」这件事交给 CSS：这里只负责给官方元素打标记。
+       *
+       * **抽屉状态不再由我们维护**：官方自己用 frame 上的 data-sidebar-drawer /
+       * data-sidebar-collapsed 表达开合，遮罩也是它自己画的。我们原先那套
+       * 「data-ra-drawer + 自建 #dsh-ra-scrim」已全部删除 —— 自建遮罩会吃掉手势，
+       * 而且它只会去点左侧栏的收起按钮，右栏开着时向右滑就收不起来（真机 bug 之一）。
+       */
       function syncDom() {
         if (stopped) return;
         const phone = document.documentElement.getAttribute('data-ra-layout') === 'phone';
-        if (!phone) {
-          document.documentElement.removeAttribute('data-ra-drawer');
-          // 退出手机布局时把借来的玻璃属性还回去，别把本机的原生侧栏观感改了
-          try { /* 不再碰这个属性，见下方说明 */ } catch { /* 忽略 */ }
-          const scrimOff = document.getElementById(SCRIM_ID);
-          if (scrimOff) scrimOff.removeAttribute('data-open');
-          return;
-        }
-        // 「左侧栏覆盖」是壁纸引擎自己的开关：它做的就是给 body 挂这个属性，让原生侧栏跟着玻璃配方走
-        // （不那么透出壁纸）。手机端直接借用它 —— 只打在**远程页面**上，所以本机观感不受影响；
-        // 没装壁纸插件时这行什么也不做，上面 CSS 里那份实底兜底仍然生效。
-        // 手机上把壁纸引擎的「侧栏液态玻璃」总开关**摘掉**（只摘属性、不动任何元素样式）。
-        // 那个开关的语义是「开了才透明」（插件 settings-schema 原话：关闭后侧栏恢复原生外观，不透明/不模糊），
-        // 而展开后的工作区抽屉在手机上整块盖在正文上，透明会让两层文字糊在一起。
-        // 为什么不用 background 兜底：给 [data-ra-sidebar] 加 !important 实底正是「左侧栏整条不绘制」的原因（已删）。
-        // 本机不受影响 —— 这段只在远程页面跑；插件若在别处又设回来，syncDom 下一次会再摘掉。
-        try { document.body.removeAttribute('data-we-sidebar-glass'); } catch { /* 忽略 */ }
+        if (!phone) return;
+        // **不再摘壁纸引擎的 data-we-sidebar-glass**：那是 1.5.0 为了让自建抽屉不透明才做的，
+        // 会干扰壁纸引擎自身的状态机（真机上表现为整页被铺成主题色、壁纸消失）。
+        // 现在抽屉交给官方，观感交给壁纸引擎，这里一个属性都不碰。
         const frame = document.querySelector('[data-slot="root"] > *');
         if (!frame) return;
         frame.setAttribute('data-ra-frame', '');
@@ -1002,13 +996,11 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           const column = columnOf(frame, slot);
           if (column) column.setAttribute(`data-ra-${attr}`, '');
         }
-        // 这两项一度被我停用（当时误判它们是「整页不绘制」的元凶）。真正的原因是那条 background 实底（已删除），
-        // 而且 tagSettings() 已经收紧（先清旧标记 + 只允许在 shell.overlay 内查找、不许爬进 frame），
-        // 所以恢复：设置页在手机上是上下两段可滚动；右栏那两个没意义的控件（分栏 / 退出全屏）在手机上藏掉。
+        // 设置页在手机上是上下两段可滚动；右栏那两个没意义的控件（分栏 / 退出全屏）在手机上藏掉。
         tagSettings();
         hideUselessRightControls();
-        // 侧栏展开（没有 data-sidebar-collapsed）→ 抽屉模式：正文占满宽度，侧栏浮在上面
-        const drawer = !frame.hasAttribute('data-sidebar-collapsed');
+        // 抽屉开合只用于「两个整屏浮层互斥」的计时，状态本身读官方的属性
+        const drawer = drawerOpen();
         const drawerChanged = drawer !== wasDrawer;
         if (drawerChanged) {
           wasDrawer = drawer;
@@ -1020,63 +1012,13 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
           wasRightOpen = rightOpen;
           rightOpenedAt = rightOpen ? Date.now() : 0;
         }
-        if (drawer) document.documentElement.setAttribute('data-ra-drawer', '');
-        else document.documentElement.removeAttribute('data-ra-drawer');
-        // 零宽收起态：标记 + 把官方那枚展开按钮打上悬浮标记（见 PHONE_CSS 里 data-ra-rail 那一段）
-        syncCollapsedRail(frame, drawer);
-        const scrim = ensureScrim();
-        if (drawer) scrim.setAttribute('data-open', '');
-        else scrim.removeAttribute('data-open');
-        // 互斥只在增强模式有意义：那时侧栏是「脱离网格的定浮层」，会和右栏抢同一块屏；
-        // 保守模式下侧栏老老实实占着自己那一列，不该去替用户点关任何面板。
-        if (document.documentElement.hasAttribute('data-ra-strong')) enforceOverlayExclusive(drawer);
-        // 抽屉/右栏状态变化时也踢一次：这两个整屏浮层的出现/消失最容易留下旧帧
+        // 两个浮层互斥：手机上它们都盖满整屏，同时开着只会互相盖。走官方 layout 服务收掉先开的那个。
+        if (drawer && rightOpen) enforceOverlayExclusive(drawer);
+        // 抽屉/右栏状态变化时踢一次重绘：这两个整屏浮层的出现/消失最容易留下旧帧
         if (drawerChanged || rightChanged) nudgeRepaint();
       }
       let wasDrawer = false;
       let wasRightOpen = false;
-
-      /**
-       * 零宽收起态（phoneCollapsedRail=hide）：侧栏整条收成 0 宽，只在左上角留一枚**官方原生**的展开按钮。
-       *
-       * 为什么坚持点官方按钮、而不是自绘一个：行为永远与「用户自己点」一致，
-       * 也不会因为我们猜错内部状态而让界面进入自相矛盾的形态（与 clickLabel 同一条理由）。
-       * 那枚按钮在收起态本来就存在，aria-label 是官方的「打开侧边栏」（英文界面下是 Open sidebar），
-       * 这里只给它打个标记，由 CSS 接管定位；**绝不新建按钮**。
-       *
-       * 副作用只在本档发生：railMode 不为 'hide' 时把标记全部清掉，回到 1.5.0 的 48px 图标栏。
-       */
-      function syncCollapsedRail(frame, drawer) {
-        const html = document.documentElement;
-        const hide = drawer === false && railMode === 'hide';
-        if (hide) html.setAttribute('data-ra-rail', 'hide');
-        else html.removeAttribute('data-ra-rail');
-        const sidebar = document.querySelector('[data-ra-sidebar]');
-        const want = hide && sidebar ? findExpandToggle(sidebar) : null;
-        for (const btn of document.querySelectorAll('[data-ra-rail-float]')) {
-          if (btn !== want) btn.removeAttribute('data-ra-rail-float');
-        }
-        if (want && !want.hasAttribute('data-ra-rail-float')) want.setAttribute('data-ra-rail-float', '');
-      }
-
-      /**
-       * 在侧栏里找那枚官方的「打开侧边栏」按钮。
-       *
-       * 两种语言各认一个 aria-label（官方的 toggle 文案就这两个）；
-       * 兜底再用「切换按钮的图标结构」判一次 —— 但只在侧栏内找，所以不会误伤正文里的按钮。
-       */
-      function findExpandToggle(sidebar) {
-        const byLabel = [...sidebar.querySelectorAll('button')].find((b) => {
-          const label = (b.getAttribute('aria-label') ?? '').trim();
-          return label === t('打开侧边栏') || label === 'Open sidebar' || label === '打开侧边栏';
-        });
-        if (byLabel) return byLabel;
-        // 兜底：收起态的官方 toggle 里带一个 railMark（鲸鱼图标）或 panelIcon 面板图标
-        return [...sidebar.querySelectorAll('button')].find(
-          (b) => b.querySelector('[class*="_railMark"]') !== null || b.querySelector('[class*="_panelIcon"]') !== null,
-        ) ?? null;
-      }
-
 
       function scheduleSync() {
         if (stopped || raScheduled) return;
@@ -1099,7 +1041,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const skip = layout === 'phone' ? raSkip() : [];
         const cut = layout === 'phone' ? raCut() : [];
         const suffix = `${skip.length ? `|${skip.join(',')}` : ''}${cut.length ? `|cut:${cut.join(',')}` : ''}`;
-        const signature = `${strong ? `${layout}:strong` : layout}${suffix}|rail:${railMode}`;
+        const signature = `${strong ? `${layout}:strong` : layout}${suffix}`;
         if (signature === applied) {
           syncDom();
           return;
@@ -1388,10 +1330,9 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
 
       function onTouchStart(e) {
         if (!phoneNow() || e.touches.length !== 1) { swipe = null; return; }
-        // 抽屉开着时，整层都是我们自己的侧栏列表（工作区/会话那一串）：不再问「这一划归谁」——
+        // 抽屉开着时，整层都是侧栏列表（工作区/会话那一串）：不再问「这一划归谁」——
         // 否则列表里任何一个横向略有溢出的容器都会把「滑回主页」整个吃掉（真机上就是这么发生的）。
-        const drawerOpen = document.documentElement.hasAttribute('data-ra-drawer');
-        if (!drawerOpen && horizontalOwner(e.target)) { swipe = null; return; }
+        if (!drawerOpen() && horizontalOwner(e.target)) { swipe = null; return; }
         const point = e.touches[0];
         const width = window.innerWidth || 0;
         swipe = {
@@ -1419,6 +1360,15 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         if (e.cancelable) e.preventDefault(); // 已确认横向：别让浏览器同时翻页/前进后退
       }
 
+      /**
+       * 手势落点。**全部走官方 layout 服务，不再按 aria-label 点按钮。**
+       *
+       * 1.5.0 那套 `clickLabel('收起右侧边栏')` 有两个真机 bug，这次一并修掉：
+       *   · 右栏展开时在空白处向右滑收不起来 —— 英文界面下找不到中文 aria-label 的按钮，
+       *     静默失败；而且当时页面上还盖着自建遮罩，手势根本到不了这里。
+       *     现在直接 `layout.closeRightbar()`，不认语言、也不依赖任何按钮存在。
+       *   · 正文里有横向滚动块时误触发 —— 由 `horizontalOwner()` 在 onTouchStart 挡掉。
+       */
       function onTouchEnd(e) {
         const started = swipe;
         swipe = null;
@@ -1429,18 +1379,48 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         const fromEdge = started.fromLeft || started.fromRight;
         const need = fromEdge ? MIN_SWIPE : MIN_SWIPE_MID;
         if (Math.abs(dx) < need) return;
-        const drawer = document.documentElement.hasAttribute('data-ra-drawer');
+        const layout = layoutApi();
+        if (!layout) return; // 拿不到官方布局服务：宁可不动，也不要乱点按钮
+        const drawer = drawerOpen();
         const rightOpen = rightPanelOpen();
         if (dx > 0) {
-          // 向右滑：抽屉开着时先**收起抽屉**（这就是「回到主页」），其次收右栏，最后才是打开抽屉
-          if (drawer) { clickLabel(t('收起侧边栏')); return; }
-          if (rightOpen) { clickLabel(t('收起右侧边栏')); return; }
-          clickLabel(t('打开侧边栏'));
+          // 向右滑：抽屉开着 → 收抽屉（这就是「回到主页」）；否则右栏开着 → 收右栏；最后才是开抽屉
+          if (drawer) { try { layout.toggleSidebar(); } catch { /* 忽略 */ } return; }
+          if (rightOpen) { closeRightbar(); return; }
+          try { layout.toggleSidebar(); } catch { /* 忽略 */ }
           return;
         }
         // 向左滑：收起抽屉优先，否则打开右栏
-        if (drawer) { clickLabel(t('收起侧边栏')); return; }
-        if (!rightOpen) clickLabel(t('打开右侧边栏'));
+        if (drawer) { try { layout.toggleSidebar(); } catch { /* 忽略 */ } return; }
+        if (!rightOpen) openRightbar();
+      }
+
+      /**
+       * 打开右栏。官方的 `openRightbar(track, fullscreen)` 是**右栏占用方**上报用的，
+       * 不是「用户点了展开」的入口。手机上真正该做的是点它自己那枚展开按钮 ——
+       * 那是官方在 < 1024px 提供的唯一入口，内部会算好 track/fullscreen 再调 openRightbar。
+       * 这枚按钮有稳定属性 `data-sidebar-right-expand`，不认语言。
+       */
+      function openRightbar() {
+        const btn = document.querySelector('[data-sidebar-right-expand]');
+        if (btn && isClickable(btn)) { btn.click(); return true; }
+        return false;
+      }
+
+      /**
+       * 收起右栏。**必须点官方那枚 toggle，不能直接调 layout.closeRightbar()。**
+       *
+       * 原因（看官方源码就知道）：`layout.closeRightbar()` 只是把 store 里的
+       * `rightbarShown` 置 false，那是「右栏占用方上报状态」的方向；真正把面板收起来
+       * 是 ui-sidebar-right 自己监听状态后做的。我们单方面改状态，面板不一定跟着收 ——
+       * 真机上表现为「右滑/返回键都没反应」。
+       * 那枚收起按钮带稳定属性 `data-sidebar-right-toggle`，不认语言。
+       */
+      function closeRightbar() {
+        const btn = document.querySelector('[data-sidebar-right-toggle]');
+        if (btn && isClickable(btn)) { btn.click(); return true; }
+        // 兜底：按钮找不到（面板结构变了）时才动服务，至少别让返回键完全失效
+        try { layoutApi()?.closeRightbar(); return true; } catch { return false; }
       }
 
       try {
@@ -1504,7 +1484,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
        */
       function onDocumentClick(event) {
         if (stopped || !phoneNow()) return;
-        if (!document.documentElement.hasAttribute('data-ra-drawer')) return;
+        if (!drawerOpen()) return;
         const target = event?.target;
         if (!target || typeof target.closest !== 'function') return;
         const row = target.closest('[data-row-key]');
@@ -1515,7 +1495,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         // 用户点个菜单不会连抽屉一起收掉、会话也切过去。
         if (target.closest('button')) return;
         guardComposerFocus();
-        clickLabel(t('收起侧边栏'));
+        try { layoutApi()?.toggleSidebar(); } catch { /* 忽略 */ }
       }
 
       try {
@@ -1580,7 +1560,7 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
         let count = 0;
         if (topOfficialOverlay()) count += 1;
         if (rightPanelOpen()) count += 1;
-        if (document.documentElement.hasAttribute('data-ra-drawer')) count += 1;
+        if (drawerOpen()) count += 1;
         if (activeGlobalPanel()) count += 1;
         return count;
       }
@@ -1604,8 +1584,11 @@ html[data-ra-layout="phone"] [data-slot="conversation.composer.bar"] [class*="_t
             return false;
           }
         }
-        if (rightPanelOpen()) return clickLabel(t('收起右侧边栏'));
-        if (document.documentElement.hasAttribute('data-ra-drawer')) return clickLabel(t('收起侧边栏'));
+        // 右栏与抽屉都走官方自己的按钮/服务：不认语言
+        if (rightPanelOpen()) return closeRightbar();
+        if (drawerOpen()) {
+          try { layoutApi()?.toggleSidebar(); return true; } catch { return false; }
+        }
         if (activeGlobalPanel()) return backToConversation();
         return false;
       }
