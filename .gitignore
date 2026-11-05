@@ -23,3 +23,6 @@ remote-access-url.txt
 
 # 排查用的 Edge 配置目录
 .probe-edge/
+
+# 内部交接文档，不进仓库（历史上已删过一次，见 56c867b）
+HANDOFF.md
