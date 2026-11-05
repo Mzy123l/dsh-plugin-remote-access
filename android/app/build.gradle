@@ -18,8 +18,9 @@ android {
     applicationId 'dev.dsh.remote'
     minSdk 26
     targetSdk 35
-    versionCode 16
-    versionName '1.4.1'
+    // 17：设置/刷新两枚按钮改到对话框右侧上方（覆盖安装要求 versionCode 比已装的大）
+    versionCode 17
+    versionName '1.6.0'
   }
 
   if (keystoreFile.exists()) {

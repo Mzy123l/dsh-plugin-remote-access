@@ -479,9 +479,8 @@ public class MainActivity extends Activity {
     loadHint.setVisibility(View.GONE);
     webHost.addView(loadHint, hintParams);
 
-    // 两个小图标：右上角一枚半透明胶囊，放着会自己淡下去，点一下回来
-    // 两枚小图标：竖着贴在**左侧图标栏下方的空白处**（那一列图标下面是空的；顺手也不挡顶部工具栏、
-    // 右栏把手与输入区）。放着会自己淡下去，点一下回来。
+    // 两个小图标：**贴在对话框（输入框）右侧的上方**，竖排。
+    // 放着会自己淡下去，点一下回来。
     LinearLayout pill = new LinearLayout(this);
     pill.setOrientation(LinearLayout.VERTICAL);
     pill.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -500,10 +499,11 @@ public class MainActivity extends Activity {
 
     FrameLayout.LayoutParams pillParams = new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    // 左抽屉收起时是一条 56px 宽的图标栏；6dp 让 34dp 的图标略靠左，52dp 把它抬到列表上方
-    pillParams.gravity = Gravity.BOTTOM | Gravity.START;
-    pillParams.leftMargin = dp(6);
-    pillParams.bottomMargin = dp(52);
+    // 右下角：rightMargin 让它离开屏幕右缘，bottomMargin 把它抬到输入框右上方的空白处。
+    // 240dp 是「输入框卡片上沿之上」的位置（卡片本身约 200dp 高，再加上工具条与底部留白）。
+    pillParams.gravity = Gravity.BOTTOM | Gravity.END;
+    pillParams.rightMargin = dp(10);
+    pillParams.bottomMargin = dp(240);
     webHost.addView(pill, pillParams);
 
     pill.postDelayed(() -> pill.animate().alpha(0.3f).setDuration(400), 3500);
