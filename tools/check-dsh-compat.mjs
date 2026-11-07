@@ -6,7 +6,10 @@
 // 用**真**校验器跑一遍，而不是在测试里另写一份近似实现。
 //
 // 用法：node tools/check-dsh-compat.mjs
-//       DSH_HARNESS="E:\Applications\DeepSeek Harness" node tools/check-dsh-compat.mjs
+//       DSH_HARNESS="<DSH 安装目录>" node tools/check-dsh-compat.mjs
+//
+// 只有「解包安装」（安装目录下有 resources/app/dsh）才能跑；app.asar 布局下
+// 无法 import 内部模块，脚本会打印 SKIP 并以 0 退出。
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -19,11 +22,9 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'ut
 
 /** 找解包后的 DSH 运行时（app.asar 内部无法 import，遇到就 SKIP）。 */
 function findRuntime() {
-  const harnesses = [
-    process.env.DSH_HARNESS,
-    'E:\\Applications\\DeepSeek Harness',
-    'C:\\Program Files\\DeepSeek Harness',
-  ].filter(Boolean);
+  // 只认环境变量：DSH 的安装位置因机器而异，写死路径对别人没有意义。
+  // 未设置或指向 asar 布局时下面的 existsSync 会失败，脚本按 SKIP 处理。
+  const harnesses = [process.env.DSH_HARNESS].filter(Boolean);
   for (const harness of harnesses) {
     const appDsh = path.join(harness, 'resources', 'app', 'dsh');
     if (fs.existsSync(path.join(appDsh, 'node_modules', '@deepseek-ai', 'dsh-app-boot'))) return appDsh;
