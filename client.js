@@ -1042,7 +1042,7 @@ window.__ModuleLoader__.load({
      * 表现成「这个功能根本不存在」。所以设置页底部把「本页客户端版本」与
      * 「电脑那边的通知接口在不在」一起写出来 —— 这两句话能省掉一整轮排查。
      */
-    const CLIENT_VERSION = '1.6.1';
+    const CLIENT_VERSION = '1.6.2';
 
     // 表单字段（配置只存在本用户 JSON 里；Host 用 DEFAULTS 做同样的归一化）
     //
