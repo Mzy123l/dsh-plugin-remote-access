@@ -450,7 +450,7 @@ const NO_CREDENTIAL_COPY = {
     reasonToken: '这次带的 <code>?token=…</code> 已经作废了 —— 每次启动 DSH 都会换一张新票，旧网址、别的账户留下的网址都不能再用。',
     reasonNone: '这次访问没有带凭据（没有 <code>?token=…</code>，浏览器里也没有 DSH 的登录 cookie）。',
     howAccessCode: '本实例设了「访问密码」：稍后重试一次会看到输入密码的页面。',
-    howNone: '去本机 DSH 的「设置 → 远程访问」里复制**当前**那条「远程访问网址」（带票），或在那里设一个「访问密码」，之后就能直接打开裸地址输密码。',
+    howNone: '去本机 DSH 的「设置 → 远程访问」里复制<strong>当前</strong>那条「远程访问网址」（带票），或在那里设一个「访问密码」，之后就能直接打开裸地址输密码。',
     next: '接下来这样做：',
     step2: '旧标签页里的网址别再用；用刚复制的那条打开。',
     hintPrefix: '状态文件（本机）：',
@@ -464,7 +464,7 @@ const NO_CREDENTIAL_COPY = {
     reasonToken: 'The <code>?token=…</code> in this link is no longer valid — every DSH start issues a new ticket, so old links and links from another account stop working.',
     reasonNone: 'This request carried no credential (no <code>?token=…</code>, and no DSH login cookie in this browser).',
     howAccessCode: 'This instance has an access code: retry once and the code prompt appears.',
-    howNone: 'On the computer, open Settings → Remote Access and copy the **current** remote-access link (the one with the ticket), or set an access code there so the bare address can be opened with a code.',
+    howNone: 'On the computer, open Settings → Remote Access and copy the <strong>current</strong> remote-access link (the one with the ticket), or set an access code there so the bare address can be opened with a code.',
     next: 'Next:',
     step2: 'Do not reuse the URL in an old tab; open the link you just copied.',
     hintPrefix: 'Status file (on the computer):',
@@ -474,14 +474,29 @@ const NO_CREDENTIAL_COPY = {
 };
 
 /**
- * 从 Accept-Language 选页面语言：只看首选语言，以 en 开头用英文，其余（含缺省）用中文。
+ * 从 Accept-Language 选页面语言：按 q 值挑**优先级最高**的那一个，以 en 开头用英文，其余用中文。
+ *
+ * 不能只看第一个 tag：`en;q=0.8, zh-CN;q=0.9` 里用户其实更想要中文，而 `en;q=0` 是
+ * **明确拒绝**英文（RFC 7231 §5.3.5），这两种都得按 q 值判，否则会把中文用户送进英文页。
+ * q 值相同时保持请求里原有的顺序（RFC 允许这种近似），没有 q 参数按 1 处理。
+ *
  * @param {import('node:http').IncomingMessage} req 当前请求
  * @returns {'zh'|'en'} 页面语言
  */
 function requestLang(req) {
   const raw = String((req && req.headers && req.headers['accept-language']) || '');
-  const first = raw.split(',')[0].trim().toLowerCase();
-  return first.startsWith('en') ? 'en' : 'zh';
+  const preferred = raw
+    .split(',')
+    .map((part, index) => {
+      const [tag = '', ...params] = part.trim().split(';');
+      const qText = params.map((p) => p.trim()).find((p) => /^q\s*=/i.test(p));
+      const q = qText ? Number(qText.split('=')[1]) : 1;
+      return { tag: tag.trim().toLowerCase(), q: Number.isFinite(q) ? q : 0, index };
+    })
+    // q=0 表示「明确不要」，直接排除；空 tag（"不完整"）也丢掉
+    .filter((row) => row.tag && row.q > 0)
+    .sort((a, b) => b.q - a.q || a.index - b.index);
+  return preferred[0]?.tag.startsWith('en') ? 'en' : 'zh';
 }
 
 /** 极简解锁页：只在手机上调一次，够用就好，不依赖任何外部资源 */

@@ -597,6 +597,115 @@ check(
 );
 dispose11();
 
+// ---- 场景 10b：宿主渲染的两页按 Accept-Language 出中/英文 ----
+//
+// 这两页在 SPA 之前由 Node 宿主直接吐，客户的 i18n 层到不了它们，所以只能看请求头。
+// 断言三件事：① 按 q 值挑语言（不是只看第一个 tag）；② 明确拒绝（q=0）不算同意；
+// ③ 中文行为逐字不变（老用户不能因为这次改动看到任何差别）。
+const langFile = path.join(os.tmpdir(), `ra-lang-${Date.now()}.txt`);
+const disposeLang = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: langFile,
+  accessCode: '864209',
+});
+await sleep(400);
+const langPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(langFile, 'utf8'))?.[1] ?? 0);
+
+/** 解锁页在某个 Accept-Language 下用的语言（读 <html lang>） */
+const pageLangOf = async (port, acceptLanguage) => {
+  const nav = await call(port, {
+    headers: { accept: 'text/html', ...(acceptLanguage ? { 'accept-language': acceptLanguage } : {}) },
+  });
+  return /<html lang="([^"]+)"/.exec(nav.body)?.[1] ?? '';
+};
+
+const langCases = [
+  ['en-US,en;q=0.9', 'en', '英文浏览器 → 英文'],
+  ['en', 'en', '只有 en'],
+  ['EN-gb', 'en', '大小写不敏感'],
+  ['zh-CN,zh;q=0.9,en;q=0.8', 'zh-CN', '中文优先，英文只是备选'],
+  ['en;q=0.8, zh-CN;q=0.9', 'zh-CN', '英文排前面但 q 值更低 → 仍是中文'],
+  ['ja-JP,ja;q=0.9', 'zh-CN', '其他语言回落中文'],
+  ['fr-FR,en;q=0.5', 'zh-CN', '法语优先、英文次之 → 中文（只认 en）'],
+  ['', 'zh-CN', '没有 Accept-Language → 中文'],
+];
+for (const [al, want, why] of langCases) {
+  const got = await pageLangOf(langPort, al);
+  check(`页面语言：${why}`, got === want, `AL=${JSON.stringify(al)} → lang=${got}`);
+}
+// q=0 是「明确不要」（RFC 7231 §5.3.5）——不能把拒绝英文的用户送进英文页
+const refusedEn = await pageLangOf(langPort, 'en;q=0');
+check('页面语言：q=0 表示明确拒绝，不算同意', refusedEn === 'zh-CN', `en;q=0 → lang=${refusedEn}`);
+
+// 空密码提示也跟着语言走
+const emptyEn = await call(langPort, {
+  method: 'POST',
+  path: '/__remote_access__/unlock',
+  headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'text/html', 'accept-language': 'en-US' },
+  body: 'code=',
+});
+check(
+  '解锁页：空密码提示是英文',
+  emptyEn.body.includes('Enter the access code.') && !emptyEn.body.includes('密码不能为空'),
+  (emptyEn.body.match(/<div class="err">([^<]*)<\/div>/) ?? ['(无)'])[0],
+);
+const emptyZh = await unlockO(langPort, 'code=');
+check('解锁页：空密码提示仍是中文（老行为不变）', emptyZh.body.includes('密码不能为空'));
+
+// 解锁页的按钮文案：英文页是 Open，中文页仍是「进入」
+const enPage = await call(langPort, { headers: { accept: 'text/html', 'accept-language': 'en-US' } });
+check(
+  '解锁页：英文页标题与按钮已本地化',
+  enPage.body.includes('<title>DSH Remote Access</title>') && enPage.body.includes('>Open</button>'),
+  enPage.body.slice(0, 80),
+);
+const zhPage = await call(langPort, { headers: { accept: 'text/html', 'accept-language': 'zh-CN' } });
+check(
+  '解锁页：中文页标题与按钮逐字不变',
+  zhPage.body.includes('<title>DSH 远程访问</title>') && zhPage.body.includes('>进入</button>'),
+  zhPage.body.slice(0, 80),
+);
+disposeLang();
+
+// ---- 场景 10c：「没凭据」页也按 Accept-Language 出英文，且不再露出 markdown 星号 ----
+const ncLangFile = path.join(os.tmpdir(), `ra-nclang-${Date.now()}.txt`);
+const disposeNc = apply(makeCtx(), {
+  allowCidrs: ['127.0.0.0/8'],
+  listen: ['127.0.0.1'],
+  port: 0,
+  upstream: `http://127.0.0.1:${authPort}`,
+  urlFile: ncLangFile,
+  // 刻意不设 accessCode：走「没凭据」这条路
+});
+await sleep(400);
+const ncPort = Number(/远程访问网址: http:\/\/127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(ncLangFile, 'utf8'))?.[1] ?? 0);
+
+const ncEn = await call(ncPort, { path: '/?token=STALE', headers: { accept: 'text/html', 'accept-language': 'en-US' } });
+check(
+  '没凭据页：英文',
+  ncEn.body.includes('<html lang="en"') && ncEn.body.includes('This request could not be verified') && ncEn.body.includes('Try again'),
+  ncEn.body.slice(0, 80),
+);
+check(
+  '没凭据页：英文里不再出现 markdown 星号',
+  !ncEn.body.includes('**'),
+  (ncEn.body.match(/\*\*[^*]*\*\*/) ?? ['(无)'])[0],
+);
+check('没凭据页：英文强调用的是 <strong>', ncEn.body.includes('<strong>current</strong>'));
+
+const ncZh = await call(ncPort, { path: '/?token=STALE', headers: { accept: 'text/html', 'accept-language': 'zh-CN' } });
+check(
+  '没凭据页：中文逐字不变（标题与重试链接）',
+  ncZh.body.includes('<html lang="zh-CN"') && ncZh.body.includes('这次没能通过校验') && ncZh.body.includes('重试一次'),
+  ncZh.body.slice(0, 80),
+);
+check('没凭据页：中文里也不再出现 markdown 星号', !ncZh.body.includes('**'), (ncZh.body.match(/\*\*[^*]*\*\*/) ?? ['(无)'])[0]);
+check('没凭据页：中文强调用的是 <strong>', ncZh.body.includes('<strong>当前</strong>'));
+disposeNc();
+
 // ---- 场景 11：上游「慢」不再被默认 5 秒空闲超时掐断（视频/大文件/壁纸都栽在这上面）----
 //
 // 这个用例故意要 5 秒多：Node ≥19 的 http.globalAgent 自带 { keepAlive: true, timeout: 5000 }，
